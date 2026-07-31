@@ -136,6 +136,52 @@ identity, directory visibility, and any apps under `apps/` with a
 is a separate, lower-level demo of `@qu/services` directly (documents,
 collections, file uploads), independent of the shell.
 
+### Configuring the relay
+
+Three layers, each overriding the one before (`packages/relay/src/server.js`):
+QuRelay's own defaults -> `relay.config.json` in the working directory, if
+present (copy `relay.config.example.json`) -> environment variables:
+
+| Variable | Overrides | Example |
+|---|---|---|
+| `QU_PORT` | `port` | `8080` |
+| `QU_STORE_DIR` | `storeDir` | `/data/store` |
+| `QU_BLOB_DIR` | `blobDir` | `/data/blob` |
+| `QU_APPS_DIR` | `appsDir` | `/app/apps` |
+| `QU_IDENTITY_MNEMONIC` | `identityMnemonic` | `"word1 word2 ... word24"` |
+| `QU_SERVE_SHELL` | `serveShell` | `0` disables the shell at `/` |
+| `QU_REMOTE_APPS_JSON` | `remoteApps` | `'[{"manifestUrl":"https://...","trustedPublisherPubs":["..."]}]'` |
+
+Env vars exist specifically so a container/orchestrator never needs to bake
+or bind-mount a config file just to set a port or data directory - see
+Docker below.
+
+## Docker
+
+```bash
+docker compose up --build
+```
+
+Builds the image (multi-stage: installs + `npm run build` in a builder
+stage, then `npm prune --omit=dev` before copying into a fresh runtime
+stage - `dist/` is gitignored build output, so the image has to produce it
+itself, same as any other fresh checkout) and starts one container serving
+the whole platform on `:8080`, with a named volume (`quniverse-data`) for
+`relay-data/` so identity and stored data survive a container restart.
+Configure via environment variables in `docker-compose.yml` (see the table
+above) - `QU_IDENTITY_MNEMONIC` is worth pinning explicitly for a
+production deployment rather than relying on the auto-generated one, so the
+relay's own identity is documented/recoverable independent of the volume.
+
+Without Compose:
+
+```bash
+docker build -t quniverse-relay .
+docker run -p 8080:8080 -v quniverse-data:/data \
+  -e QU_STORE_DIR=/data/store -e QU_BLOB_DIR=/data/blob \
+  quniverse-relay
+```
+
 ## Packages
 
 | Package | What it is |
