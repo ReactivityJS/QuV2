@@ -1,0 +1,13 @@
+{
+  "storeDir": "./relay-data/store",
+  "blobDir": "./relay-data/blob",
+  "appsDir": "./apps",
+  "port": 8080,
+  "identityMnemonic": null,
+  "remoteApps": [
+    {
+      "manifestUrl": "https://apps.example.org/forum/manifest.quapp",
+      "trustedPublisherPubs": ["<base64url Ed25519 public key of a publisher you trust>"]
+    }
+  ]
+}

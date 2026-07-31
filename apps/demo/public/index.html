@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Qu Demo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+    h1 { font-size: 1.4rem; }
+    section { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    h2 { font-size: 1rem; margin-top: 0; }
+    input[type="text"] { width: 60%; padding: 0.4rem; }
+    button { padding: 0.4rem 0.8rem; margin-left: 0.4rem; cursor: pointer; }
+    #logs { font-family: ui-monospace, monospace; font-size: 0.85rem; max-height: 260px; overflow-y: auto; background: #f7f7f7; padding: 0.5rem; border-radius: 6px; }
+    .log { padding: 0.15rem 0; border-bottom: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <h1>Qu Demo</h1>
+  <p>Built on @qu/core -&gt; @qu/foundation -&gt; @qu/engines -&gt; @qu/services. See apps/demo/src/main.js.</p>
+
+  <section>
+    <h2>Relay connection</h2>
+    <input type="text" id="relayUrl" value="ws://localhost:8080" />
+    <button id="btnConnect">Connect</button>
+  </section>
+
+  <section>
+    <h2>Notes (DocumentService + CollectionService)</h2>
+    <input type="text" id="noteText" placeholder="Note text" />
+    <button id="btnAddNote">Add note</button>
+    <button id="btnListNotes">List notes</button>
+  </section>
+
+  <section>
+    <h2>Files (AssetService)</h2>
+    <input type="file" id="fileInput" />
+    <button id="btnUpload">Upload</button>
+    <br /><br />
+    <input type="text" id="assetIdInput" placeholder="Asset id (the filename you uploaded)" />
+    <button id="btnDownload">Download</button>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <div id="logs"></div>
+  </section>
+
+  <script type="module" src="../dist/bundle.js"></script>
+</body>
+</html>

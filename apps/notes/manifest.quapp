@@ -1,0 +1,7 @@
+{
+  "name": "notes",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "requires": ["document-service", "collection-service"]
+}

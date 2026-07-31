@@ -1,0 +1,23 @@
+{
+  "name": "quv2",
+  "version": "2.0.0",
+  "private": true,
+  "description": "QuV2 monorepo - Qu Core, Foundation, Engines, Services, Relay and Apps",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "node scripts/build-all.mjs",
+    "test:smoke": "node scripts/smoke-test.mjs",
+    "relay": "node packages/relay/src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "license": "MIT"
+}

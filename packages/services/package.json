@@ -1,0 +1,16 @@
+{
+  "name": "@qu/services",
+  "version": "2.0.0",
+  "description": "The Entity API - DocumentService, CollectionService, AssetService, ActorService. This is the layer apps actually call: it hides Qu paths and QuBit envelopes behind plain async methods returning plain values.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@qu/core": "^2.0.0",
+    "@qu/engines": "^2.0.0",
+    "@qu/identity": "^2.0.0"
+  },
+  "license": "MIT"
+}

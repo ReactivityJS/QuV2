@@ -1,0 +1,25 @@
+{
+  "name": "@qu/relay",
+  "version": "2.0.0",
+  "description": "A Node.js Qu peer: persists to disk, syncs with other peers over WebSocket, and boots/serves Engines, Services and Apps via @qu/loader.",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "qu-relay": "./src/server.js"
+  },
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@qu/core": "^2.0.0",
+    "@qu/runtime": "^2.0.0",
+    "@qu/foundation": "^2.0.0",
+    "@qu/loader": "^2.0.0",
+    "@qu/identity": "^2.0.0",
+    "@qu/sync": "^2.0.0",
+    "@qu/engines": "^2.0.0",
+    "@qu/services": "^2.0.0",
+    "ws": "^8.18.0"
+  },
+  "license": "MIT"
+}

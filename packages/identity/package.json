@@ -1,0 +1,15 @@
+{
+  "name": "@qu/identity",
+  "version": "2.0.0",
+  "description": "Identity Engine: BIP-39/SLIP-10 key derivation, main/space (pseudonymous) identities, and cryptographic attestations linking them.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@qu/core": "^2.0.0",
+    "@scure/bip39": "^2.2.0"
+  },
+  "license": "MIT"
+}

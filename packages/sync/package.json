@@ -1,0 +1,15 @@
+{
+  "name": "@qu/sync",
+  "version": "2.0.0",
+  "description": "Peer-to-peer replication: subscribe to paths, get notified when peers write, request/response fetch for data you don't have yet.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./transport": "./src/transport.js"
+  },
+  "dependencies": {
+    "@qu/core": "^2.0.0"
+  },
+  "license": "MIT"
+}

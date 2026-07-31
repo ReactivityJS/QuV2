@@ -1,0 +1,17 @@
+{
+  "name": "@qu/engines",
+  "version": "2.0.0",
+  "description": "Behavioural Engines that plug into QuStore's put/get pipeline: DocumentEngine, CollectionEngine, AssetEngine. Engines implement HOW something behaves; @qu/services expose the resulting data as a clean API.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./document": "./src/document-engine.js",
+    "./collection": "./src/collection-engine.js",
+    "./asset": "./src/asset-engine.js"
+  },
+  "dependencies": {
+    "@qu/core": "^2.0.0"
+  },
+  "license": "MIT"
+}

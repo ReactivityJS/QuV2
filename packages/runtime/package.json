@@ -1,0 +1,16 @@
+{
+  "name": "@qu/runtime",
+  "version": "2.0.0",
+  "description": "Default storage adapters (Memory, IndexedDB) and a QuRuntime bootstrap that wires a QuCore with sensible default mounts.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./memory": "./src/memory.js",
+    "./indexeddb": "./src/indexeddb.js"
+  },
+  "dependencies": {
+    "@qu/core": "^2.0.0"
+  },
+  "license": "MIT"
+}

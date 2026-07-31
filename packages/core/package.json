@@ -1,0 +1,17 @@
+{
+  "name": "@qu/core",
+  "version": "2.0.0",
+  "description": "Qu Core - the minimal, storage-agnostic kernel: QuBit, QuStore, QuMount, QuCrypto, QuEvents.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./qubit": "./src/qubit.js",
+    "./crypto": "./src/crypto.js",
+    "./mount": "./src/mount.js",
+    "./store": "./src/store.js",
+    "./events": "./src/events.js",
+    "./adapters/volatile": "./src/adapters/volatile.js"
+  },
+  "license": "MIT"
+}

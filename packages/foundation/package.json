@@ -1,0 +1,17 @@
+{
+  "name": "@qu/foundation",
+  "version": "2.0.0",
+  "description": "Reusable technical building blocks shared by every Engine/Service/App: a capability+plugin Registry, a dependency resolver, and the manifest schema. Not domain logic - see @qu/engines and @qu/services for that.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./registry": "./src/registry.js",
+    "./dependency-resolver": "./src/dependency-resolver.js",
+    "./manifest": "./src/manifest.js"
+  },
+  "dependencies": {
+    "@qu/core": "^2.0.0"
+  },
+  "license": "MIT"
+}
