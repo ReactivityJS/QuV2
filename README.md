@@ -182,6 +182,16 @@ docker run -p 8080:8080 -v quniverse-data:/data \
   quniverse-relay
 ```
 
+The container runs as a non-root `quniverse` user, but starts as root just
+long enough for `docker-entrypoint.sh` to `chown` `$QU_STORE_DIR`/
+`$QU_BLOB_DIR` to that user before dropping privileges (via `su-exec`) and
+launching the relay - a fresh *or already-existing* named volume is root-owned
+by default, and only the entrypoint running on every start (not a one-time
+image setting) fixes that reliably. If you still see `EACCES: permission
+denied, mkdir '/data/...'`, you're most likely running an image built
+before this entrypoint existed - `docker compose build --no-cache` (or
+`docker build --no-cache`) and restart.
+
 ## Packages
 
 | Package | What it is |

@@ -21,10 +21,15 @@ FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
-RUN addgroup -S quniverse && adduser -S quniverse -G quniverse
-COPY --from=builder --chown=quniverse:quniverse /app .
+# su-exec: a ~15KB `sudo`-equivalent used only by docker-entrypoint.sh to
+# drop from root to `quniverse` after fixing volume ownership - see that
+# script's own doc for why a static `USER` instruction here isn't enough.
+RUN apk add --no-cache su-exec \
+  && addgroup -S quniverse && adduser -S quniverse -G quniverse
 
-USER quniverse
+COPY --from=builder --chown=quniverse:quniverse /app .
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+
 EXPOSE 8080
 
 # Config is via environment variables (see packages/relay/src/server.js's
@@ -32,4 +37,5 @@ EXPOSE 8080
 # QU_IDENTITY_MNEMONIC/QU_SERVE_SHELL/QU_REMOTE_APPS_JSON - so a deployment
 # never needs to bake or bind-mount a relay.config.json just to set a port
 # or data directory (see docker-compose.yml).
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "packages/relay/src/server.js"]
