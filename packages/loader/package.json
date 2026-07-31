@@ -5,7 +5,8 @@
   "type": "module",
   "main": "src/index.js",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./remote": "./src/remote-loader.js"
   },
   "dependencies": {
     "@qu/core": "^2.0.0",

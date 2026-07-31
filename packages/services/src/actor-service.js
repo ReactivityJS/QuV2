@@ -17,6 +17,13 @@ export class ActorService {
     return this.identity.generateMnemonic();
   }
 
+  /** @returns {Promise<string>} This identity's own main actor public key (base64url) - "who am I". */
+  async whoAmI() {
+    const { QuCrypto } = await import('@qu/core');
+    const mainKey = await this.identity.getMainKey();
+    return QuCrypto.toBase64Url(mainKey.publicKey);
+  }
+
   /**
    * @param {string} mnemonic
    * @param {string} [passphrase]

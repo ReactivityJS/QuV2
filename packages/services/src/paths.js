@@ -20,3 +20,18 @@ export function collectionPath(spaceId, collectionId) {
 export function assetPath(spaceId, assetId) {
   return `/store/${spaceId}/assets/${assetId}`;
 }
+
+/** @param {string|number} spaceId @param {string} threadId @returns {string} */
+export function threadMetaPath(spaceId, threadId) {
+  return `/store/${spaceId}/threads/${threadId}/meta`;
+}
+
+/** @param {string|number} spaceId @param {string} threadId @param {string} messageId @returns {string} */
+export function threadMessagePath(spaceId, threadId, messageId) {
+  return `/store/${spaceId}/threads/${threadId}/msgs/${messageId}`;
+}
+
+/** @param {string} threadId @returns {string} The CollectionService collectionId used for a thread's message list. */
+export function threadMessagesCollectionId(threadId) {
+  return `thread-${threadId}`;
+}

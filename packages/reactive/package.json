@@ -1,0 +1,14 @@
+{
+  "name": "@qu/reactive",
+  "version": "2.0.0",
+  "description": "The DOM-free reactive layer: watch a Qu path for changes. The foundation @qu/ui's Qu-Components (<qu-view>, <qu-bind>, <qu-list>) build on, kept separate from any DOM code so it stays usable outside a browser (SSR, tests, non-DOM UIs).",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@qu/core": "^2.0.0"
+  },
+  "license": "MIT"
+}

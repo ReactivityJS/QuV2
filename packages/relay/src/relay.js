@@ -1,6 +1,10 @@
 /**
  * QU RELAY — a Node.js peer that persists to disk, syncs with other peers,
- * and boots/serves Engines, Services and Apps.
+ * and boots/serves Engines, Services and Apps. Also the single process
+ * that serves the QUniverse shell at `/` - the same "one server process"
+ * model the real Qu's own README documents for its shell + services, just
+ * with the shell's apps coming from manifests instead of being hard-coded
+ * into the server's own source.
  *
  * This is the concrete implementation of the "can the relay load apps
  * remotely at startup" idea from the architecture brainstorming: a relay
@@ -13,6 +17,8 @@
  * brainstorming's "keep Qu small, evolve QUniverse" conclusion argued for.
  */
 import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 
 import { QuRuntime } from '@qu/runtime';
@@ -20,12 +26,16 @@ import { Registry } from '@qu/foundation';
 import { QuLoader, discoverLocalPackages } from '@qu/loader';
 import { QuIdentityEngine } from '@qu/identity';
 import { SyncEngine } from '@qu/sync';
-import { DocumentEngine, CollectionEngine, AssetEngine } from '@qu/engines';
+import { DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine } from '@qu/engines';
 import { createServices } from '@qu/services';
 
 import { FsAdapter } from './adapters/fs-adapter.js';
 import { WebSocketServerTransport } from './transports/websocket-server-transport.js';
 import { serveApps } from './static-apps.js';
+import { buildAppsCatalog } from './apps-catalog.js';
+
+const SHELL_DIST_DIR = fileURLToPath(new URL('../../../apps/shell/dist/', import.meta.url));
+const SHELL_PUBLIC_DIR = fileURLToPath(new URL('../../../apps/shell/public/', import.meta.url));
 
 /**
  * @typedef {Object} RemoteAppConfig
@@ -42,6 +52,7 @@ import { serveApps } from './static-apps.js';
  * @property {string} [identityMnemonic] - Pin the relay's own operational identity across restarts.
  *   Without it, a fresh one is generated on first boot and then reused (see hasIdentity()).
  * @property {RemoteAppConfig[]} [remoteApps] - Additional apps to load from remote manifest URLs at boot.
+ * @property {boolean} [serveShell=true] - Serve the QUniverse shell at `/` (see apps/shell).
  */
 
 export class QuRelay {
@@ -53,6 +64,7 @@ export class QuRelay {
       appsDir: './apps',
       port: 8080,
       remoteApps: [],
+      serveShell: true,
       ...options,
     };
 
@@ -64,9 +76,11 @@ export class QuRelay {
     this.documentEngine = new DocumentEngine(this.core);
     this.collectionEngine = new CollectionEngine(this.core);
     this.assetEngine = new AssetEngine(this.core);
+    this.threadEngine = new ThreadEngine(this.core);
     this.registry.registerEngine('document-engine', this.documentEngine);
     this.registry.registerEngine('collection-engine', this.collectionEngine);
     this.registry.registerEngine('asset-engine', this.assetEngine);
+    this.registry.registerEngine('thread-engine', this.threadEngine);
 
     // The relay's OWN identity (for signing relay-authored data). This is
     // NOT where end users' identities live - see @qu/identity's
@@ -80,6 +94,12 @@ export class QuRelay {
     this.registry.registerService('collection-service', this.services.collections);
     this.registry.registerService('asset-service', this.services.assets);
     this.registry.registerService('actor-service', this.services.actors);
+    this.registry.registerService('starred-service', this.services.starred);
+    this.registry.registerService('thread-service', this.services.threads);
+    this.registry.registerService('favorites-service', this.services.favorites);
+    this.registry.registerService('contacts-service', this.services.contacts);
+    this.registry.registerService('directory-service', this.services.directory);
+    this.registry.registerService('cms-service', this.services.cms);
 
     this.loader = new QuLoader(this.core, this.registry);
 
@@ -111,11 +131,7 @@ export class QuRelay {
       await this.identity.importMnemonic(this.identity.generateMnemonic());
     }
 
-    this._httpServer = createServer((req, res) => {
-      serveApps(req, res, this.options.appsDir).then((served) => {
-        if (!served) res.writeHead(404).end('Not Found');
-      });
-    });
+    this._httpServer = createServer((req, res) => this.#handleHttp(req, res));
     this._wss = new WebSocketServer({ server: this._httpServer });
     await new Promise((resolve) => this._httpServer.listen(this.options.port, resolve));
 
@@ -134,6 +150,40 @@ export class QuRelay {
     console.log(`[QuRelay] listening on http://localhost:${this.port} (peer ${this.transport.getPeerId()})`);
     console.log(`[QuRelay] loaded apps: ${this.loader.listLoaded().join(', ') || '(none)'}`);
     return this;
+  }
+
+  async #handleHttp(req, res) {
+    try {
+      if (req.url === '/apps.json') {
+        const body = JSON.stringify(buildAppsCatalog(this.loader));
+        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(body);
+        return;
+      }
+
+      if (await serveApps(req, res, this.options.appsDir)) return;
+
+      if (this.options.serveShell) {
+        if (req.url === '/' || req.url === '/index.html') {
+          const body = await readFile(SHELL_PUBLIC_DIR + 'index.html');
+          res.writeHead(200, { 'content-type': 'text/html' }).end(body);
+          return;
+        }
+        if (req.url === '/shell-bundle.js' || req.url === '/shell-bundle.js.map') {
+          const body = await readFile(SHELL_DIST_DIR + req.url.replace('/shell-bundle', 'bundle'));
+          res.writeHead(200, { 'content-type': 'text/javascript' }).end(body);
+          return;
+        }
+      }
+
+      res.writeHead(404).end('Not Found');
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        res.writeHead(404).end('Not Found');
+      } else {
+        console.error('[QuRelay] HTTP handler error:', err);
+        res.writeHead(500).end('Internal Server Error');
+      }
+    }
   }
 
   /** Shuts down the HTTP/WebSocket server. */

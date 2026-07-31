@@ -25,6 +25,19 @@
  *     "requires": ["document-service"],
  *     "provides": ["thread-engine"]
  *   }
+ *
+ * Example (a UI app a shell mounts in-place, see apps/shell):
+ *   {
+ *     "name": "notes",
+ *     "version": "1.0.0",
+ *     "kind": "app",
+ *     "main": "./index.js",
+ *     "clientMain": "./client.js",
+ *     "label": "Notes",
+ *     "icon": "📝",
+ *     "navOrder": 20,
+ *     "requires": ["document-service", "collection-service"]
+ *   }
  */
 
 /** Fields every manifest must have. */
@@ -51,6 +64,29 @@ export const MANIFEST_KINDS = Object.freeze(['engine', 'service', 'app']);
  *   contributes (e.g. "reply", "pin", "mute") - see Registry.registerCapability.
  * @property {string} [integrity] - "sha256-<base64>" of the main module's
  *   source, required for remote loading (see @qu/loader).
+ * @property {string} [signature] - base64url Ed25519 signature over the main
+ *   module's bytes, checked against loadRemote()'s trustedPublisherPubs.
+ *
+ * Nav/UI fields - all optional, purely descriptive metadata a shell reads to
+ * build a self-generating menu (see apps/shell). None of these are enforced
+ * by the Loader or Registry; a consumer that doesn't know about one simply
+ * never reads it. This is the same "additive, non-breaking" stance the real
+ * Qu's server/service-registry.mjs documents for its own manifest fields.
+ * @property {string} [label] - Display name for nav/menus (defaults to `name`).
+ * @property {string} [icon] - An emoji or icon identifier for nav rendering.
+ * @property {number} [navOrder] - Sort hint within a nav listing (lower first).
+ * @property {string} [clientMain] - Path (relative to the manifest) OR an
+ *   absolute URL to a browser ES module exporting
+ *   `mount(container, ctx) -> stopFn|void`, for a shell to mount this app's
+ *   UI in-place (see apps/shell). Separate from `main`, which the Loader
+ *   imports SERVER-SIDE (Node) to register Engines/Services - an app can
+ *   have either, both, or (if it's UI-only) a trivial no-op `main`.
+ * @property {string} [clientIntegrity] - "sha256-<base64>" of `clientMain`'s
+ *   source. `integrity`/`signature` above cover `main`; `clientMain` is a
+ *   DIFFERENT file a BROWSER fetches, so it gets its own pinning fields -
+ *   see apps/shell/src/load-client-module.js.
+ * @property {string} [clientSignature] - base64url Ed25519 signature over
+ *   `clientMain`'s bytes, the `clientMain` counterpart to `signature`.
  */
 
 /**
@@ -82,6 +118,17 @@ export function validateManifest(manifest) {
   }
   if (manifest.integrity !== undefined && !/^sha256-[A-Za-z0-9+/]+=*$/.test(manifest.integrity)) {
     throw new Error('Invalid manifest: "integrity" must look like "sha256-<base64>"');
+  }
+  for (const field of ['label', 'icon', 'clientMain', 'signature', 'clientSignature']) {
+    if (manifest[field] !== undefined && typeof manifest[field] !== 'string') {
+      throw new Error(`Invalid manifest: "${field}" must be a string`);
+    }
+  }
+  if (manifest.navOrder !== undefined && typeof manifest.navOrder !== 'number') {
+    throw new Error('Invalid manifest: "navOrder" must be a number');
+  }
+  if (manifest.clientIntegrity !== undefined && !/^sha256-[A-Za-z0-9+/]+=*$/.test(manifest.clientIntegrity)) {
+    throw new Error('Invalid manifest: "clientIntegrity" must look like "sha256-<base64>"');
   }
   return manifest;
 }

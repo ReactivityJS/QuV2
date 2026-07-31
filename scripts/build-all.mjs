@@ -74,10 +74,10 @@ async function buildPackage({ name, dir, pkg }) {
   console.log(`  ${name} -> ${outfile.replace(ROOT, '')}`);
 }
 
-async function buildDemo() {
-  const dir = join(ROOT, 'apps/demo');
-  const entry = join(dir, 'src/main.js');
-  const outfile = join(dir, 'dist/bundle.js');
+/** Bundles a single browser entry point (an app's UI, not a workspace package). */
+async function buildBrowserApp(label, entryRelPath, outfileRelPath) {
+  const entry = join(ROOT, entryRelPath);
+  const outfile = join(ROOT, outfileRelPath);
   await esbuild.build({
     entryPoints: [entry],
     outfile,
@@ -89,14 +89,19 @@ async function buildDemo() {
     target: 'es2022',
     logLevel: 'warning',
   });
-  console.log(`  demo app -> ${outfile.replace(ROOT, '')}`);
+  console.log(`  ${label} -> ${outfile.replace(ROOT, '')}`);
 }
 
 console.log('Building packages...');
 const packages = await findPackages('packages');
 for (const p of packages) await buildPackage(p);
 
-console.log('Building demo app...');
-await buildDemo();
+console.log('Building browser apps...');
+await buildBrowserApp('demo app', 'apps/demo/src/main.js', 'apps/demo/dist/bundle.js');
+await buildBrowserApp('shell', 'apps/shell/src/main.js', 'apps/shell/dist/bundle.js');
+// notes/client.js is served by @qu/relay under /apps/notes/dist/client.js
+// (see manifest.quapp's clientMain) - it needs bundling too, same reason
+// as the shell: bare imports like '@qu/ui' don't resolve in a raw browser.
+await buildBrowserApp('notes client', 'apps/notes/client.js', 'apps/notes/dist/client.js');
 
 console.log('Done.');

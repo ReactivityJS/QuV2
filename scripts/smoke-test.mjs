@@ -20,6 +20,17 @@
  *   5. Remote loading: integrity pinning and Ed25519 signature
  *      verification, including that tampering and untrusted signers are
  *      correctly rejected.
+ *   6. The QUniverse Services layer: Threads (a public forum and a private
+ *      mail inbox from the SAME ThreadService, differing only by config -
+ *      see THREAD_PRESETS), Favorites/Contacts (both built on
+ *      StarredService), Directory visibility, and CMS pages.
+ *
+ * NOT covered here (verified manually with Playwright during development,
+ * not wired into this script to avoid adding a browser-automation
+ * dependency to routine test runs): apps/shell actually rendering in a
+ * browser - self-generating nav from /apps.json, mounting apps/notes'
+ * clientMain, <qu-view>/<qu-bind>/<qu-list> reactivity, favoriting, and
+ * identity/data persistence across a reload via IndexedDB.
  */
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -198,6 +209,80 @@ try {
   );
   httpServer.close();
   console.log('    OK - signed+pinned package loads; wrong signer and tampered content are both rejected');
+
+  // ---------------------------------------------------------------------
+  section('QUniverse services: Threads, Favorites/Contacts, Directory, CMS');
+  // ---------------------------------------------------------------------
+  {
+    const quniverseRt = new QuRuntime();
+    const { MemoryAdapter } = await import('@qu/runtime');
+    const { DocumentEngine, CollectionEngine, ThreadEngine } = await import('@qu/engines');
+    const { createServices, THREAD_PRESETS } = await import('@qu/services');
+
+    // Shared "world" store for public/thread data; each identity keeps its own local seed - see identity.js's importMnemonic() doc.
+    const sharedStore = new Map();
+    function withSharedWorld() {
+      const local = new MemoryAdapter();
+      return {
+        put: (rel, v) => (rel.startsWith('/secure/') ? local.put(rel, v) : sharedStore.set(rel, v) && v),
+        get: (rel) => (rel.startsWith('/secure/') ? local.get(rel) : Promise.resolve(sharedStore.get(rel) ?? null)),
+      };
+    }
+    function makeIdentityAndServices() {
+      const rt = new QuRuntime({ storeAdapter: withSharedWorld() });
+      new DocumentEngine(rt.core);
+      new CollectionEngine(rt.core);
+      new ThreadEngine(rt.core);
+      const identity = new QuIdentityEngine(rt.core);
+      return { rt, identity, Qu: null };
+    }
+
+    const aliceCtx = makeIdentityAndServices();
+    const bobCtx = makeIdentityAndServices();
+    await aliceCtx.identity.importMnemonic(aliceCtx.identity.generateMnemonic());
+    await bobCtx.identity.importMnemonic(bobCtx.identity.generateMnemonic());
+    aliceCtx.Qu = createServices(aliceCtx.rt.core, { assetEngine: null, identityEngine: aliceCtx.identity });
+    bobCtx.Qu = createServices(bobCtx.rt.core, { assetEngine: null, identityEngine: bobCtx.identity });
+
+    await aliceCtx.Qu.actors.publishMainProfile({ name: 'Alice' }); // needed so Bob can encrypt mail FOR her (see ThreadService)
+    const alicePub = await aliceCtx.Qu.actors.whoAmI();
+    await bobCtx.Qu.actors.publishMainProfile({ name: 'Bob' });
+    const bobPub = await bobCtx.Qu.actors.whoAmI();
+
+    // Threads: public forum + private mail, same Service, different config.
+    await aliceCtx.Qu.threads.createThread('board', 'general', THREAD_PRESETS.forum());
+    await aliceCtx.Qu.threads.postMessage('board', 'general', { body: 'hi **all**' });
+    const forumSeenByBob = await bobCtx.Qu.threads.listMessages('board', 'general');
+    assert.equal(forumSeenByBob.length, 1, 'forum message should be publicly readable');
+    assert.equal(forumSeenByBob[0].formattedHtml, 'hi <strong>all</strong>', 'forum preset includes markdown formatting');
+
+    await aliceCtx.Qu.threads.createThread('mailboxes', 'alice-inbox', THREAD_PRESETS.mail(alicePub));
+    await bobCtx.Qu.threads.postMessage('mailboxes', 'alice-inbox', { body: 'private note' });
+    assert.equal((await aliceCtx.Qu.threads.listMessages('mailboxes', 'alice-inbox')).length, 1, 'owner should read their inbox');
+
+    // Favorites + Contacts, both built on StarredService.
+    await aliceCtx.Qu.favorites.add('notes');
+    assert.deepEqual(await aliceCtx.Qu.favorites.list(), ['notes']);
+    await aliceCtx.Qu.contacts.addContact(bobPub, { nickname: 'Bobby' });
+    const contacts = await aliceCtx.Qu.contacts.listContacts();
+    assert.equal(contacts.length, 1);
+    assert.equal(contacts[0].profile.name, 'Bob', 'contact should resolve to the live published profile');
+
+    // Directory: opt-in visibility.
+    await aliceCtx.Qu.directory.setVisible(true, { name: 'Alice' });
+    assert.equal(await aliceCtx.Qu.directory.isVisible(alicePub), true);
+    await aliceCtx.Qu.directory.setVisible(false);
+    assert.equal(await aliceCtx.Qu.directory.isVisible(alicePub), false);
+
+    // CMS: pages built on Document+Collection, no dedicated Engine needed.
+    await aliceCtx.Qu.cms.savePage('site', 'home', { title: 'Home' });
+    await aliceCtx.Qu.cms.savePage('site', 'home', { title: 'Home v2' });
+    const pages = await aliceCtx.Qu.cms.listPages('site');
+    assert.equal(pages.length, 1, 'saving the same slug twice must not duplicate the page listing');
+    assert.equal(pages[0].title, 'Home v2');
+
+    console.log('    OK - threads (forum+mail+ACL), favorites, contacts, directory, and CMS all work as designed');
+  }
 
   // ---------------------------------------------------------------------
   console.log('\nAll smoke tests passed.');

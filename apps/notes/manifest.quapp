@@ -3,5 +3,9 @@
   "version": "1.0.0",
   "kind": "app",
   "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "Notes",
+  "icon": "📝",
+  "navOrder": 10,
   "requires": ["document-service", "collection-service"]
 }
