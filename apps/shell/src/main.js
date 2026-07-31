@@ -91,7 +91,14 @@ class Shell {
   }
 
   async connect() {
-    const url = CONFIG.relayUrl ?? `ws://${location.host}`;
+    // Mirror the page's own scheme (https -> wss, http -> ws) and host
+    // (incl. port, if any) rather than hardcoding ws:// - behind a TLS-
+    // offloading reverse proxy the browser is on https:// while the relay
+    // itself only ever speaks plain ws:// on its own port, so a hardcoded
+    // scheme here would either mixed-content-block (http URL from an https
+    // page) or simply be wrong once a proxy sits in front of the relay.
+    const wsScheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = CONFIG.relayUrl ?? `${wsScheme}//${location.host}`;
     const transport = new WebSocketClientTransport(url);
     await transport.connect();
     this.sync = new SyncEngine(this.qu, transport);
