@@ -154,6 +154,18 @@ export class QuRelay {
 
   async #handleHttp(req, res) {
     try {
+      // Cheap, dependency-free liveness probe - deliberately checked before
+      // anything else touches disk or the loader. Meant for container
+      // orchestrators/reverse proxies (Docker HEALTHCHECK, Traefik, k8s
+      // probes, ...) to tell "container up, relay answering" apart from
+      // "upstream unreachable", which is what those layers usually report
+      // to clients as a 502/503 - if this route itself times out or refuses
+      // to connect, the problem is in front of the relay, not in it.
+      if (req.url === '/healthz') {
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'ok', peerId: this.transport?.getPeerId() ?? null }));
+        return;
+      }
+
       if (req.url === '/apps.json') {
         const body = JSON.stringify(buildAppsCatalog(this.loader));
         res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(body);

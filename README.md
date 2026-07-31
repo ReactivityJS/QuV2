@@ -192,6 +192,52 @@ denied, mkdir '/data/...'`, you're most likely running an image built
 before this entrypoint existed - `docker compose build --no-cache` (or
 `docker build --no-cache`) and restart.
 
+The image also ships a `HEALTHCHECK` (`GET /healthz` on `$QU_PORT`, default
+`8080`) so `docker ps`/`docker compose ps` shows `unhealthy` if the relay's
+HTTP loop stops responding, instead of just `Up` for as long as the process
+hasn't exited.
+
+### Troubleshooting: 503 from a domain in front of the relay
+
+A `503` (or `502`) on a public URL like `https://your-domain.example/` is a
+status the *relay itself never returns* - `#handleHttp()` in `relay.js` only
+ever answers `200`, `404`, or `500`. Seeing `503` means something sitting in
+front of the container (a reverse proxy: Traefik, nginx, Caddy, Cloudflare
+Tunnel, a PaaS's own router, ...) can't reach it, not that the relay
+answered and rejected the request. Narrow it down in this order:
+
+1. **Is the container actually running and healthy?**
+   ```bash
+   docker compose ps
+   ```
+   If it's not `Up (healthy)`, check why it exited/crashed:
+   ```bash
+   docker compose logs quniverse-relay --tail=100
+   ```
+   A container stuck restarting on the old `EACCES` bug (see above) or any
+   other boot-time crash presents to the outside world exactly as a 503,
+   because there's nothing listening on `8080` for the proxy to reach.
+
+2. **Does the relay answer directly, bypassing the proxy?** From the host
+   running the container:
+   ```bash
+   curl -i http://localhost:8080/healthz
+   ```
+   `200 {"status":"ok",...}` here means the relay itself is fine and the
+   problem is entirely in the routing layer between the public domain and
+   this port - check that layer's own config/logs (e.g. Traefik/nginx
+   upstream address and port, DNS pointing at the right host, the container
+   actually being on the network/port the proxy expects). No response, a
+   connection error, or the wrong port means the relay itself isn't
+   reachable on `8080` yet - back to step 1.
+
+3. **Is the port mapping and `QU_PORT` consistent?** `docker-compose.yml`
+   maps `${QU_PORT:-8080}:8080` and always sets the container's own
+   `QU_PORT=8080` explicitly - if you changed one without the other (e.g.
+   overrode `QU_PORT` in `environment:` to something other than `8080`
+   without also updating the `ports:` mapping's container-side port), the
+   proxy would be pointed at a port nothing is listening on.
+
 ## Packages
 
 | Package | What it is |

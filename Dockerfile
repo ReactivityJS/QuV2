@@ -32,6 +32,16 @@ COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 8080
 
+# Lets `docker ps` / `docker compose ps` report unhealthy if the relay's own
+# HTTP loop stops answering (crash, deadlock, ...) instead of just showing
+# "Up" as long as the process hasn't exited - a container stuck "Up" but not
+# answering is exactly what makes a reverse proxy in front of it start
+# returning 502/503 to clients. Uses node (no curl/wget in this base image)
+# against the /healthz route added in relay.js; respects QU_PORT so the
+# check still works if the port is overridden at runtime.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.QU_PORT||8080)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
 # Config is via environment variables (see packages/relay/src/server.js's
 # ENV_MAPPING) - QU_PORT/QU_STORE_DIR/QU_BLOB_DIR/QU_APPS_DIR/
 # QU_IDENTITY_MNEMONIC/QU_SERVE_SHELL/QU_REMOTE_APPS_JSON - so a deployment
