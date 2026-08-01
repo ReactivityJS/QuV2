@@ -14,11 +14,19 @@
 
 /**
  * @param {import('@qu/loader').QuLoader} loader
+ * @param {string[]} [disabledAppNames] - Names an admin has turned off (see
+ *   relay.js's `POST /admin/settings`) - still LISTED (relay-admin needs to
+ *   see and re-enable them), just marked `enabled: false`. Every OTHER
+ *   consumer of this catalog already filters on that flag - see
+ *   apps/shell/src/nav.js's `resolveFavoriteApps()` and apps/app-list's own
+ *   identical filter, both written before anything actually set it to
+ *   false - and apps/shell/src/main.js's `_renderRoute()`, which treats a
+ *   disabled app exactly like an unknown one.
  * @returns {Array<object>} One entry per loaded app with a `clientMain` (apps
  *   without one - pure server-side Engines/Services - are omitted; there's
  *   nothing for a shell to mount for them).
  */
-export function buildAppsCatalog(loader) {
+export function buildAppsCatalog(loader, disabledAppNames = []) {
   const out = [];
   for (const { manifest, originUrl } of loader.listManifests()) {
     if (!manifest.clientMain) continue;
@@ -30,7 +38,7 @@ export function buildAppsCatalog(loader) {
       clientMainUrl: resolveClientMainUrl(manifest, originUrl),
       clientIntegrity: manifest.clientIntegrity,
       clientSignature: manifest.clientSignature,
-      enabled: true,
+      enabled: !disabledAppNames.includes(manifest.name),
     });
   }
   return out;

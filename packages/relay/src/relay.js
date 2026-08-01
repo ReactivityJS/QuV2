@@ -39,6 +39,21 @@ import { buildAppsCatalog } from './apps-catalog.js';
 const SHELL_DIST_DIR = fileURLToPath(new URL('../../../apps/shell/dist/', import.meta.url));
 const SHELL_PUBLIC_DIR = fileURLToPath(new URL('../../../apps/shell/public/', import.meta.url));
 
+// Under LOCAL_ONLY_PREFIX (see @qu/sync/sync-engine.js) - this relay's OWN
+// operational settings must never sync out to a peer relay, and @qu/sync
+// refuses any INCOMING synced write under this prefix too, so it can't be
+// clobbered by a peer either. Read publicly via `/config.json`'s
+// `settings` field (see #handleHttp below); written only via the signed,
+// admin-checked `POST /admin/settings` route - never through the normal
+// qu.put() pipeline a regular client could reach.
+const RELAY_SETTINGS_PATH = '/store/secure/admin/settings';
+
+const DEFAULT_RELAY_SETTINGS = Object.freeze({
+  defaultLocale: 'en',
+  rateLimits: Object.freeze({ maxMessagesPerMinute: 0 }), // 0 = unlimited
+  disabledApps: Object.freeze([]),
+});
+
 /**
  * @typedef {Object} RemoteAppConfig
  * @property {string} manifestUrl
@@ -169,7 +184,8 @@ export class QuRelay {
     this._wss = new WebSocketServer({ server: this._httpServer });
     await new Promise((resolve) => this._httpServer.listen(this.options.port, resolve));
 
-    this.transport = new WebSocketServerTransport(this._wss);
+    const settings = await this.#getSettings();
+    this.transport = new WebSocketServerTransport(this._wss, { maxMessagesPerMinute: settings.rateLimits.maxMessagesPerMinute });
     this.sync = new SyncEngine(this.core, this.transport);
 
     // Push delivery: fires for EVERY thread message write this relay ever
@@ -201,6 +217,27 @@ export class QuRelay {
     console.log(`[QuRelay] listening on http://localhost:${this.port} (peer ${this.transport.getPeerId()})`);
     console.log(`[QuRelay] loaded apps: ${this.loader.listLoaded().join(', ') || '(none)'}`);
     return this;
+  }
+
+  /** @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[]}>} Always fully populated - missing fields fall back to DEFAULT_RELAY_SETTINGS. */
+  async #getSettings() {
+    const stored = await this.core.get(RELAY_SETTINGS_PATH);
+    const val = stored?.val ?? {};
+    return { ...DEFAULT_RELAY_SETTINGS, ...val, rateLimits: { ...DEFAULT_RELAY_SETTINGS.rateLimits, ...val.rateLimits } };
+  }
+
+  /**
+   * @param {object} patch - Shallow-merged into the current settings (a
+   * nested `rateLimits` patch replaces that whole sub-object, matching
+   * every other Service's `update()`-style merge in this codebase -
+   * apps/relay-admin/client.js always sends the full `rateLimits` object,
+   * never a partial one, so this is never actually lossy in practice).
+   * @returns {Promise<object>} The merged, persisted settings.
+   */
+  async #saveSettings(patch) {
+    const merged = { ...(await this.#getSettings()), ...patch };
+    await this.core.put(RELAY_SETTINGS_PATH, merged);
+    return merged;
   }
 
   /**
@@ -334,6 +371,69 @@ export class QuRelay {
     });
   }
 
+  /**
+   * @param {import('node:http').IncomingMessage} req
+   * @returns {Promise<object>} Parsed JSON body.
+   * @throws {Error} On a body over 64KiB (a settings payload is tiny;
+   *   anything bigger is either a bug or abuse, not worth streaming) or
+   *   malformed JSON.
+   */
+  async #readJsonBody(req) {
+    const MAX_BYTES = 64 * 1024;
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of req) {
+      size += chunk.length;
+      if (size > MAX_BYTES) throw new Error('request body too large');
+      chunks.push(chunk);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  }
+
+  /** @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res */
+  async #handleAdminSettings(req, res) {
+    let body;
+    try {
+      body = await this.#readJsonBody(req);
+    } catch (err) {
+      res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: err.message }));
+      return;
+    }
+
+    const { actorPub, settings, signature } = body ?? {};
+    if (typeof actorPub !== 'string' || typeof signature !== 'string' || typeof settings !== 'object' || settings === null) {
+      res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'expected { actorPub, settings, signature }' }));
+      return;
+    }
+    if (!this.options.adminPubs.includes(actorPub)) {
+      res.writeHead(403, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'not a configured relay admin' }));
+      return;
+    }
+
+    let verified = false;
+    try {
+      verified = await QuCrypto.verify(
+        new TextEncoder().encode(JSON.stringify(settings)),
+        QuCrypto.fromBase64Url(signature),
+        QuCrypto.fromBase64Url(actorPub)
+      );
+    } catch {
+      verified = false; // malformed base64/signature - treat exactly like "did not verify"
+    }
+    if (!verified) {
+      res.writeHead(403, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'signature does not verify' }));
+      return;
+    }
+
+    const merged = await this.#saveSettings(settings);
+    // Applied live - an admin changing the rate limit shouldn't require
+    // restarting the relay (which would drop every connected client) to
+    // take effect.
+    if (settings.rateLimits) this.transport.setRateLimit(merged.rateLimits.maxMessagesPerMinute);
+
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(merged));
+  }
+
   async #handleHttp(req, res) {
     try {
       // Cheap, dependency-free liveness probe - deliberately checked before
@@ -349,23 +449,40 @@ export class QuRelay {
       }
 
       if (req.url === '/apps.json') {
-        const body = JSON.stringify(buildAppsCatalog(this.loader));
+        const settings = await this.#getSettings();
+        const body = JSON.stringify(buildAppsCatalog(this.loader, settings.disabledApps));
         res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(body);
         return;
       }
 
       // Public, non-secret config the shell UI needs before it knows
       // anything else: which actor pubkeys are relay admins, so it can show
-      // (or hide) the "Relay Admin" nav entry for the connected identity.
-      // This is a UX convenience ONLY, never an authorization boundary - a
-      // pubkey being "in the list" is public information anyone could read
-      // here regardless; any actual privileged admin ACTION this relay
-      // exposes in the future must independently verify a signed request
-      // against this same list server-side, exactly like every other
-      // writer/reader ACL in this codebase (see ThreadEngine), not trust
-      // that only an admin's client would ever render the button.
+      // (or hide) the "Relay Admin" nav entry for the connected identity,
+      // plus this relay's current admin-configurable settings (default
+      // locale, rate limits, disabled apps - see #getSettings()). This is a
+      // UX convenience ONLY, never an authorization boundary - all of this
+      // is public information anyone could read here regardless; the
+      // actual privileged admin ACTION (see `POST /admin/settings` below)
+      // independently verifies a signed request against `adminPubs`
+      // server-side, exactly like every other writer/reader ACL in this
+      // codebase (see ThreadEngine), never trusting that only an admin's
+      // client would ever render the button.
       if (req.url === '/config.json') {
-        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ adminPubs: this.options.adminPubs }));
+        const settings = await this.#getSettings();
+        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ adminPubs: this.options.adminPubs, settings }));
+        return;
+      }
+
+      // The one privileged admin ACTION this relay exposes: change its own
+      // operational settings. `{ actorPub, settings, signature }` - signed
+      // over `JSON.stringify(settings)` with `actorPub`'s Ed25519 key
+      // (same sign/verify shape @qu/services/notification-prefs-service.js
+      // already uses for its own signed-but-public documents), verified
+      // HERE against `adminPubs` before anything is persisted - a request
+      // merely CLAIMING to be from an admin pubkey proves nothing on its
+      // own.
+      if (req.url === '/admin/settings' && req.method === 'POST') {
+        await this.#handleAdminSettings(req, res);
         return;
       }
 

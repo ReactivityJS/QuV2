@@ -40,6 +40,7 @@ import { listenForNotificationClicks } from '@qu/push-client';
 import { createDisclosureMenu, menuItem } from './menu.js';
 import { buildAppContextMenu } from './context-menu.js';
 import { t } from './i18n.js';
+import { getStoredLocale, setLocale } from '@qu/i18n';
 
 /** @type {{trustedPublisherPubs?: string[], locale?: string}} */
 const CONFIG = globalThis.QU_SHELL_CONFIG ?? {};
@@ -269,11 +270,34 @@ class Shell {
     window.addEventListener('qu:notifications-read', update);
   }
 
-  /** Fetches the relay's admin pubkey list (see @qu/relay's `/config.json`) - a UI hint only, see that route's own doc comment for why it's not a security boundary. */
+  /**
+   * Fetches the relay's admin pubkey list (see @qu/relay's `/config.json`) -
+   * a UI hint only, see that route's own doc comment for why it's not a
+   * security boundary - plus its current settings, of which only
+   * `defaultLocale` matters to the shell itself (rate limits/disabled apps
+   * are enforced server-side, nothing for the shell to DO with them beyond
+   * what apps-catalog.js's `enabled` flag already achieves via
+   * `_renderRoute()`).
+   *
+   * Adopting `defaultLocale` here is honestly incomplete: this fetch
+   * finishes well after @qu/i18n's `createI18n()` already ran for the
+   * shell's OWN chrome (apps/shell/src/i18n.js's module-level call, long
+   * before boot() reaches this point) - so a first-ever visitor still sees
+   * the header/menu in their BROWSER's language for this one page load.
+   * What DOES work: `setLocale()` here persists the choice before this
+   * session mounts its first app, so every app (each its own dynamically
+   * imported module, each calling its OWN `createI18n()` fresh) already
+   * picks it up THIS load, and a reload picks it up for the shell chrome
+   * too. Doing better than that would mean server-templating index.html
+   * per-request instead of serving it as a static file - real future work,
+   * not done here.
+   */
   async _loadAdminConfig() {
     try {
       const res = await fetch('/config.json');
-      this.adminPubs = res.ok ? (await res.json()).adminPubs ?? [] : [];
+      const config = res.ok ? await res.json() : {};
+      this.adminPubs = config.adminPubs ?? [];
+      if (!getStoredLocale() && config.settings?.defaultLocale) setLocale(config.settings.defaultLocale);
     } catch (e) {
       console.warn('[shell] failed to load /config.json:', e);
       this.adminPubs = [];
@@ -380,7 +404,14 @@ class Shell {
     // what a pub even looks like beyond this one prefix check.
     const catalogName = appId.startsWith('~') ? 'profile' : appId;
     const app = this.apps.find((a) => a.name === catalogName);
-    if (!app?.clientMainUrl) {
+    // A relay admin turning an app off (see apps/relay-admin/client.js and
+    // @qu/relay's `POST /admin/settings`) must actually stop it from being
+    // reachable, not just unlist it from menus - `enabled: false` still
+    // APPEARS in this.apps (relay-admin needs to see it to re-enable it,
+    // see apps-catalog.js's own doc comment) but is treated exactly like
+    // an unknown app here, same as the other apps that already filter on
+    // this flag (nav.js's resolveFavoriteApps(), apps/app-list).
+    if (!app?.clientMainUrl || app.enabled === false) {
       this._renderAppToolbar(null);
       const msg = document.createElement('p');
       msg.textContent = `Unknown or non-mountable app: "${appId}"`;

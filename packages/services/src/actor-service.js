@@ -74,4 +74,23 @@ export class ActorService {
   async resolveActor(actorPub) {
     return this.identity.resolveMainUser(actorPub);
   }
+
+  /**
+   * Signs an arbitrary JSON-serializable payload with this identity's main
+   * key - what a caller needs to prove "I, this actor, endorse this exact
+   * value" to a party that only needs to verify AUTHORSHIP, not read
+   * anything private (e.g. @qu/relay's `POST /admin/settings`, checked
+   * against its own `adminPubs` list - see apps/relay-admin/client.js).
+   * Same sign-over-`JSON.stringify()` shape
+   * @qu/services/notification-prefs-service.js's own `savePrefs()` already
+   * uses for its own signed-but-public documents.
+   * @param {*} payload
+   * @returns {Promise<{actorPub: string, signature: string}>}
+   */
+  async signPayload(payload) {
+    const { QuCrypto } = await import('@qu/core');
+    const mainKey = await this.identity.getMainKey();
+    const signature = await QuCrypto.sign(new TextEncoder().encode(JSON.stringify(payload)), mainKey.privateKeyPkcs8);
+    return { actorPub: QuCrypto.toBase64Url(mainKey.publicKey), signature: QuCrypto.toBase64Url(signature) };
+  }
 }
