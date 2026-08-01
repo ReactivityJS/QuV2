@@ -11,6 +11,7 @@
 import { paths, predictNextRadius } from '@qu/services';
 import { watch } from '@qu/reactive';
 import { createI18n } from '@qu/i18n';
+import { maintainWakeLock } from '@qu/wakelock';
 
 const NAMESPACE = 'geochase-games';
 
@@ -37,6 +38,11 @@ const DICT = {
     notCaught: 'Too far away ({meters} m) — keep looking.',
     geoError: 'Location error: {message}',
     spectator: 'You are watching this game, but are not on the hunted team or a hunter.',
+    joinAsHunter: 'Join as a hunter',
+    map: 'Map',
+    mapEmpty: 'No location reports to show on the map yet.',
+    mapHuntedTrail: 'Hunted team',
+    mapHunterTrail: 'Hunters',
   },
   de: {
     title: 'Geo Chase',
@@ -60,6 +66,11 @@ const DICT = {
     notCaught: 'Noch zu weit weg ({meters} m) — weitersuchen.',
     geoError: 'Standortfehler: {message}',
     spectator: 'Du beobachtest dieses Spiel, bist aber nicht im gejagten Team oder ein Jäger.',
+    joinAsHunter: 'Als Jäger beitreten',
+    map: 'Karte',
+    mapEmpty: 'Noch keine Standortmeldungen für die Karte.',
+    mapHuntedTrail: 'Gejagtes Team',
+    mapHunterTrail: 'Jäger',
   },
 };
 const { t } = createI18n(DICT);
@@ -73,6 +84,10 @@ const STYLE = `
   .qu-geochase-checklist { display: flex; flex-direction: column; gap: 0.2rem; }
   .qu-geochase-status { padding: 0.6rem; border: 1px solid #8884; border-radius: 0.5rem; margin: 0.6rem 0; }
   .qu-geochase-error { color: #c00; font-size: 0.9em; }
+  .qu-geochase-map { border: 1px solid #8884; border-radius: 0.5rem; width: 100%; max-width: 24rem; aspect-ratio: 1; }
+  .qu-geochase-map-legend { display: flex; gap: 1rem; font-size: 0.85em; opacity: 0.8; margin-top: 0.3rem; }
+  .qu-geochase-map-legend span { display: inline-flex; align-items: center; gap: 0.3rem; }
+  .qu-geochase-map-legend .qu-geochase-swatch { width: 0.7rem; height: 0.7rem; border-radius: 50%; display: inline-block; }
 `;
 
 function ensureStyle() {
@@ -88,6 +103,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
   let stopped = false;
   let unwatch = null;
   let watchPositionId = null;
+  let stopWakeLock = null;
 
   const gameId = segments[1] ?? null;
 
@@ -181,15 +197,23 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
   }
 
   async function renderGame(id) {
+    // Re-entrant (the "join as hunter" button below re-calls this once
+    // it's added itself to the config) - tear down whatever the PREVIOUS
+    // call set up first, so re-rendering never leaks a watch subscription
+    // or a wake lock.
+    unwatch?.();
+    stopWakeLock?.();
     subscribe(`/store/geochase-${id}`);
 
     let [config, myActorPub] = await Promise.all([services.geochase.getConfig(id), services.actors.whoAmI()]);
-    // A game's config is written ONCE at creation and never updated again -
-    // unlike pings, no future write will ever arrive to "catch up" a
-    // browser that subscribed after the fact (see subscribe()'s own doc
-    // comment: future writes only). Opening a just-shared link needs an
-    // explicit PULL, not a wait - see apps/shell/src/main.js's `fetch`
-    // param doc comment for why this is a separate capability from `subscribe`.
+    // A game's config is written at creation, and self-service ONLY by
+    // GeoChaseService.joinAsHunter() after that (see the "join as hunter"
+    // button below) - neither case means a browser that subscribed AFTER
+    // either write happened will ever see it via subscribe() alone (future
+    // writes only, see that function's own doc comment). Opening a just-
+    // shared link needs an explicit PULL, not a wait - see
+    // apps/shell/src/main.js's `fetch` param doc comment for why this is a
+    // separate capability from `subscribe`.
     if (!config) {
       await syncFetch(paths.documentPath(`geochase-${id}`, 'config'));
       if (stopped) return;
@@ -225,12 +249,40 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       const spectator = document.createElement('p');
       spectator.textContent = t('spectator');
       container.appendChild(spectator);
+
+      // Self-service join: the whole point of sharing the game's URL with
+      // hunters is that they don't need to have already been a contact the
+      // creator picked from a checklist at creation time - see
+      // GeoChaseService.joinAsHunter()'s own doc comment.
+      const joinBtn = document.createElement('button');
+      joinBtn.type = 'button';
+      joinBtn.textContent = t('joinAsHunter');
+      joinBtn.addEventListener('click', async () => {
+        await services.geochase.joinAsHunter(id);
+        await renderGame(id); // re-render as a hunter now that config includes this identity
+      });
+      container.appendChild(joinBtn);
     }
+
+    const mapHeading = document.createElement('h2');
+    mapHeading.textContent = t('map');
+    container.appendChild(mapHeading);
+    const mapEl = document.createElement('div');
+    container.appendChild(mapEl);
+
+    // "Playing" means having this screen open as a hunted or hunter
+    // participant, not just spectating - see @qu/wakelock's own doc
+    // comment for why this needs to re-acquire on every visibility change,
+    // not just once here.
+    if (isHunted || isHunter) stopWakeLock = maintainWakeLock(() => !stopped);
 
     async function renderPings() {
       if (stopped) return;
-      const pings = await services.geochase.listPings(id);
+      const [pings, hunterPings] = await Promise.all([services.geochase.listPings(id), services.geochase.listHunterPings(id)]);
       if (stopped) return;
+
+      renderMap(mapEl, pings, hunterPings);
+
       if (pings.length === 0) {
         statusEl.textContent = t('noPings');
         return;
@@ -253,6 +305,94 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
 
     await renderPings();
     unwatch = watch(qu, paths.collectionPath(`geochase-${id}`, 'pings'), renderPings, { initial: false });
+  }
+
+  /**
+   * A dependency-free "map": no tile server this environment (or a real
+   * deployment without one configured) can reach, so instead of a real
+   * basemap this projects the raw lat/lng location HISTORY onto a locally-
+   * centered flat plane (equirectangular, fine at the scale a foot chase
+   * happens on) and draws it as an SVG trail - the hunted team's whole
+   * path plus the hunters' own (if they chose to share it, see
+   * GeoChaseService.listHunterPings()), not just the single last-known-
+   * position text status above it.
+   * @param {HTMLElement} container
+   * @param {Array<{lat: number, lng: number, timestamp: number}>} huntedPings
+   * @param {Array<{lat: number, lng: number, timestamp: number}>} hunterPings
+   */
+  function renderMap(container, huntedPings, hunterPings) {
+    container.textContent = '';
+    const allPoints = [...huntedPings, ...hunterPings];
+    if (allPoints.length === 0) {
+      const empty = document.createElement('p');
+      empty.textContent = t('mapEmpty');
+      container.appendChild(empty);
+      return;
+    }
+
+    const meanLat = allPoints.reduce((sum, p) => sum + p.lat, 0) / allPoints.length;
+    const cosLat = Math.cos((meanLat * Math.PI) / 180);
+    const project = (p) => ({ x: p.lng * cosLat, y: -p.lat });
+
+    const projected = allPoints.map(project);
+    const xs = projected.map((p) => p.x);
+    const ys = projected.map((p) => p.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    // A single point (or a tight cluster) would collapse the view box to
+    // zero-size otherwise - a fixed minimum span keeps one lone marker
+    // centered and visible instead of an empty/invalid SVG.
+    const span = Math.max(maxX - minX, maxY - minY, 0.0005);
+    const pad = span * 0.15;
+    const viewMin = { x: minX - pad, y: minY - pad };
+    const viewSize = span + pad * 2;
+
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', `${viewMin.x} ${viewMin.y} ${viewSize} ${viewSize}`);
+    svg.classList.add('qu-geochase-map');
+
+    const strokeW = viewSize * 0.01;
+    const dotR = viewSize * 0.02;
+    const lastDotR = viewSize * 0.035;
+
+    const drawTrail = (pings, color) => {
+      if (pings.length === 0) return;
+      const points = pings.map((p) => project(p));
+      if (points.length > 1) {
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+        path.setAttribute('points', points.map((p) => `${p.x},${p.y}`).join(' '));
+        path.setAttribute('fill', 'none');
+        path.setAttribute('stroke', color);
+        path.setAttribute('stroke-width', String(strokeW));
+        path.setAttribute('opacity', '0.6');
+        svg.appendChild(path);
+      }
+      points.forEach((p, i) => {
+        const isLast = i === points.length - 1;
+        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', String(p.x));
+        circle.setAttribute('cy', String(p.y));
+        circle.setAttribute('r', String(isLast ? lastDotR : dotR));
+        circle.setAttribute('fill', color);
+        circle.setAttribute('opacity', isLast ? '1' : '0.5');
+        svg.appendChild(circle);
+      });
+    };
+
+    drawTrail(huntedPings, '#e0483e');
+    drawTrail(hunterPings, '#3e7fe0');
+    container.appendChild(svg);
+
+    const legend = document.createElement('div');
+    legend.className = 'qu-geochase-map-legend';
+    const huntedLegend = document.createElement('span');
+    huntedLegend.innerHTML = '<span class="qu-geochase-swatch" style="background:#e0483e"></span>';
+    huntedLegend.append(t('mapHuntedTrail'));
+    const hunterLegend = document.createElement('span');
+    hunterLegend.innerHTML = '<span class="qu-geochase-swatch" style="background:#3e7fe0"></span>';
+    hunterLegend.append(t('mapHunterTrail'));
+    legend.append(huntedLegend, hunterLegend);
+    container.appendChild(legend);
   }
 
   function renderHuntedControls(gameId) {
@@ -339,6 +479,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
   return () => {
     stopped = true;
     unwatch?.();
+    stopWakeLock?.();
     if (watchPositionId !== null) navigator.geolocation.clearWatch(watchPositionId);
   };
 }

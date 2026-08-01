@@ -1,0 +1,11 @@
+{
+  "name": "@qu/wakelock",
+  "version": "2.0.0",
+  "description": "Browser-only Screen Wake Lock helper: maintainWakeLock(isActive) keeps the display on for as long as a caller-defined session is active, re-acquiring after every tab-visibility change (the OS releases any held lock the instant a tab is hidden). Not app-specific - any app with a bounded active-session window can reuse it.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "license": "MIT"
+}

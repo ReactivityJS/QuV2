@@ -123,6 +123,28 @@ export class GeoChaseService {
   }
 
   /**
+   * Self-service join: adds this identity to `hunterPubs` if it isn't
+   * already a team member, so sharing just the game's URL (`#/geochase/
+   * <gameId>`, see apps/geochase/client.js) is enough to invite hunters -
+   * the creator no longer has to have pre-selected every hunter from
+   * their contacts at creation time. The config document itself is
+   * unsigned/open (same "the link is the permission" model
+   * apps/todo/client.js already documents for its own shared lists, not a
+   * new trade-off introduced here) - idempotent, so joining twice is a
+   * harmless no-op.
+   * @param {string|number} gameId
+   * @returns {Promise<object>} The updated config.
+   * @throws {Error} If the game doesn't exist.
+   */
+  async joinAsHunter(gameId) {
+    const config = await this.getConfig(gameId);
+    if (!config) throw new Error(`GeoChaseService.joinAsHunter: no game "${gameId}"`);
+    const myActorPub = await this.#myActorPub();
+    if ((config.hunterPubs ?? []).includes(myActorPub)) return config;
+    return this.documents.update(spaceFor(gameId), 'config', { hunterPubs: [...(config.hunterPubs ?? []), myActorPub] });
+  }
+
+  /**
    * Reports a position. Only a configured team member may call this
    * meaningfully - the write itself is signed with this identity's own
    * key, and every READ below re-verifies the signer is still an
