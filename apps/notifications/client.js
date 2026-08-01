@@ -18,21 +18,21 @@
  *     (see @qu/services/notification-prefs-service.js for why these are
  *     public/signed rather than private).
  *
- * The per-app list in the settings view is a fixed, small set (the
- * built-in apps that actually trigger pushes today - Forum/Chat/Inbox, all
- * Thread-backed) - there's no manifest field yet for "this app produces
- * notifications" to discover it generically.
+ * The per-app settings list is built from whatever's currently loaded, not
+ * a hard-coded list: any app can declare its own push-worthy event types
+ * via its manifest's `pushActions` (e.g. `{id: "mention", label:
+ * "Mentions"}`, see @qu/foundation's manifest schema and
+ * apps/forum|chat|inbox/manifest.quapp for real examples), and /apps.json
+ * (see @qu/relay/apps-catalog.js) surfaces that here - one settings row
+ * per (app, action) pair, labeled with both, backed by
+ * NotificationPrefsService's existing `apps[appId].functions[actionId]`
+ * granularity (already supported by shouldNotify(), just never exposed in
+ * this UI before). An app with nothing push-worthy simply doesn't appear.
  */
 import { subscribeToPush, unsubscribeFromPush, isPushSubscribed } from '@qu/push-client';
 import { createI18n } from '@qu/i18n';
 import { watch } from '@qu/reactive';
 import { paths } from '@qu/services';
-
-const NOTIFYING_APPS = [
-  { id: 'forum', label: 'Forum', icon: '💬' },
-  { id: 'chat', label: 'Chat', icon: '💭' },
-  { id: 'inbox', label: 'Inbox', icon: '📥' },
-];
 
 const DICT = {
   en: {
@@ -242,16 +242,35 @@ async function renderSettings(container, services, isStopped) {
   const enabledRow = toggleRow(t('globalEnabled'), prefs.enabled);
   const mentionsRow = toggleRow(t('mentions'), prefs.mentions);
 
+  // Every option below comes from whatever's currently loaded, not a
+  // hard-coded list - each app declares its own push-worthy events via its
+  // manifest's `pushActions` (see @qu/foundation's manifest schema), and
+  // /apps.json (see @qu/relay/apps-catalog.js) is what surfaces that here.
+  // An app with nothing push-worthy (most apps) simply doesn't appear.
+  const apps = await fetch('/apps.json').then((r) => (r.ok ? r.json() : [])).catch(() => []);
+  const notifyingApps = apps.filter((a) => a.pushActions?.length);
+
   const perAppHeading = document.createElement('h2');
   perAppHeading.textContent = t('perApp');
   const appsEl = document.createElement('div');
   appsEl.className = 'qu-notif-apps';
-  const appToggles = new Map();
-  for (const app of NOTIFYING_APPS) {
-    const appEnabled = prefs.apps?.[app.id]?.enabled !== false; // default on
-    const row = toggleRow(`${app.icon} ${app.label}`, appEnabled);
-    appToggles.set(app.id, row.checkbox);
-    appsEl.appendChild(row.row);
+  // Map<appId, Map<actionId, checkbox>> - one row per (app, action) pair,
+  // e.g. "💭 Chat — Mentions", not one row per app - see this file's own
+  // doc comment for why: an app can trigger more than one KIND of
+  // notification, each independently toggleable.
+  const actionToggles = new Map();
+  for (const app of notifyingApps) {
+    const appHeading = document.createElement('strong');
+    appHeading.textContent = `${app.icon ?? ''} ${app.label ?? app.name}`.trim();
+    appsEl.appendChild(appHeading);
+    const byAction = new Map();
+    for (const action of app.pushActions) {
+      const enabled = prefs.apps?.[app.name]?.functions?.[action.id] !== false; // default on
+      const row = toggleRow(action.label, enabled);
+      byAction.set(action.id, row.checkbox);
+      appsEl.appendChild(row.row);
+    }
+    actionToggles.set(app.name, byAction);
   }
 
   const saveBtn = document.createElement('button');
@@ -261,12 +280,16 @@ async function renderSettings(container, services, isStopped) {
   status.className = 'qu-notif-status';
 
   saveBtn.addEventListener('click', async () => {
-    const apps = {};
-    for (const [appId, checkbox] of appToggles) apps[appId] = { enabled: checkbox.checked };
+    const appsPatch = {};
+    for (const [appId, byAction] of actionToggles) {
+      const functions = {};
+      for (const [actionId, checkbox] of byAction) functions[actionId] = checkbox.checked;
+      appsPatch[appId] = { functions };
+    }
     await services.notificationPrefs.savePrefs({
       enabled: enabledRow.checkbox.checked,
       mentions: mentionsRow.checkbox.checked,
-      apps,
+      apps: appsPatch,
     });
     status.textContent = t('saved');
     setTimeout(() => { status.textContent = ''; }, 1500);

@@ -7,5 +7,8 @@
   "label": "Inbox",
   "icon": "📥",
   "navOrder": 12,
-  "requires": ["document-service", "collection-service", "thread-service"]
+  "requires": ["document-service", "collection-service", "thread-service"],
+  "pushActions": [
+    { "id": "newMessage", "label": "New mail" }
+  ]
 }

@@ -39,6 +39,7 @@ export function buildAppsCatalog(loader, disabledAppNames = []) {
       clientIntegrity: manifest.clientIntegrity,
       clientSignature: manifest.clientSignature,
       enabled: !disabledAppNames.includes(manifest.name),
+      pushActions: manifest.pushActions ?? [],
     });
   }
   return out;

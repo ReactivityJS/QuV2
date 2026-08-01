@@ -87,6 +87,17 @@ export const MANIFEST_KINDS = Object.freeze(['engine', 'service', 'app']);
  *   see apps/shell/src/load-client-module.js.
  * @property {string} [clientSignature] - base64url Ed25519 signature over
  *   `clientMain`'s bytes, the `clientMain` counterpart to `signature`.
+ * @property {Array<{id: string, label: string}>} [pushActions] - Push-
+ *   notification categories THIS app can trigger (e.g. `{id: "mention",
+ *   label: "Mentions"}`, `{id: "newMessage", label: "New messages"}`) -
+ *   `id` is what @qu/relay's push delivery passes as `functionName` to
+ *   NotificationPrefsService.shouldNotify() (see @qu/relay's
+ *   `#deliverThreadPush()`), `label` is what the Notifications app's
+ *   settings screen shows next to this app's name/icon for the toggle -
+ *   see apps/notifications/client.js, which builds its whole per-app
+ *   settings list from every loaded app's declared `pushActions` instead
+ *   of a hard-coded list. An app with no push-worthy events of its own
+ *   (most apps) simply omits this field.
  */
 
 /**
@@ -129,6 +140,12 @@ export function validateManifest(manifest) {
   }
   if (manifest.clientIntegrity !== undefined && !/^sha256-[A-Za-z0-9+/]+=*$/.test(manifest.clientIntegrity)) {
     throw new Error('Invalid manifest: "clientIntegrity" must look like "sha256-<base64>"');
+  }
+  if (manifest.pushActions !== undefined) {
+    const valid = Array.isArray(manifest.pushActions) && manifest.pushActions.every(
+      (a) => a && typeof a === 'object' && typeof a.id === 'string' && typeof a.label === 'string'
+    );
+    if (!valid) throw new Error('Invalid manifest: "pushActions" must be an array of {id, label} strings');
   }
   return manifest;
 }
