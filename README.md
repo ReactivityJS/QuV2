@@ -84,11 +84,35 @@ honest, HTML-escaped subset - see `@qu/services/thread-formatting.js`.
 
 **Known limitation, stated plainly:** the writer-ACL check only runs for
 writes going through *this* QuStore's `put()`. A QuBit arriving via
-`@qu/sync` replication is written straight to the adapter (so already-signed
-remote data never gets re-sealed), which means it currently bypasses
-`ThreadEngine`'s check too. Enforcing this against synced-in data as well
-would need an equivalent check in `SyncEngine`'s incoming-write path - real
-future work, not implemented here.
+`@qu/sync` replication is written straight to the adapter via
+`QuStore.putSealed()` (so already-signed remote data never gets re-sealed -
+see that method's own doc comment), which means it currently bypasses
+`ThreadEngine`'s check too. `SyncEngine` DOES verify the QuBit's signature
+against its claimed `pub` before accepting it (see `isAuthentic()` in
+sync-engine.js) - so a peer can't forge a write under someone else's
+identity - but it does NOT re-check whether that (genuine) signer was
+actually authorized to write to that specific path. Enforcing that too
+would need giving synced writes a restricted path back through the
+relevant Engine's own checks - real future work, not implemented here.
+
+### Sync semantics worth knowing
+
+- **No history replay.** `sync.subscribe(prefix)` only covers writes made
+  AFTER subscribing - a peer that already published something before you
+  subscribed won't be delivered to you automatically. Use `sync.fetch(path)`
+  to pull one already-existing value on demand (see ThreadService's
+  constructor for how it uses this to backfill a not-yet-synced profile).
+- **A browser client always publishes to its one relay** (`SyncEngine`'s
+  `publishAllTo` option, set by the shell) rather than relying on
+  subscription-based broadcasting for its OWN writes - see that option's
+  doc comment in sync-engine.js for why a star topology needs this
+  (subscription-based broadcasting alone has an unavoidable race for
+  anything written very early, e.g. a brand-new identity's own profile).
+- **The identity seed never syncs**, full stop - `LOCAL_ONLY_PREFIX`
+  (`/store/secure/`) is refused at both the outgoing-broadcast and
+  incoming-write checkpoints in `SyncEngine`, regardless of what any peer
+  subscribed to. Any future local-only secret should live under that same
+  prefix to get this guarantee for free.
 
 ## The QUniverse shell
 
@@ -292,7 +316,15 @@ mounted app for free - none of it is something an app has to opt into.
 | `user-list` | Everyone visible in the public directory (opt-in from the shell's home screen); favoriting one adds them as a Contact |
 | `contact-list` | This identity's Contacts (added from User List), each with their live-resolved public profile |
 | `relay-admin` | Read-only relay status (peer id, loaded apps, configured admins) - see its own doc comment for why this is safe to keep read-only-and-client-gated for now, and what a real privileged admin action would additionally require |
+| `profile` | Edit this identity's alias, avatar, and custom fields, each individually toggled public or private |
+| `forum` | A public board: topics (Documents) each backed by a public Thread (`THREAD_PRESETS.forum`) |
+| `chat` | A 1:1 room per Contact, backed by a private Thread (`THREAD_PRESETS.chat`) - the room id is derived from both members' pubkeys, so either side lands in the same room with no invite step |
+| `inbox` | A personal mailbox (`THREAD_PRESETS.mail`): anyone can write to it, only the owner can read it |
 | `notes` | The original minimal example app - a per-identity private note list |
+
+`forum`/`chat`/`inbox` share one message-list-plus-composer view,
+`@qu/thread-ui`'s `mountThreadView()` - see that package for why it exists
+as its own package rather than being duplicated three times.
 
 ## Writing an app
 
