@@ -411,10 +411,13 @@ export class ThreadService {
    * @param {string[]} memberPubs - Whose presence to check - a chat room
    *   already has a fixed member list (see THREAD_PRESETS.chat), so unlike
    *   reactions/pins this never needs its own discovery index.
-   * @param {{staleAfterMs?: number}} [options]
+   * @param {{staleAfterMs?: number}} [options] - Default 15s = 3x the
+   *   default heartbeat (5s, see startHeartbeat()) - tight enough that
+   *   "online" flips to "offline" within a few seconds of really going
+   *   away, loose enough not to falsely flash offline on one missed beat.
    * @returns {Promise<Record<string, {status: string, lastSeen: number, online: boolean}>>}
    */
-  async getPresence(spaceId, threadId, memberPubs, { staleAfterMs = 20_000 } = {}) {
+  async getPresence(spaceId, threadId, memberPubs, { staleAfterMs = 15_000 } = {}) {
     const now = Date.now();
     const result = {};
     await Promise.all(memberPubs.map(async (pub) => {
@@ -435,7 +438,7 @@ export class ThreadService {
    * @param {{intervalMs?: number, asSpaceId?: string|number}} [options]
    * @returns {() => Promise<void>} Stop function.
    */
-  startHeartbeat(spaceId, threadId, { intervalMs = 8_000, asSpaceId = null } = {}) {
+  startHeartbeat(spaceId, threadId, { intervalMs = 5_000, asSpaceId = null } = {}) {
     this.setPresence(spaceId, threadId, 'online', { asSpaceId }).catch(() => {});
     const timer = setInterval(() => {
       this.setPresence(spaceId, threadId, 'online', { asSpaceId }).catch(() => {});
@@ -444,6 +447,39 @@ export class ThreadService {
       clearInterval(timer);
       await this.setPresence(spaceId, threadId, 'offline', { asSpaceId }).catch(() => {});
     };
+  }
+
+  /**
+   * Publishes "I've read everything up to this timestamp" - VISIBLE TO
+   * OTHER MEMBERS (unlike `markRead()`/`getLastReadAt()` above, which are
+   * PRIVATE per-identity markers for this identity's own unread badge).
+   * This is what lets a sender show a "read" tick (✓✓) on their own
+   * messages - the reader publishing this is a deliberate, visible signal,
+   * same as WhatsApp/Signal read receipts, not something that can be
+   * inferred from encrypted message traffic alone.
+   * @param {string|number} spaceId @param {string} threadId
+   * @param {number} uptoTs - Epoch ms; typically the newest message's `ts`.
+   * @param {{asSpaceId?: string|number}} [options]
+   */
+  async publishReadReceipt(spaceId, threadId, uptoTs, { asSpaceId = null } = {}) {
+    const signKey = await this.#signingKey(asSpaceId);
+    const path = `/store/${spaceId}/threads/${threadId}/reads/${QuCrypto.toBase64Url(signKey.publicKey)}`;
+    await this.qu.put(path, { upto: uptoTs }, { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey });
+  }
+
+  /**
+   * @param {string|number} spaceId @param {string} threadId
+   * @param {string[]} memberPubs - Same fixed-member-list reasoning as `getPresence()`.
+   * @returns {Promise<Record<string, number>>} `{ actorPub: uptoTs }` - a
+   *   member absent from the result has never published a read receipt here.
+   */
+  async getReadReceipts(spaceId, threadId, memberPubs) {
+    const result = {};
+    await Promise.all(memberPubs.map(async (pub) => {
+      const quBit = await this.qu.get(`/store/${spaceId}/threads/${threadId}/reads/${pub}`);
+      if (typeof quBit?.val?.upto === 'number') result[pub] = quBit.val.upto;
+    }));
+    return result;
   }
 
   /**

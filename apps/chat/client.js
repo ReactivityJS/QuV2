@@ -1,16 +1,23 @@
 /**
  * CHAT — Telegram/WhatsApp/Signal-style messenger: a room list (1:1 rooms
  * derived from Contacts, plus groups this identity has been invited to)
- * and a room view with grouped message bubbles, avatars, reactions, pins,
- * replies, forwarding, and attachments.
+ * and a room view with message bubbles, reactions, pins, replies,
+ * forwarding, attachments, voice messages, and location sharing.
  *
  * A richer room view than @qu/thread-ui's shared mountThreadView() (which
  * Forum/Inbox still use) - ported from QUniverse V1's modules/chat.js +
  * modules/presence.js (calls/WebRTC deliberately excluded per the port
- * request), then given group-chat support and a bubble-based redesign.
- * Kept OUT of the shared thread-ui component on purpose - Forum/Inbox
- * don't need this much chrome, and a generic component trying to serve
- * all three would need a pile of feature flags for no real benefit.
+ * request), then given group-chat support and reworked to match the
+ * INTERACTION MODEL of ReactivityJS/Qu's own examples/chat/app.mjs (the
+ * "Qu V1" messenger this was ported from originally): every message has
+ * exactly ONE always-visible affordance (a "⋮" button), which opens a
+ * single SHARED floating popup menu (React/Pin/Reply/Edit/Forward/Copy) -
+ * not a persistent row of buttons under every bubble. Reactions themselves
+ * only ever occupy screen space once at least one exists; the picker is a
+ * second on-demand popup opened from the menu's "React" item. Kept OUT of
+ * the shared thread-ui component on purpose - Forum/Inbox don't need this
+ * much chrome, and a generic component trying to serve all three would
+ * need a pile of feature flags for no real benefit.
  *
  * ENCRYPTION IS THE DEFAULT for both room kinds, not an opt-in: a 1:1 room
  * (THREAD_PRESETS.chat) and a group (THREAD_PRESETS.group) both set
@@ -25,6 +32,15 @@
  * same workaround many messengers' own encrypted-group implementations
  * reach for too).
  *
+ * READ TICKS are simplified from the V1 reference's three states
+ * (pending/sent/read) to two (✓ sent, ✓✓ read): this app awaits
+ * `postMessage()` before ever rendering the message, so there's no
+ * optimistic "still sending" window to visualize - "sent" is true the
+ * instant it appears at all. "Read" is a real, separate signal:
+ * `ThreadService.publishReadReceipt()` (distinct from the pre-existing
+ * PRIVATE `markRead()`/`getLastReadAt()`, which only drive this
+ * identity's own unread badge and are invisible to other members).
+ *
  * Routes: `#/chat` (room list), `#/chat/<peerActorPub>` (1:1 room),
  * `#/chat/g/<groupId>` (group room).
  */
@@ -34,35 +50,50 @@ import { watch } from '@qu/reactive';
 import { createI18n } from '@qu/i18n';
 
 const SPACE = 'chat';
-const REACTION_CHOICES = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+const REACTION_CHOICES = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '✅'];
 const AVATAR_PALETTE = ['#e17076', '#faa774', '#a695e7', '#7bc862', '#6ec9cb', '#65aadd', '#ee7aae', '#f2c94c'];
+const PRESENCE_STALE_MS = 15_000;
+const PRESENCE_HEARTBEAT_MS = 5_000;
+const READ_RECEIPT_POLL_MS = 4_000;
 
 const DICT = {
   en: {
     title: 'Chats', empty: 'No chats yet — add a contact from the User List, or start a group.', back: '←',
-    online: 'online', offline: 'offline', lastSeen: 'last seen {seconds}s ago',
-    pinned: 'Pinned', unpin: 'Unpin', pin: 'Pin', react: 'React',
-    replyingTo: 'Replying to {name}', cancelReply: 'Cancel',
-    forwardedFrom: 'Forwarded from {name}',
+    online: 'online', offline: 'offline', lastSeen: 'last seen {time}', membersOnline: '{count} members, {online} online',
+    pinned: 'Pinned', pinnedMessage: 'Pinned message', unpin: 'Unpin', pin: 'Pin', react: 'React', reply: 'Reply',
+    edit: 'Edit', forward: 'Forward', copyText: 'Copy text', copied: 'Copied',
+    replyingTo: 'Replying to {name}', editingMessage: 'Edit message', forwardingFrom: 'Forward from {name}', cancel: 'Cancel',
+    forwardedFrom: 'Forwarded from {name}', forwardTo: 'Forward to…', noRoomsToForward: 'No other chats yet.',
     attach: 'Attach file', removeAttachment: 'Remove attachment', download: 'Download',
     send: 'Send', composerPlaceholder: 'Message',
-    newGroup: 'New group', groupName: 'Group name', selectMembers: 'Add members', create: 'Create', cancel: 'Cancel',
+    newGroup: 'New group', groupName: 'Group name', selectMembers: 'Add members', create: 'Create',
     membersCount: '{count} members', you: 'You', noContacts: 'No contacts yet — add some from the User List first.',
     groupNotFound: 'This group doesn\'t exist, or you\'re not a member.', encrypted: 'Messages and files are end-to-end encrypted.',
-    photo: 'Photo', video: 'Video', file: 'File', members: 'Members', close: 'Close',
+    photo: 'Photo', video: 'Video', file: 'File', voiceMessage: '🎙️ Voice message', location: '📍 Location',
+    members: 'Members', close: 'Close', more: 'More',
+    recordVoice: 'Record a voice message', shareLocation: 'Share my location',
+    voiceNotSupported: 'Voice messages aren\'t supported in this browser.', voiceStart: 'Start recording',
+    voicePause: 'Pause', voiceResume: 'Resume', voiceStop: 'Stop', voiceSend: 'Send', voiceDiscard: 'Discard',
+    locationNotSupported: 'Location sharing isn\'t supported in this browser.', locationFailed: 'Couldn\'t get your location.',
   },
   de: {
     title: 'Chats', empty: 'Noch keine Chats — Kontakt aus der Nutzerliste hinzufügen oder eine Gruppe starten.', back: '←',
-    online: 'online', offline: 'offline', lastSeen: 'zuletzt online vor {seconds}s',
-    pinned: 'Angeheftet', unpin: 'Lösen', pin: 'Anheften', react: 'Reagieren',
-    replyingTo: 'Antwort an {name}', cancelReply: 'Abbrechen',
-    forwardedFrom: 'Weitergeleitet von {name}',
+    online: 'online', offline: 'offline', lastSeen: 'zuletzt online {time}', membersOnline: '{count} Mitglieder, {online} online',
+    pinned: 'Angeheftet', pinnedMessage: 'Angeheftete Nachricht', unpin: 'Lösen', pin: 'Anheften', react: 'Reagieren', reply: 'Antworten',
+    edit: 'Bearbeiten', forward: 'Weiterleiten', copyText: 'Text kopieren', copied: 'Kopiert',
+    replyingTo: 'Antwort an {name}', editingMessage: 'Nachricht bearbeiten', forwardingFrom: 'Weiterleiten von {name}', cancel: 'Abbrechen',
+    forwardedFrom: 'Weitergeleitet von {name}', forwardTo: 'Weiterleiten an…', noRoomsToForward: 'Noch keine weiteren Chats.',
     attach: 'Datei anhängen', removeAttachment: 'Anhang entfernen', download: 'Herunterladen',
     send: 'Senden', composerPlaceholder: 'Nachricht',
-    newGroup: 'Neue Gruppe', groupName: 'Gruppenname', selectMembers: 'Mitglieder hinzufügen', create: 'Erstellen', cancel: 'Abbrechen',
+    newGroup: 'Neue Gruppe', groupName: 'Gruppenname', selectMembers: 'Mitglieder hinzufügen', create: 'Erstellen',
     membersCount: '{count} Mitglieder', you: 'Du', noContacts: 'Noch keine Kontakte — zuerst in der Nutzerliste hinzufügen.',
     groupNotFound: 'Diese Gruppe existiert nicht, oder du bist kein Mitglied.', encrypted: 'Nachrichten und Dateien sind Ende-zu-Ende-verschlüsselt.',
-    photo: 'Foto', video: 'Video', file: 'Datei', members: 'Mitglieder', close: 'Schließen',
+    photo: 'Foto', video: 'Video', file: 'Datei', voiceMessage: '🎙️ Sprachnachricht', location: '📍 Standort',
+    members: 'Mitglieder', close: 'Schließen', more: 'Mehr',
+    recordVoice: 'Sprachnachricht aufnehmen', shareLocation: 'Meinen Standort teilen',
+    voiceNotSupported: 'Sprachnachrichten werden von diesem Browser nicht unterstützt.', voiceStart: 'Aufnahme starten',
+    voicePause: 'Pause', voiceResume: 'Fortsetzen', voiceStop: 'Stopp', voiceSend: 'Senden', voiceDiscard: 'Verwerfen',
+    locationNotSupported: 'Standortfreigabe wird von diesem Browser nicht unterstützt.', locationFailed: 'Standort konnte nicht ermittelt werden.',
   },
 };
 const { t } = createI18n(DICT);
@@ -90,56 +121,97 @@ const STYLE = `
   .qu-chat-avatar-sm { width: 1.8rem; height: 1.8rem; font-size: 0.8em; }
 
   .qu-chat-room-view { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-  .qu-chat-header { display: flex; align-items: center; gap: 0.6rem; padding-bottom: 0.5rem; border-bottom: 1px solid #8883; margin-bottom: 0.5rem; }
+  .qu-chat-header { display: flex; align-items: center; gap: 0.6rem; padding-bottom: 0.5rem; border-bottom: 1px solid #8883; margin-bottom: 0.4rem; flex-shrink: 0; }
   .qu-chat-back { text-decoration: none; color: inherit; font-size: 1.3em; padding: 0 0.3rem; }
-  .qu-chat-header-info { flex: 1; min-width: 0; display: flex; flex-direction: column; cursor: default; }
+  .qu-chat-header-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   .qu-chat-header-info button { all: unset; cursor: pointer; }
   .qu-chat-header-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qu-chat-presence { font-size: 0.8em; opacity: 0.65; display: flex; align-items: center; gap: 0.3rem; }
   .qu-chat-presence-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: #888; }
   .qu-chat-presence-dot[data-online="true"] { background: #3cb371; }
-  .qu-chat-encrypted-hint { font-size: 0.72em; opacity: 0.5; display: flex; align-items: center; gap: 0.25rem; }
+  .qu-chat-encrypted-hint { font-size: 0.72em; opacity: 0.5; display: flex; align-items: center; gap: 0.25rem; flex-shrink: 0; }
 
-  .qu-chat-members { padding: 0.5rem 0.6rem; border: 1px solid #8884; border-radius: 0.5rem; margin-bottom: 0.5rem; display: flex; flex-direction: column; gap: 0.4rem; }
+  .qu-chat-members { padding: 0.5rem 0.6rem; border: 1px solid #8884; border-radius: 0.5rem; margin-bottom: 0.5rem; display: flex; flex-direction: column; gap: 0.4rem; flex-shrink: 0; }
   .qu-chat-members-row { display: flex; align-items: center; gap: 0.5rem; }
   .qu-chat-members-close { margin-left: auto; background: none; border: none; cursor: pointer; opacity: 0.6; }
 
-  .qu-chat-pinned { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.5rem; padding: 0.4rem 0.6rem; border-radius: 0.5rem; background: #3390ec14; border: 1px solid #3390ec33; }
-  .qu-chat-pinned strong { font-size: 0.8em; opacity: 0.8; }
-  .qu-chat-pinned-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85em; }
-  .qu-chat-pinned-row span { flex: 1; opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .qu-chat-pinned-row button { background: none; border: none; cursor: pointer; opacity: 0.6; font-size: 0.85em; }
+  .qu-chat-pinned-bar { display: none; align-items: center; gap: 0.5rem; padding: 0.4rem 0.6rem; border-radius: 0.5rem; background: #3390ec14; border: 1px solid #3390ec33; margin-bottom: 0.4rem; flex-shrink: 0; }
+  .qu-chat-pinned-bar[data-visible="true"] { display: flex; }
+  .qu-chat-pinned-jump { all: unset; cursor: pointer; flex: 1; min-width: 0; display: flex; align-items: center; gap: 0.4rem; }
+  .qu-chat-pinned-jump-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.85em; }
+  .qu-chat-pinned-count { all: unset; cursor: pointer; flex-shrink: 0; font-size: 0.78em; opacity: 0.7; padding: 0.1rem 0.4rem; border: 1px solid #8886; border-radius: 999px; }
 
-  .qu-chat-messages { list-style: none; margin: 0; padding: 0.3rem 0; display: flex; flex-direction: column; gap: 0.15rem; flex: 1; min-height: 0; overflow-y: auto; }
-  .qu-chat-msg-row { display: flex; gap: 0.5rem; align-items: flex-end; max-width: 100%; }
-  .qu-chat-msg-row[data-mine="true"] { flex-direction: row-reverse; }
-  .qu-chat-msg-row[data-grouped="true"] { margin-top: -0.05rem; }
-  .qu-chat-msg-row:not([data-grouped="true"]) { margin-top: 0.5rem; }
-  .qu-chat-msg-avatar-slot { width: 1.8rem; flex-shrink: 0; }
-  .qu-chat-message { max-width: min(32rem, 78%); padding: 0.4rem 0.65rem; border-radius: 1rem; background: #8882; position: relative; }
+  .qu-chat-messages { list-style: none; margin: 0; padding: 0.3rem 0; display: flex; flex-direction: column; gap: 0.4rem; flex: 1; min-height: 0; overflow-y: auto; }
+  .qu-chat-msg-row { display: flex; flex-direction: column; max-width: min(32rem, 82%); }
+  .qu-chat-msg-row[data-mine="true"] { align-self: flex-end; }
+  .qu-chat-msg-row[data-mine="false"] { align-self: flex-start; }
+  .qu-chat-msg-header { display: flex; align-items: center; gap: 0.4rem; font-size: 0.74em; opacity: 0.65; padding: 0 0.2rem 0.15rem; }
+  .qu-chat-msg-author { font-weight: 600; color: #3390ec; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qu-chat-msg-pin-badge { flex-shrink: 0; }
+  .qu-chat-msg-actions-btn { all: unset; margin-left: auto; cursor: pointer; padding: 0 0.3rem; opacity: 0.7; }
+  .qu-chat-msg-actions-btn:hover { opacity: 1; }
+  .qu-chat-message { padding: 0.4rem 0.65rem; border-radius: 1rem; background: #8882; }
   .qu-chat-msg-row[data-mine="true"] .qu-chat-message { background: #3390ec; color: #fff; border-bottom-right-radius: 0.25rem; }
   .qu-chat-msg-row[data-mine="false"] .qu-chat-message { border-bottom-left-radius: 0.25rem; }
-  .qu-chat-author { display: block; font-size: 0.78em; font-weight: 600; opacity: 0.85; margin-bottom: 0.1rem; }
-  .qu-chat-reply-quote, .qu-chat-forward-note { font-size: 0.8em; opacity: 0.75; border-left: 2px solid currentColor; padding-left: 0.4rem; margin-bottom: 0.3rem; }
+  .qu-chat-reply-quote, .qu-chat-forward-note { font-size: 0.8em; opacity: 0.8; border-left: 2px solid currentColor; padding-left: 0.4rem; margin-bottom: 0.3rem; cursor: pointer; }
+  .qu-chat-forward-note { cursor: default; opacity: 0.65; }
+  .qu-chat-quote-author { font-weight: 600; }
   .qu-chat-body { white-space: pre-wrap; overflow-wrap: break-word; }
   .qu-chat-attachment img, .qu-chat-attachment video { max-width: 100%; max-height: 18rem; border-radius: 0.6rem; margin-top: 0.3rem; display: block; }
+  .qu-chat-attachment audio { margin-top: 0.3rem; max-width: 16rem; }
   .qu-chat-attachment a { display: inline-flex; align-items: center; gap: 0.3rem; margin-top: 0.3rem; color: inherit; }
-  .qu-chat-msg-footer { display: flex; align-items: center; gap: 0.35rem; margin-top: 0.15rem; font-size: 0.68em; opacity: 0.65; }
-  .qu-chat-message-actions { display: flex; gap: 0.3rem; align-items: center; flex-wrap: wrap; margin-top: 0.25rem; }
-  .qu-chat-message-actions button { background: none; border: none; cursor: pointer; opacity: 0.55; font-size: 0.85em; padding: 0.1rem 0.2rem; }
-  .qu-chat-message-actions button:hover { opacity: 1; }
-  .qu-chat-reaction-chip { border: 1px solid #8886; border-radius: 1rem; padding: 0.05rem 0.4rem; font-size: 0.85em; cursor: pointer; background: #fff2; }
-  .qu-chat-reaction-chip[data-mine="true"] { background: #3390ec33; border-color: #3390ec; }
-  .qu-chat-reaction-picker { display: flex; gap: 0.2rem; }
-  .qu-chat-reply-banner { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85em; opacity: 0.85; padding: 0.35rem 0.6rem; border-radius: 0.5rem; background: #8882; margin-bottom: 0.4rem; }
-  .qu-chat-reply-banner span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .qu-chat-reply-banner button { background: none; border: none; cursor: pointer; opacity: 0.6; }
-  .qu-chat-composer { display: flex; gap: 0.4rem; align-items: center; padding-top: 0.4rem; }
+  .qu-chat-voice-label { font-size: 0.8em; opacity: 0.8; margin-top: 0.2rem; }
+  .qu-chat-location { display: flex; align-items: center; gap: 0.6rem; text-decoration: none; color: inherit; }
+  .qu-chat-location img { width: 4.5rem; height: 4.5rem; border-radius: 0.5rem; object-fit: cover; flex-shrink: 0; background: #8882; }
+  .qu-chat-location-coords { font-size: 0.72em; opacity: 0.7; }
+  .qu-chat-reactions { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.3rem; }
+  .qu-chat-msg-row[data-mine="true"] .qu-chat-reactions { justify-content: flex-end; }
+  .qu-chat-reaction-chip { border: 1px solid #8886; border-radius: 999px; padding: 0.05rem 0.45rem; font-size: 0.82em; cursor: pointer; background: #8881; }
+  .qu-chat-reaction-chip[data-mine="true"] { border-color: #3390ec; background: #3390ec33; }
+  .qu-chat-msg-meta { display: flex; justify-content: flex-end; align-items: center; gap: 0.3rem; margin-top: 0.15rem; font-size: 0.68em; opacity: 0.65; }
+  .qu-chat-tick[data-read="true"] { opacity: 1; color: #3390ec; }
+  .qu-chat-msg-row[data-mine="true"] .qu-chat-tick[data-read="true"] { color: #cdeaff; }
+
+  .qu-chat-popup { position: fixed; z-index: 60; background: canvas; color: canvastext; border: 1px solid #8884; border-radius: 0.7rem; padding: 0.3rem; min-width: 11rem; box-shadow: 0 4px 16px #00000050; }
+  .qu-chat-popup-item { all: unset; display: block; width: 100%; box-sizing: border-box; padding: 0.5rem 0.6rem; border-radius: 0.5rem; cursor: pointer; font-size: 0.9em; }
+  .qu-chat-popup-item:hover { background: #8882; }
+  .qu-chat-reaction-popup { position: fixed; z-index: 60; background: canvas; border: 1px solid #8884; border-radius: 999px; padding: 0.3rem; gap: 0.15rem; box-shadow: 0 4px 16px #00000050; }
+  .qu-chat-reaction-popup:not([hidden]) { display: flex; }
+  .qu-chat-reaction-popup button { all: unset; cursor: pointer; font-size: 1.3rem; line-height: 1; padding: 0.25rem; border-radius: 50%; }
+  .qu-chat-reaction-popup button:hover { background: #8882; }
+  .qu-chat-pin-list-popup { position: fixed; z-index: 60; width: min(20rem, 90vw); max-height: min(24rem, 70vh); overflow-y: auto; background: canvas; border: 1px solid #8884; border-radius: 0.6rem; box-shadow: 0 4px 16px #00000050; padding: 0.3rem; }
+  .qu-chat-pin-list-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.5rem; border-radius: 0.4rem; }
+  .qu-chat-pin-list-row:hover { background: #8882; }
+  .qu-chat-pin-list-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.85em; cursor: pointer; }
+  .qu-chat-pin-list-unpin { all: unset; cursor: pointer; opacity: 0.6; padding: 0.1rem 0.3rem; }
+
+  .qu-chat-forward-modal-backdrop { position: fixed; inset: 0; background: #00000060; z-index: 70; display: flex; align-items: center; justify-content: center; }
+  .qu-chat-forward-modal { background: canvas; color: canvastext; border-radius: 0.7rem; width: min(24rem, 92vw); max-height: 80vh; display: flex; flex-direction: column; padding: 0.8rem; gap: 0.5rem; box-shadow: 0 8px 30px #00000060; }
+  .qu-chat-forward-modal h2 { margin: 0; font-size: 1.05em; }
+  .qu-chat-forward-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 0.2rem; }
+  .qu-chat-forward-room-btn { all: unset; display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem; border-radius: 0.5rem; cursor: pointer; width: 100%; box-sizing: border-box; }
+  .qu-chat-forward-room-btn:hover { background: #8882; }
+  .qu-chat-forward-close { align-self: flex-end; background: none; border: 1px solid #8884; border-radius: 0.4rem; cursor: pointer; padding: 0.3rem 0.7rem; }
+
+  .qu-chat-reply-banner { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85em; opacity: 0.85; padding: 0.35rem 0.6rem; border-radius: 0.5rem; background: #8882; margin-bottom: 0.4rem; flex-shrink: 0; }
+  .qu-chat-reply-banner-body { flex: 1; min-width: 0; }
+  .qu-chat-reply-banner-label { font-weight: 600; display: block; }
+  .qu-chat-reply-banner-text { opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+  .qu-chat-reply-banner button { background: none; border: none; cursor: pointer; opacity: 0.6; flex-shrink: 0; }
+
+  .qu-chat-composer { display: flex; gap: 0.4rem; align-items: center; padding-top: 0.4rem; flex-shrink: 0; position: sticky; bottom: 0; background: canvas; }
   .qu-chat-composer textarea { flex: 1; resize: none; max-height: 7rem; font: inherit; padding: 0.55rem 0.9rem; border-radius: 1.3rem; border: 1px solid #8884; background: transparent; color: inherit; }
-  .qu-chat-attach-btn, .qu-chat-send-btn { border: none; background: #8882; border-radius: 50%; width: 2.4rem; height: 2.4rem; flex-shrink: 0; cursor: pointer; font-size: 1.1em; display: flex; align-items: center; justify-content: center; }
+  .qu-chat-icon-btn, .qu-chat-send-btn { border: none; background: #8882; border-radius: 50%; width: 2.4rem; height: 2.4rem; flex-shrink: 0; cursor: pointer; font-size: 1.1em; display: flex; align-items: center; justify-content: center; }
   .qu-chat-send-btn { background: #3390ec; color: #fff; }
   .qu-chat-send-btn:hover { background: #2b7cd3; }
-  .qu-chat-pending-attachment { font-size: 0.8em; opacity: 0.8; display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.3rem; }
+  .qu-chat-pending-attachment { font-size: 0.8em; opacity: 0.8; display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.3rem; flex-shrink: 0; }
+
+  .qu-chat-voice-bar { display: flex; align-items: center; gap: 0.6rem; padding-top: 0.4rem; flex-shrink: 0; }
+  .qu-chat-voice-status { display: flex; align-items: center; gap: 0.4rem; flex: 1; font-variant-numeric: tabular-nums; }
+  .qu-chat-voice-dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; background: #8886; }
+  .qu-chat-voice-status[data-recording="true"] .qu-chat-voice-dot { background: #e5484d; animation: qu-chat-voice-pulse 1.2s ease-in-out infinite; }
+  @keyframes qu-chat-voice-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+  .qu-chat-voice-bar audio { flex: 1; max-width: 14rem; }
 
   .qu-chat-new-group { border: 1px solid #8884; border-radius: 0.6rem; padding: 0.7rem; margin-bottom: 0.7rem; display: flex; flex-direction: column; gap: 0.6rem; }
   .qu-chat-new-group input[type="text"] { padding: 0.5rem 0.7rem; border-radius: 0.5rem; border: 1px solid #8884; background: transparent; color: inherit; font: inherit; }
@@ -206,9 +278,68 @@ function renderAvatar(seed, label, avatarValue, { small = false } = {}) {
 
 function attachmentPreviewLabel(attachment) {
   if (!attachment) return '';
+  if (isVoiceMessageFilename(attachment.name)) return t('voiceMessage');
   if (attachment.mime?.startsWith('image/')) return `📷 ${t('photo')}`;
   if (attachment.mime?.startsWith('video/')) return `🎥 ${t('video')}`;
+  if (attachment.mime?.startsWith('audio/')) return t('voiceMessage');
   return `📎 ${t('file')}`;
+}
+
+// ============================================================================
+// LOCATION SHARING — a shared location is deliberately NOT a special message
+// type. It's a plain text message whose body happens to be a recognized map
+// URL (see parseLocationFromUrl()) - the same trick ReactivityJS/Qu's own
+// chat-lib.mjs uses. Rendering recognizes the URL shape and shows a static
+// OSM tile + coordinates instead of the raw link. No API key, no third-party
+// static-map service - a single 256x256 tile fetched directly from
+// tile.openstreetmap.org using the standard slippy-map tile math.
+// ============================================================================
+
+function buildLocationUrl(lat, lng) {
+  return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=16/${lat}/${lng}`;
+}
+
+/** @param {string} text @returns {{lat: number, lng: number}|null} */
+function parseLocationFromUrl(text) {
+  const osm = text.match(/openstreetmap\.org\/\?mlat=(-?[\d.]+)&mlon=(-?[\d.]+)/);
+  if (osm) return { lat: parseFloat(osm[1]), lng: parseFloat(osm[2]) };
+  const google = text.match(/google\.com\/maps\/search\/\?api=1&query=(-?[\d.]+),(-?[\d.]+)/);
+  if (google) return { lat: parseFloat(google[1]), lng: parseFloat(google[2]) };
+  return null;
+}
+
+function staticMapTileUrl(lat, lng, zoom = 15) {
+  const n = 2 ** zoom;
+  const x = Math.floor(((lng + 180) / 360) * n);
+  const latRad = (lat * Math.PI) / 180;
+  const y = Math.floor(((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n);
+  return `https://tile.openstreetmap.org/${zoom}/${x}/${y}.png`;
+}
+
+// ============================================================================
+// VOICE MESSAGES — an ordinary attachment (same encrypted upload path as an
+// image/video), distinguished purely by filename convention so playback can
+// label it "🎙️ Voice message" instead of a generic file - no separate
+// message-type field needed.
+// ============================================================================
+
+function voiceMessageFilename(ts) {
+  return `voice-message-${ts}.webm`;
+}
+
+function isVoiceMessageFilename(name) {
+  return typeof name === 'string' && /^voice-message-\d+\.\w+$/.test(name);
+}
+
+/** Shared floating-popup positioning: docks below the anchor, flips above if it would overflow the viewport bottom, clamps horizontally. */
+function positionPopup(popupEl, anchorRect) {
+  const popupRect = popupEl.getBoundingClientRect();
+  let top = anchorRect.bottom + 4;
+  if (top + popupRect.height > window.innerHeight) top = Math.max(4, anchorRect.top - popupRect.height - 4);
+  let left = anchorRect.left;
+  if (left + popupRect.width > window.innerWidth) left = window.innerWidth - popupRect.width - 4;
+  popupEl.style.top = `${top}px`;
+  popupEl.style.left = `${Math.max(4, left)}px`;
 }
 
 export function mount(container, { qu, services, segments, subscribe }) {
@@ -219,6 +350,8 @@ export function mount(container, { qu, services, segments, subscribe }) {
   const reactionUnwatches = new Map(); // messageId -> unwatch(), see reload()'s watchReactions() below
   let stopHeartbeat = null;
   let presenceTimer = null;
+  let readReceiptTimer = null;
+  const roomCleanups = []; // per-renderRoom() teardown (shared popups, document click listener) - see cleanupRoom() below
 
   container.classList.add('qu-chat-app');
 
@@ -472,10 +605,15 @@ export function mount(container, { qu, services, segments, subscribe }) {
     presenceEl.className = 'qu-chat-presence';
     const membersToggle = document.createElement('button');
     membersToggle.type = 'button';
-    membersToggle.textContent = t('membersCount', { count: memberPubs.length });
     if (isGroup) headerInfo.appendChild(membersToggle);
     else headerInfo.appendChild(presenceEl);
     header.appendChild(headerInfo);
+
+    const encHint = document.createElement('div');
+    encHint.className = 'qu-chat-encrypted-hint';
+    encHint.textContent = '🔒';
+    encHint.title = t('encrypted');
+    header.appendChild(encHint);
     container.appendChild(header);
 
     const membersEl = document.createElement('div');
@@ -509,17 +647,159 @@ export function mount(container, { qu, services, segments, subscribe }) {
       membersEl.hidden = false;
     });
 
-    const encHint = document.createElement('div');
-    encHint.className = 'qu-chat-encrypted-hint';
-    encHint.textContent = `🔒 ${t('encrypted')}`;
-    container.appendChild(encHint);
-
-    const pinnedEl = document.createElement('div');
-    container.appendChild(pinnedEl);
+    const pinnedBar = document.createElement('div');
+    pinnedBar.className = 'qu-chat-pinned-bar';
+    container.appendChild(pinnedBar);
 
     const listEl = document.createElement('ul');
     listEl.className = 'qu-chat-messages';
     container.appendChild(listEl);
+
+    // ---- Shared floating popups (ONE instance each, repositioned/repopulated
+    // per message - not one per bubble). Matches ReactivityJS/Qu's own
+    // examples/chat/app.mjs interaction model. ----
+    const actionsMenuEl = document.createElement('div');
+    actionsMenuEl.className = 'qu-chat-popup';
+    actionsMenuEl.hidden = true;
+    const reactionPopupEl = document.createElement('div');
+    reactionPopupEl.className = 'qu-chat-reaction-popup';
+    reactionPopupEl.hidden = true;
+    for (const emoji of REACTION_CHOICES) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = emoji;
+      btn.addEventListener('click', async () => {
+        const message = reactionPopupContext;
+        closePopups();
+        if (!message) return;
+        await services.threads.setReaction(spaceId, threadId, message.id, emoji);
+        await reload();
+      });
+      reactionPopupEl.appendChild(btn);
+    }
+    const pinListPopupEl = document.createElement('div');
+    pinListPopupEl.className = 'qu-chat-pin-list-popup';
+    pinListPopupEl.hidden = true;
+    document.body.append(actionsMenuEl, reactionPopupEl, pinListPopupEl);
+
+    let actionsMenuContext = null; // the message the actions menu is currently open for
+    let reactionPopupContext = null;
+
+    function closePopups() {
+      actionsMenuEl.hidden = true;
+      reactionPopupEl.hidden = true;
+      pinListPopupEl.hidden = true;
+      actionsMenuContext = null;
+      reactionPopupContext = null;
+    }
+    const onDocClick = (event) => {
+      if (!actionsMenuEl.hidden && !actionsMenuEl.contains(event.target) && !event.target.closest('.qu-chat-msg-actions-btn')) closePopups();
+      else if (!reactionPopupEl.hidden && !reactionPopupEl.contains(event.target)) closePopups();
+      else if (!pinListPopupEl.hidden && !pinListPopupEl.contains(event.target) && !event.target.closest('.qu-chat-pinned-count')) closePopups();
+    };
+    document.addEventListener('click', onDocClick);
+
+    function openActionsMenu(message, allMessages, isPinned, anchorEl) {
+      actionsMenuContext = message;
+      reactionPopupEl.hidden = true;
+      actionsMenuEl.textContent = '';
+      const mine = message.author === myActorPub;
+      const items = [
+        { label: t('react'), onClick: () => { closeActionsKeepMessage(); openReactionPopup(message, anchorEl); } },
+        { label: isPinned ? `📌 ${t('unpin')}` : `📌 ${t('pin')}`, onClick: async () => { closePopups(); await services.threads.setPinned(spaceId, threadId, message.id, !isPinned); await reload(); } },
+        { label: `↩️ ${t('reply')}`, onClick: () => { closePopups(); setComposerMode('reply', message); } },
+      ];
+      if (mine && message.body && !message.attachment) {
+        items.push({ label: `✏️ ${t('edit')}`, onClick: () => { closePopups(); setComposerMode('edit', message); } });
+      }
+      if (message.body) {
+        items.push({ label: `➡️ ${t('forward')}`, onClick: () => { closePopups(); openForwardModal(message); } });
+        items.push({ label: `📋 ${t('copyText')}`, onClick: async () => { closePopups(); try { await navigator.clipboard.writeText(message.body); } catch { /* clipboard unavailable - silently ignored, not critical */ } } });
+      }
+      for (const item of items) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'qu-chat-popup-item';
+        btn.textContent = item.label;
+        btn.addEventListener('click', (e) => { e.stopPropagation(); item.onClick(); });
+        actionsMenuEl.appendChild(btn);
+      }
+      actionsMenuEl.hidden = false;
+      positionPopup(actionsMenuEl, anchorEl.getBoundingClientRect());
+    }
+    function closeActionsKeepMessage() { actionsMenuEl.hidden = true; }
+    function openReactionPopup(message, anchorEl) {
+      reactionPopupContext = message;
+      reactionPopupEl.hidden = false;
+      positionPopup(reactionPopupEl, anchorEl.getBoundingClientRect());
+    }
+
+    async function openForwardModal(message) {
+      const [contacts, groupIds] = await Promise.all([services.contacts.listContacts(), services.chat.listMyGroups()]);
+      if (stopped) return;
+      const targets = [];
+      for (const { actorPub, profile } of contacts) {
+        if (target.type === 'direct' && actorPub === target.peerActorPub) continue;
+        targets.push({ href: `#/chat/${actorPub}`, seed: actorPub, name: profile?.alias || `~${actorPub.slice(0, 10)}…`, avatar: profile?.avatar ?? null, spaceId: SPACE, threadId: await roomId([myActorPub, actorPub]), config: THREAD_PRESETS.chat([myActorPub, actorPub]) });
+      }
+      for (const id of groupIds) {
+        if (target.type === 'group' && id === target.groupId) continue;
+        const gConfig = await services.threads.getConfig(SPACE, id);
+        if (!gConfig) continue;
+        targets.push({ href: `#/chat/g/${id}`, seed: id, name: gConfig.name || id, avatar: '👥', spaceId: SPACE, threadId: id, config: gConfig });
+      }
+      if (stopped) return;
+
+      const backdrop = document.createElement('div');
+      backdrop.className = 'qu-chat-forward-modal-backdrop';
+      const modal = document.createElement('div');
+      modal.className = 'qu-chat-forward-modal';
+      const heading = document.createElement('h2');
+      heading.textContent = t('forwardTo');
+      modal.appendChild(heading);
+
+      if (targets.length === 0) {
+        const empty = document.createElement('p');
+        empty.textContent = t('noRoomsToForward');
+        modal.appendChild(empty);
+      } else {
+        const list = document.createElement('ul');
+        list.className = 'qu-chat-forward-list';
+        for (const targetRoom of targets) {
+          const li = document.createElement('li');
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'qu-chat-forward-room-btn';
+          btn.append(renderAvatar(targetRoom.seed, targetRoom.name, targetRoom.avatar, { small: true }));
+          const span = document.createElement('span');
+          span.textContent = targetRoom.name;
+          btn.appendChild(span);
+          btn.addEventListener('click', async () => {
+            await services.threads.createThread(targetRoom.spaceId, targetRoom.threadId, targetRoom.config);
+            await services.threads.postMessage(targetRoom.spaceId, targetRoom.threadId, {
+              body: message.body,
+              extra: { forwardedFrom: { author: message.author, ts: message.ts, body: message.body } },
+            });
+            backdrop.remove();
+            location.hash = targetRoom.href;
+          });
+          li.appendChild(btn);
+          list.appendChild(li);
+        }
+        modal.appendChild(list);
+      }
+
+      const closeBtn = document.createElement('button');
+      closeBtn.type = 'button';
+      closeBtn.className = 'qu-chat-forward-close';
+      closeBtn.textContent = t('cancel');
+      closeBtn.addEventListener('click', () => backdrop.remove());
+      modal.appendChild(closeBtn);
+
+      backdrop.appendChild(modal);
+      backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
+      document.body.appendChild(backdrop);
+    }
 
     const replyBanner = document.createElement('div');
     replyBanner.className = 'qu-chat-reply-banner';
@@ -538,22 +818,38 @@ export function mount(container, { qu, services, segments, subscribe }) {
     fileInput.hidden = true;
     const attachBtn = document.createElement('button');
     attachBtn.type = 'button';
-    attachBtn.className = 'qu-chat-attach-btn';
+    attachBtn.className = 'qu-chat-icon-btn';
     attachBtn.textContent = '📎';
     attachBtn.title = t('attach');
+    const locationBtn = document.createElement('button');
+    locationBtn.type = 'button';
+    locationBtn.className = 'qu-chat-icon-btn';
+    locationBtn.textContent = '📍';
+    locationBtn.title = t('shareLocation');
+    const voiceBtn = document.createElement('button');
+    voiceBtn.type = 'button';
+    voiceBtn.className = 'qu-chat-icon-btn';
+    voiceBtn.textContent = '🎤';
+    voiceBtn.title = t('recordVoice');
     const input = document.createElement('textarea');
     input.rows = 1;
     input.placeholder = t('composerPlaceholder');
-    input.required = true;
     const sendBtn = document.createElement('button');
     sendBtn.type = 'submit';
     sendBtn.className = 'qu-chat-send-btn';
     sendBtn.textContent = '➤';
     sendBtn.title = t('send');
-    form.append(fileInput, attachBtn, input, sendBtn);
+    form.append(fileInput, attachBtn, locationBtn, voiceBtn, input, sendBtn);
     container.appendChild(form);
 
+    const voiceBar = document.createElement('div');
+    voiceBar.className = 'qu-chat-voice-bar';
+    voiceBar.hidden = true;
+    container.appendChild(voiceBar);
+
     let replyTo = null; // { id, author, body }
+    let editTarget = null; // message being edited
+    let forwardHint = null; // { author, ts, body } shown while composing a NEW message that will carry forwardedFrom - unused here (forwarding posts directly, see openForwardModal), kept null
     let pendingFile = null;
     let profileCache = new Map();
 
@@ -567,20 +863,43 @@ export function mount(container, { qu, services, segments, subscribe }) {
       return profile?.alias || `~${actorPub.slice(0, 10)}…`;
     }
 
-    function setReplyTo(message) {
-      replyTo = message ? { id: message.id, author: message.author, body: message.body } : null;
-      replyBanner.hidden = !replyTo;
+    function setComposerMode(mode, message) {
+      replyTo = null;
+      editTarget = null;
+      if (mode === 'reply') replyTo = { id: message.id, author: message.author, body: message.body };
+      else if (mode === 'edit') { editTarget = message; input.value = message.body ?? ''; }
+      renderComposerBanner();
+      input.focus();
+    }
+
+    async function renderComposerBanner() {
+      replyBanner.hidden = !(replyTo || editTarget);
       replyBanner.textContent = '';
-      if (replyTo) {
-        const label = document.createElement('span');
-        label.textContent = t('replyingTo', { name: replyTo.body.slice(0, 60) });
-        const cancel = document.createElement('button');
-        cancel.type = 'button';
-        cancel.textContent = t('cancelReply');
-        cancel.addEventListener('click', () => setReplyTo(null));
-        replyBanner.append(label, cancel);
-        input.focus();
+      if (!replyTo && !editTarget) return;
+      const body = document.createElement('div');
+      body.className = 'qu-chat-reply-banner-body';
+      const label = document.createElement('span');
+      label.className = 'qu-chat-reply-banner-label';
+      const text = document.createElement('span');
+      text.className = 'qu-chat-reply-banner-text';
+      if (editTarget) {
+        label.textContent = `✏️ ${t('editingMessage')}`;
+        text.textContent = editTarget.body?.slice(0, 80) ?? '';
+      } else {
+        label.textContent = t('replyingTo', { name: await nameFor(replyTo.author) });
+        text.textContent = replyTo.body?.slice(0, 80) || attachmentPreviewLabel(replyTo.attachment);
       }
+      body.append(label, text);
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = '✕';
+      cancel.addEventListener('click', () => {
+        replyTo = null;
+        editTarget = null;
+        input.value = '';
+        renderComposerBanner();
+      });
+      replyBanner.append(body, cancel);
     }
 
     attachBtn.addEventListener('click', () => fileInput.click());
@@ -604,6 +923,161 @@ export function mount(container, { qu, services, segments, subscribe }) {
       }
     });
 
+    // ---- Location sharing: one-time position, sent as a plain text message
+    // whose body a recognized-URL renderer (see locationBlock() below) turns
+    // into a static-tile preview for every reader, including this one. ----
+    locationBtn.addEventListener('click', () => {
+      if (!navigator.geolocation) { pendingAttachmentEl.hidden = false; pendingAttachmentEl.textContent = t('locationNotSupported'); return; }
+      locationBtn.disabled = true;
+      navigator.geolocation.getCurrentPosition(
+        async (pos) => {
+          locationBtn.disabled = false;
+          const { latitude, longitude } = pos.coords;
+          await services.threads.postMessage(spaceId, threadId, { body: buildLocationUrl(latitude.toFixed(5), longitude.toFixed(5)) });
+          await reload();
+        },
+        () => { locationBtn.disabled = false; pendingAttachmentEl.hidden = false; pendingAttachmentEl.textContent = t('locationFailed'); },
+        { enableHighAccuracy: false, timeout: 10_000 }
+      );
+    });
+
+    // ---- Voice messages: MediaRecorder, armed-but-not-recording until an
+    // explicit Start tap (so the first moment isn't lost while the mic
+    // permission prompt is still up), then preview-before-send. ----
+    let mediaRecorder = null;
+    let recordedChunks = [];
+    let recordingStartedAt = 0;
+    let voiceTimerInterval = null;
+    let discardRecording = false;
+
+    voiceBtn.addEventListener('click', async () => {
+      if (typeof MediaRecorder === 'undefined') { pendingAttachmentEl.hidden = false; pendingAttachmentEl.textContent = t('voiceNotSupported'); return; }
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch {
+        pendingAttachmentEl.hidden = false; pendingAttachmentEl.textContent = t('voiceNotSupported');
+        return;
+      }
+      recordedChunks = [];
+      discardRecording = false;
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+      mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      mediaRecorder.addEventListener('dataavailable', (e) => { if (e.data.size) recordedChunks.push(e.data); });
+      mediaRecorder.addEventListener('stop', () => {
+        for (const track of stream.getTracks()) track.stop();
+        if (discardRecording) { resetVoiceBar(); return; }
+        renderVoicePreview(new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' }));
+      });
+      form.hidden = true;
+      renderVoiceBar('armed');
+    });
+
+    function resetVoiceBar() {
+      if (voiceTimerInterval) clearInterval(voiceTimerInterval);
+      voiceTimerInterval = null;
+      voiceBar.hidden = true;
+      voiceBar.textContent = '';
+      form.hidden = false;
+    }
+
+    function renderVoiceBar(state) {
+      voiceBar.hidden = false;
+      voiceBar.textContent = '';
+      const status = document.createElement('div');
+      status.className = 'qu-chat-voice-status';
+      status.dataset.recording = String(state === 'recording');
+      const dot = document.createElement('span');
+      dot.className = 'qu-chat-voice-dot';
+      const label = document.createElement('span');
+      label.textContent = '0:00';
+      status.append(dot, label);
+      voiceBar.appendChild(status);
+
+      const canPause = typeof mediaRecorder?.pause === 'function';
+      if (state === 'armed') {
+        const startBtn = document.createElement('button');
+        startBtn.type = 'button';
+        startBtn.className = 'qu-chat-icon-btn';
+        startBtn.textContent = '⏺';
+        startBtn.title = t('voiceStart');
+        startBtn.addEventListener('click', () => {
+          mediaRecorder.start();
+          recordingStartedAt = Date.now();
+          renderVoiceBar('recording');
+          voiceTimerInterval = setInterval(() => {
+            const seconds = Math.floor((Date.now() - recordingStartedAt) / 1000);
+            label.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+          }, 250);
+        });
+        voiceBar.appendChild(startBtn);
+      } else if (state === 'recording' || state === 'paused') {
+        status.dataset.recording = String(state === 'recording');
+        if (canPause) {
+          const toggleBtn = document.createElement('button');
+          toggleBtn.type = 'button';
+          toggleBtn.className = 'qu-chat-icon-btn';
+          if (state === 'recording') {
+            toggleBtn.textContent = '⏸';
+            toggleBtn.title = t('voicePause');
+            toggleBtn.addEventListener('click', () => { mediaRecorder.pause(); renderVoiceBar('paused'); });
+          } else {
+            toggleBtn.textContent = '⏺';
+            toggleBtn.title = t('voiceResume');
+            toggleBtn.addEventListener('click', () => { mediaRecorder.resume(); renderVoiceBar('recording'); });
+          }
+          voiceBar.appendChild(toggleBtn);
+        }
+        const stopBtn = document.createElement('button');
+        stopBtn.type = 'button';
+        stopBtn.className = 'qu-chat-icon-btn';
+        stopBtn.textContent = '⏹';
+        stopBtn.title = t('voiceStop');
+        stopBtn.addEventListener('click', () => { if (voiceTimerInterval) clearInterval(voiceTimerInterval); mediaRecorder.stop(); });
+        voiceBar.appendChild(stopBtn);
+      }
+      const discardBtn = document.createElement('button');
+      discardBtn.type = 'button';
+      discardBtn.className = 'qu-chat-icon-btn';
+      discardBtn.textContent = '🗑';
+      discardBtn.title = t('voiceDiscard');
+      discardBtn.addEventListener('click', () => {
+        if (mediaRecorder?.state !== 'inactive') { discardRecording = true; if (voiceTimerInterval) clearInterval(voiceTimerInterval); mediaRecorder.stop(); }
+        else resetVoiceBar();
+      });
+      voiceBar.appendChild(discardBtn);
+    }
+
+    function renderVoicePreview(blob) {
+      voiceBar.textContent = '';
+      const audio = document.createElement('audio');
+      audio.controls = true;
+      audio.src = URL.createObjectURL(blob);
+      voiceBar.appendChild(audio);
+      const sendVoiceBtn = document.createElement('button');
+      sendVoiceBtn.type = 'button';
+      sendVoiceBtn.className = 'qu-chat-icon-btn';
+      sendVoiceBtn.textContent = '➤';
+      sendVoiceBtn.title = t('voiceSend');
+      sendVoiceBtn.addEventListener('click', async () => {
+        resetVoiceBar();
+        const ts = Date.now();
+        const assetId = crypto.randomUUID();
+        const file = { name: voiceMessageFilename(ts), mime: blob.type || 'audio/webm', data: blob };
+        const meta = await services.assets.upload(spaceId, assetId, file, { readerPubs: readerPubsForEncryption });
+        await services.threads.postMessage(spaceId, threadId, { body: '', extra: { attachment: { assetId, name: meta.name, mime: meta.mime, size: meta.size } } });
+        await reload();
+      });
+      voiceBar.appendChild(sendVoiceBtn);
+      const discardBtn = document.createElement('button');
+      discardBtn.type = 'button';
+      discardBtn.className = 'qu-chat-icon-btn';
+      discardBtn.textContent = '🗑';
+      discardBtn.title = t('voiceDiscard');
+      discardBtn.addEventListener('click', resetVoiceBar);
+      voiceBar.appendChild(discardBtn);
+    }
+
     // reload() is triggered from two places that can land close together -
     // a direct call right after posting, and watch()'s own callback firing
     // for that same write - and messageRow() below has several real await
@@ -623,7 +1097,7 @@ export function mount(container, { qu, services, segments, subscribe }) {
       if (stopped || myToken !== renderToken) return;
 
       watchReactions(messages);
-      renderPinned(pinnedEl, messages, pinnedIds);
+      renderPinnedBar(messages, pinnedIds);
 
       listEl.textContent = '';
       if (messages.length === 0) {
@@ -631,17 +1105,17 @@ export function mount(container, { qu, services, segments, subscribe }) {
         li.textContent = t('empty');
         listEl.appendChild(li);
       } else {
-        let prevAuthor = null;
         for (const message of messages) {
-          const grouped = message.author === prevAuthor;
-          const row = await messageRow(message, messages, pinnedIds.includes(message.id), grouped);
+          const row = await messageRow(message, messages, pinnedIds.includes(message.id));
           if (myToken !== renderToken) return; // a newer reload() started mid-loop - abandon this stale one
           listEl.appendChild(row);
-          prevAuthor = message.author;
         }
         listEl.scrollTop = listEl.scrollHeight;
       }
       services.threads.markRead(spaceId, threadId).catch(() => {});
+      const lastTs = messages[messages.length - 1]?.ts;
+      if (lastTs) services.threads.publishReadReceipt(spaceId, threadId, lastTs).catch(() => {});
+      refreshTicks(messages);
     }
 
     // Reactions live in a SEPARATE per-message collection (see
@@ -660,60 +1134,150 @@ export function mount(container, { qu, services, segments, subscribe }) {
       }
     }
 
-    function renderPinned(el, messages, pinnedIds) {
-      el.textContent = '';
-      if (pinnedIds.length === 0) return;
-      el.className = 'qu-chat-pinned';
-      const heading = document.createElement('strong');
-      heading.textContent = t('pinned');
-      el.appendChild(heading);
-      for (const pinnedId of pinnedIds) {
-        const message = messages.find((m) => m.id === pinnedId);
-        const row = document.createElement('div');
-        row.className = 'qu-chat-pinned-row';
-        const text = document.createElement('span');
-        text.textContent = message?.body ?? pinnedId;
-        const unpinBtn = document.createElement('button');
-        unpinBtn.type = 'button';
-        unpinBtn.textContent = t('unpin');
-        unpinBtn.addEventListener('click', async () => {
-          await services.threads.setPinned(spaceId, threadId, pinnedId, false);
-          await reload();
-        });
-        row.append(text, unpinBtn);
-        el.appendChild(row);
+    // Read receipts (for the ✓✓ tick) live at fixed per-member paths, same
+    // as presence - polled alongside it rather than watch()'d individually,
+    // and update ONLY the tick elements in place (not a full reload()) so
+    // someone else marking a message read doesn't reset scroll position or
+    // interrupt an in-progress reaction-picker interaction.
+    const tickEls = new Map(); // messageId -> tick <span>
+    async function refreshTicks(messages) {
+      if (stopped || tickEls.size === 0) return;
+      const receipts = await services.threads.getReadReceipts(spaceId, threadId, memberPubs.filter((p) => p !== myActorPub));
+      if (stopped) return;
+      const readUpTo = Math.max(0, ...Object.values(receipts));
+      for (const message of messages) {
+        const el = tickEls.get(message.id);
+        if (!el || message.author !== myActorPub) continue;
+        const isRead = readUpTo >= message.ts;
+        el.textContent = isRead ? '✓✓' : '✓';
+        el.dataset.read = String(isRead);
       }
     }
 
-    async function messageRow(message, allMessages, isPinned, grouped) {
+    function renderPinnedBar(messages, pinnedIds) {
+      pinnedBar.dataset.visible = String(pinnedIds.length > 0);
+      pinnedBar.textContent = '';
+      if (pinnedIds.length === 0) return;
+      const topId = pinnedIds[pinnedIds.length - 1];
+      const topMessage = messages.find((m) => m.id === topId);
+      const jump = document.createElement('button');
+      jump.type = 'button';
+      jump.className = 'qu-chat-pinned-jump';
+      const icon = document.createElement('span');
+      icon.textContent = '📌';
+      const textWrap = document.createElement('span');
+      textWrap.className = 'qu-chat-pinned-jump-text';
+      textWrap.textContent = topMessage ? (topMessage.body?.slice(0, 60) || attachmentPreviewLabel(topMessage.attachment)) : t('pinnedMessage');
+      jump.append(icon, textWrap);
+      jump.addEventListener('click', () => scrollToMessage(topId));
+      pinnedBar.appendChild(jump);
+
+      if (pinnedIds.length > 1) {
+        const countBtn = document.createElement('button');
+        countBtn.type = 'button';
+        countBtn.className = 'qu-chat-pinned-count';
+        countBtn.textContent = String(pinnedIds.length);
+        countBtn.addEventListener('click', (e) => { e.stopPropagation(); openPinListPopup(messages, pinnedIds, countBtn); });
+        pinnedBar.appendChild(countBtn);
+      }
+    }
+
+    function openPinListPopup(messages, pinnedIds, anchorEl) {
+      pinListPopupEl.textContent = '';
+      for (const id of [...pinnedIds].reverse()) {
+        const message = messages.find((m) => m.id === id);
+        const row = document.createElement('div');
+        row.className = 'qu-chat-pin-list-row';
+        const text = document.createElement('span');
+        text.className = 'qu-chat-pin-list-text';
+        text.textContent = message ? (message.body?.slice(0, 60) || attachmentPreviewLabel(message.attachment)) : id;
+        text.addEventListener('click', () => { closePopups(); scrollToMessage(id); });
+        const unpinBtn = document.createElement('button');
+        unpinBtn.type = 'button';
+        unpinBtn.className = 'qu-chat-pin-list-unpin';
+        unpinBtn.textContent = '✕';
+        unpinBtn.title = t('unpin');
+        unpinBtn.addEventListener('click', async () => { closePopups(); await services.threads.setPinned(spaceId, threadId, id, false); await reload(); });
+        row.append(text, unpinBtn);
+        pinListPopupEl.appendChild(row);
+      }
+      pinListPopupEl.hidden = false;
+      positionPopup(pinListPopupEl, anchorEl.getBoundingClientRect());
+    }
+
+    function scrollToMessage(messageId) {
+      const row = listEl.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
+      if (!row) return;
+      row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      row.animate([{ backgroundColor: '#3390ec33' }, { backgroundColor: 'transparent' }], { duration: 900 });
+    }
+
+    /** @returns {HTMLElement|null} A location-preview block if `body` is a recognized map URL, else null. */
+    function locationBlock(body) {
+      const loc = parseLocationFromUrl(body);
+      if (!loc) return null;
+      const a = document.createElement('a');
+      a.className = 'qu-chat-location';
+      a.href = body;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      const img = document.createElement('img');
+      img.src = staticMapTileUrl(loc.lat, loc.lng);
+      img.alt = '';
+      img.addEventListener('error', () => img.remove());
+      a.appendChild(img);
+      const info = document.createElement('div');
+      const label = document.createElement('div');
+      label.textContent = t('location');
+      const coords = document.createElement('div');
+      coords.className = 'qu-chat-location-coords';
+      coords.textContent = `${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)}`;
+      info.append(label, coords);
+      a.appendChild(info);
+      return a;
+    }
+
+    async function messageRow(message, allMessages, isPinned) {
       const mine = message.author === myActorPub;
       const row = document.createElement('li');
       row.className = 'qu-chat-msg-row';
       row.dataset.mine = String(mine);
-      row.dataset.grouped = String(grouped);
+      row.dataset.messageId = message.id;
 
-      const avatarSlot = document.createElement('div');
-      avatarSlot.className = 'qu-chat-msg-avatar-slot';
-      if (isGroup && !mine && !grouped) {
-        const profile = profileCache.get(message.author);
-        avatarSlot.appendChild(renderAvatar(message.author, profile?.alias || message.author, profile?.avatar ?? null, { small: true }));
+      const headerRow = document.createElement('div');
+      headerRow.className = 'qu-chat-msg-header';
+      if (isGroup) {
+        const authorEl = document.createElement('span');
+        authorEl.className = 'qu-chat-msg-author';
+        authorEl.textContent = await nameFor(message.author);
+        headerRow.appendChild(authorEl);
       }
-      if (isGroup && !mine) row.appendChild(avatarSlot);
+      if (isPinned) {
+        const pinBadge = document.createElement('span');
+        pinBadge.className = 'qu-chat-msg-pin-badge';
+        pinBadge.textContent = '📌';
+        headerRow.appendChild(pinBadge);
+      }
+      const actionsBtn = document.createElement('button');
+      actionsBtn.type = 'button';
+      actionsBtn.className = 'qu-chat-msg-actions-btn';
+      actionsBtn.textContent = '⋮';
+      actionsBtn.title = t('more');
+      actionsBtn.addEventListener('click', (e) => { e.stopPropagation(); openActionsMenu(message, allMessages, isPinned, actionsBtn); });
+      headerRow.appendChild(actionsBtn);
+      row.appendChild(headerRow);
 
       const bubble = document.createElement('div');
       bubble.className = 'qu-chat-message';
 
-      if (isGroup && !mine && !grouped) {
-        const author = document.createElement('span');
-        author.className = 'qu-chat-author';
-        author.textContent = await nameFor(message.author);
-        bubble.appendChild(author);
-      }
-
       if (message.forwardedFrom) {
         const note = document.createElement('div');
         note.className = 'qu-chat-forward-note';
-        note.textContent = t('forwardedFrom', { name: message.forwardedFrom.author?.slice(0, 10) ?? '?' });
+        const author = document.createElement('div');
+        author.className = 'qu-chat-quote-author';
+        author.textContent = t('forwardedFrom', { name: await nameFor(message.forwardedFrom.author) });
+        note.appendChild(author);
+        if (message.forwardedFrom.body) note.appendChild(document.createTextNode(message.forwardedFrom.body.slice(0, 100)));
         bubble.appendChild(note);
       }
       if (message.replyTo) {
@@ -721,12 +1285,20 @@ export function mount(container, { qu, services, segments, subscribe }) {
         if (quoted) {
           const quote = document.createElement('div');
           quote.className = 'qu-chat-reply-quote';
-          quote.textContent = quoted.body.slice(0, 80);
+          const author = document.createElement('div');
+          author.className = 'qu-chat-quote-author';
+          author.textContent = await nameFor(quoted.author);
+          quote.appendChild(author);
+          quote.appendChild(document.createTextNode(quoted.body?.slice(0, 80) || attachmentPreviewLabel(quoted.attachment)));
+          quote.addEventListener('click', () => scrollToMessage(quoted.id));
           bubble.appendChild(quote);
         }
       }
 
-      if (message.body) {
+      const locBlock = message.body ? locationBlock(message.body) : null;
+      if (locBlock) {
+        bubble.appendChild(locBlock);
+      } else if (message.body) {
         const body = document.createElement('div');
         body.className = 'qu-chat-body';
         body.textContent = message.body;
@@ -736,7 +1308,17 @@ export function mount(container, { qu, services, segments, subscribe }) {
       if (message.attachment) {
         const attEl = document.createElement('div');
         attEl.className = 'qu-chat-attachment';
-        if (message.attachment.mime?.startsWith('image/')) {
+        const isVoice = isVoiceMessageFilename(message.attachment.name);
+        if (isVoice || message.attachment.mime?.startsWith('audio/')) {
+          if (isVoice) { const label = document.createElement('div'); label.className = 'qu-chat-voice-label'; label.textContent = t('voiceMessage'); attEl.appendChild(label); }
+          const audio = document.createElement('audio');
+          audio.controls = true;
+          services.assets.download(spaceId, message.attachment.assetId).then((asset) => {
+            if (stopped || !asset) return;
+            audio.src = URL.createObjectURL(new Blob([asset.data], { type: asset.meta.mime }));
+          });
+          attEl.appendChild(audio);
+        } else if (message.attachment.mime?.startsWith('image/')) {
           const img = document.createElement('img');
           services.assets.download(spaceId, message.attachment.assetId).then((asset) => {
             if (stopped || !asset) return;
@@ -771,67 +1353,46 @@ export function mount(container, { qu, services, segments, subscribe }) {
         bubble.appendChild(attEl);
       }
 
-      const footer = document.createElement('div');
-      footer.className = 'qu-chat-msg-footer';
+      const reactions = await services.threads.getReactions(spaceId, threadId, message.id);
+      const reactionEntries = Object.entries(reactions).filter(([, pubs]) => pubs.length > 0);
+      if (reactionEntries.length > 0) {
+        const reactionsRow = document.createElement('div');
+        reactionsRow.className = 'qu-chat-reactions';
+        for (const [emoji, reactorPubs] of reactionEntries) {
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'qu-chat-reaction-chip';
+          const mineReaction = reactorPubs.includes(myActorPub);
+          chip.dataset.mine = String(mineReaction);
+          chip.textContent = `${emoji} ${reactorPubs.length}`;
+          chip.addEventListener('click', async () => {
+            await services.threads.setReaction(spaceId, threadId, message.id, mineReaction ? null : emoji);
+            await reload();
+          });
+          reactionsRow.appendChild(chip);
+        }
+        bubble.appendChild(reactionsRow);
+      }
+
+      const meta = document.createElement('div');
+      meta.className = 'qu-chat-msg-meta';
+      if (message.editedAt) {
+        const edited = document.createElement('span');
+        edited.textContent = '✏️';
+        meta.appendChild(edited);
+      }
       const time = document.createElement('span');
       time.textContent = fmtTime(message.ts);
-      footer.appendChild(time);
-      bubble.appendChild(footer);
-
-      const actions = document.createElement('div');
-      actions.className = 'qu-chat-message-actions';
-
-      const reactions = await services.threads.getReactions(spaceId, threadId, message.id);
-      for (const [emoji, reactorPubs] of Object.entries(reactions)) {
-        if (reactorPubs.length === 0) continue;
-        const chip = document.createElement('button');
-        chip.type = 'button';
-        chip.className = 'qu-chat-reaction-chip';
-        const mineReaction = reactorPubs.includes(myActorPub);
-        chip.dataset.mine = String(mineReaction);
-        chip.textContent = `${emoji} ${reactorPubs.length}`;
-        chip.addEventListener('click', async () => {
-          await services.threads.setReaction(spaceId, threadId, message.id, mineReaction ? null : emoji);
-          await reload();
-        });
-        actions.appendChild(chip);
+      meta.appendChild(time);
+      if (mine) {
+        const tick = document.createElement('span');
+        tick.className = 'qu-chat-tick';
+        tick.textContent = '✓';
+        tickEls.set(message.id, tick);
+        meta.appendChild(tick);
       }
+      bubble.appendChild(meta);
 
-      const reactBtn = document.createElement('button');
-      reactBtn.type = 'button';
-      reactBtn.textContent = t('react');
-      const picker = document.createElement('span');
-      picker.className = 'qu-chat-reaction-picker';
-      picker.hidden = true;
-      for (const emoji of REACTION_CHOICES) {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.textContent = emoji;
-        btn.addEventListener('click', async () => {
-          await services.threads.setReaction(spaceId, threadId, message.id, emoji);
-          picker.hidden = true;
-          await reload();
-        });
-        picker.appendChild(btn);
-      }
-      reactBtn.addEventListener('click', () => { picker.hidden = !picker.hidden; });
-
-      const replyBtn = document.createElement('button');
-      replyBtn.type = 'button';
-      replyBtn.textContent = '↩';
-      replyBtn.addEventListener('click', () => setReplyTo(message));
-
-      const pinBtn = document.createElement('button');
-      pinBtn.type = 'button';
-      pinBtn.textContent = isPinned ? '📌' : '📍';
-      pinBtn.title = isPinned ? t('unpin') : t('pin');
-      pinBtn.addEventListener('click', async () => {
-        await services.threads.setPinned(spaceId, threadId, message.id, !isPinned);
-        await reload();
-      });
-
-      actions.append(reactBtn, picker, replyBtn, pinBtn);
-      bubble.appendChild(actions);
       row.appendChild(bubble);
       return row;
     }
@@ -841,6 +1402,15 @@ export function mount(container, { qu, services, segments, subscribe }) {
       const body = input.value.trim();
       if (!body && !pendingFile) return;
       input.value = '';
+
+      if (editTarget) {
+        const editingId = editTarget.id;
+        editTarget = null;
+        renderComposerBanner();
+        await services.threads.editMessage(spaceId, threadId, editingId, { body });
+        await reload();
+        return;
+      }
 
       const extra = {};
       if (replyTo) extra.replyTo = replyTo.id; // also passed as the top-level param below - kept in sync, never diverging
@@ -859,7 +1429,8 @@ export function mount(container, { qu, services, segments, subscribe }) {
       pendingFile = null;
       fileInput.value = '';
       pendingAttachmentEl.hidden = true;
-      setReplyTo(null);
+      replyTo = null;
+      renderComposerBanner();
 
       await services.threads.postMessage(spaceId, threadId, { body, replyTo: replyToId, extra });
       await reload();
@@ -875,26 +1446,46 @@ export function mount(container, { qu, services, segments, subscribe }) {
     await reload();
     unwatch = watch(qu, paths.collectionPath(spaceId, paths.threadMessagesCollectionId(threadId)), reload, { initial: false });
     unwatchPins = watch(qu, paths.collectionPath(spaceId, paths.threadPinsCollectionId(threadId)), reload, { initial: false });
+    readReceiptTimer = setInterval(() => {
+      services.threads.listMessages(spaceId, threadId).then((messages) => { if (!stopped) refreshTicks(messages); }).catch(() => {});
+    }, READ_RECEIPT_POLL_MS);
 
-    if (!isGroup) {
-      stopHeartbeat = services.threads.startHeartbeat(spaceId, threadId);
-      async function refreshPresence() {
-        if (stopped) return;
-        const presence = await services.threads.getPresence(spaceId, threadId, memberPubs);
-        const theirs = presence[target.peerActorPub];
-        presenceEl.textContent = '';
-        const dot = document.createElement('span');
-        dot.className = 'qu-chat-presence-dot';
-        dot.dataset.online = String(!!theirs?.online);
-        const label = document.createElement('span');
-        if (theirs?.online) label.textContent = t('online');
-        else if (theirs) label.textContent = t('lastSeen', { seconds: Math.round((Date.now() - theirs.lastSeen) / 1000) });
-        else label.textContent = t('offline');
-        presenceEl.append(dot, label);
+    stopHeartbeat = services.threads.startHeartbeat(spaceId, threadId, { intervalMs: PRESENCE_HEARTBEAT_MS });
+    async function refreshPresence() {
+      if (stopped) return;
+      const presence = await services.threads.getPresence(spaceId, threadId, memberPubs, { staleAfterMs: PRESENCE_STALE_MS });
+      presenceEl.textContent = '';
+      if (isGroup) {
+        const onlineCount = memberPubs.filter((p) => p !== myActorPub && presence[p]?.online).length;
+        membersToggle.textContent = t('membersOnline', { count: memberPubs.length, online: onlineCount });
+        return;
       }
-      await refreshPresence();
-      presenceTimer = setInterval(refreshPresence, 5000);
+      const theirs = presence[target.peerActorPub];
+      const dot = document.createElement('span');
+      dot.className = 'qu-chat-presence-dot';
+      dot.dataset.online = String(!!theirs?.online);
+      const label = document.createElement('span');
+      if (theirs?.online) label.textContent = t('online');
+      else if (theirs?.lastSeen) label.textContent = t('lastSeen', { time: fmtTime(theirs.lastSeen) });
+      else label.textContent = t('offline');
+      presenceEl.append(dot, label);
     }
+    await refreshPresence();
+    presenceTimer = setInterval(refreshPresence, 5000);
+
+    // Per-room cleanup (this function's own popups/timers), layered under
+    // the mount-level cleanup below which handles cross-room state (watch,
+    // heartbeat, presence timer already assigned to the outer closure).
+    // `onDocClick` itself was already registered right after it was defined,
+    // above.
+    const cleanupRoom = () => {
+      document.removeEventListener('click', onDocClick);
+      actionsMenuEl.remove();
+      reactionPopupEl.remove();
+      pinListPopupEl.remove();
+      if (readReceiptTimer) clearInterval(readReceiptTimer);
+    };
+    roomCleanups.push(cleanupRoom);
   }
 
   return () => {
@@ -905,5 +1496,7 @@ export function mount(container, { qu, services, segments, subscribe }) {
     reactionUnwatches.clear();
     stopHeartbeat?.();
     if (presenceTimer) clearInterval(presenceTimer);
+    if (readReceiptTimer) clearInterval(readReceiptTimer);
+    for (const cleanup of roomCleanups) cleanup();
   };
 }
