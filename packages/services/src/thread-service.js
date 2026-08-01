@@ -356,7 +356,20 @@ export class ThreadService {
    */
   async getReactions(spaceId, threadId, messageId) {
     const collectionId = threadReactionsCollectionId(threadId, messageId);
-    const paths = await this.collections.listRawPaths(spaceId, collectionId);
+    let paths = await this.collections.listRawPaths(spaceId, collectionId);
+    // A length-0 result here means EITHER "no reactions" OR "this
+    // session hasn't synced this message's reactions collection yet" -
+    // listRawPaths() can't tell the two apart (unlike getConfig()'s
+    // null-vs-value distinction), so an empty result always gets one
+    // backfill attempt. Harmless when genuinely empty (syncFetch just
+    // finds nothing new); without it, a room opened after reactions
+    // already existed showed messages correctly but reactions stayed
+    // permanently empty until someone reacted again while this peer
+    // was present.
+    if (paths.length === 0 && this.syncFetch) {
+      await this.syncFetch(collectionPath(spaceId, collectionId)).catch(() => {});
+      paths = await this.collections.listRawPaths(spaceId, collectionId);
+    }
     const byEmoji = {};
     for (const path of paths) {
       const quBit = await this.qu.get(path);
@@ -387,7 +400,12 @@ export class ThreadService {
 
   /** @param {string|number} spaceId @param {string} threadId @returns {Promise<string[]>} Currently pinned message ids. */
   async listPinned(spaceId, threadId) {
-    const paths = await this.collections.listRawPaths(spaceId, threadPinsCollectionId(threadId));
+    const collectionId = threadPinsCollectionId(threadId);
+    let paths = await this.collections.listRawPaths(spaceId, collectionId);
+    if (paths.length === 0 && this.syncFetch) { // see getReactions()'s identical backfill for why an empty result still gets one attempt
+      await this.syncFetch(collectionPath(spaceId, collectionId)).catch(() => {});
+      paths = await this.collections.listRawPaths(spaceId, collectionId);
+    }
     return paths.map((path) => path.slice(path.lastIndexOf('/') + 1));
   }
 

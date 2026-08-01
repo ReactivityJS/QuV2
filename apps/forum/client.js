@@ -38,7 +38,7 @@ function ensureStyle() {
   document.head.appendChild(style);
 }
 
-export function mount(container, { qu, services, segments, subscribe }) {
+export function mount(container, { qu, services, segments, subscribe, fetch: syncFetch }) {
   ensureStyle();
   let stopped = false;
   let stopThreadView = null;
@@ -54,7 +54,19 @@ export function mount(container, { qu, services, segments, subscribe }) {
   const topicId = segments[1] ?? null; // segments[0] is "forum" itself
 
   (async () => {
-    if (await services.collections.list(SPACE, TOPICS_COLLECTION) === null) {
+    // A local miss here does NOT mean "no topics exist" - it can just as
+    // easily mean this session hasn't synced the topics collection YET
+    // (subscribe() only covers writes from here on, see its own doc
+    // comment). Backfilling via syncFetch before ever falling back to
+    // "create it empty" is what stops a late-joining peer from silently
+    // wiping out every topic someone else already created - a real bug
+    // found by an adversarial multi-peer test: without this, the SECOND
+    // person to ever open Forum overwrote the first person's topic list
+    // with an empty one.
+    if ((await services.collections.list(SPACE, TOPICS_COLLECTION)) === null && syncFetch) {
+      await syncFetch(paths.collectionPath(SPACE, TOPICS_COLLECTION)).catch(() => {});
+    }
+    if ((await services.collections.list(SPACE, TOPICS_COLLECTION)) === null) {
       await services.collections.create(SPACE, TOPICS_COLLECTION, []);
     }
     if (stopped) return;

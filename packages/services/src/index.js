@@ -58,7 +58,7 @@ export { unwrap, unwrapAll } from './unwrap.js';
 export function createServices(qu, { assetEngine, identityEngine, syncFetch }) {
   const collections = new CollectionService(qu);
   const starred = new StarredService(qu, identityEngine);
-  const documents = new DocumentService(qu);
+  const documents = new DocumentService(qu, syncFetch);
   const threads = new ThreadService(qu, identityEngine, collections, syncFetch);
   return {
     documents,
@@ -74,7 +74,7 @@ export function createServices(qu, { assetEngine, identityEngine, syncFetch }) {
     cms: new CmsService(documents, collections),
     profile: new ProfileService(qu, identityEngine, syncFetch),
     notificationPrefs: new NotificationPrefsService(qu, identityEngine),
-    pushSubscriptions: new PushSubscriptionService(documents, collections, identityEngine),
+    pushSubscriptions: new PushSubscriptionService(documents, collections, identityEngine, syncFetch),
     geochase: new GeoChaseService(qu, documents, collections, identityEngine),
   };
 }
