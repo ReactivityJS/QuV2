@@ -1,0 +1,11 @@
+{
+  "name": "calendar",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "Calendar",
+  "icon": "📅",
+  "navOrder": 14,
+  "requires": ["document-service"]
+}
