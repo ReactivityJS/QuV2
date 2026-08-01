@@ -66,6 +66,20 @@ export function isQuBit(value) {
 }
 
 /**
+ * Structural check: is `val` an encrypted envelope produced by QuStore's
+ * `put({ encryptWith, senderXPrivateKey })` (see store.js's `#seal()`)?
+ * Shape-only, same caveat as `isQuBit()` - doesn't verify anything, just
+ * distinguishes "this needs decrypting" from "this is already the
+ * plaintext value" for any caller reading a QuBit's `val` (ThreadService's
+ * message decryption, AssetEngine's attachment chunks/meta, ...).
+ * @param {*} val
+ * @returns {boolean}
+ */
+export function isEncryptedEnvelope(val) {
+  return !!val && typeof val === 'object' && typeof val.iv === 'string' && typeof val.ct === 'string' && Array.isArray(val.to);
+}
+
+/**
  * Creates a fresh, unsigned QuBit envelope for a value about to be written.
  * The actual signing/encryption happens later in QuStore's seal step - this
  * helper only establishes the canonical shape so every call site builds the

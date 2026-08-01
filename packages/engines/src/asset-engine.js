@@ -42,7 +42,7 @@
  * parse back. A base64 string round-trips through JSON as a single short
  * string instead.
  */
-import { QuCrypto } from '@qu/core';
+import { QuCrypto, isEncryptedEnvelope } from '@qu/core';
 
 export class AssetEngine {
   /**
@@ -100,32 +100,52 @@ export class AssetEngine {
    * would otherwise resolve to null forever even though `/blob/<space>` IS
    * subscribed - subscribing only delivers writes from the moment of the
    * call onward, not history.
+   * `decrypt` (if given) is applied to the meta document AND each chunk
+   * independently whenever it looks like an encrypted envelope (see
+   * `isEncryptedEnvelope()`) - both are written through the SAME `put()`
+   * options an upload was given (see `#handlePut()` forwarding `ctx.options`
+   * to every chunk and the meta write alike), so an encrypted upload
+   * produces an encrypted meta doc too, not just encrypted chunks. A
+   * caller that never uploads anything encrypted (no `decrypt` given, or
+   * an unencrypted asset) sees no behavior change.
    * @param {string} storePath - The original path passed to `put()`, e.g. `/store/gallery/assets/photo1`.
    * @param {(path: string) => Promise<object|null>} [syncFetch]
+   * @param {(quBit: {val: *, pub: string|null}) => Promise<*|null>} [decrypt]
    * @returns {Promise<{meta: object, data: Uint8Array}|null>}
    */
-  async getAsset(storePath, syncFetch = null) {
+  async getAsset(storePath, syncFetch = null, decrypt = null) {
     let metaQuBit = await this.qu.get(`${storePath}/meta`);
-    let meta = metaQuBit?.val;
-    if (!meta && syncFetch) {
+    if (!metaQuBit && syncFetch) {
       await syncFetch(`${storePath}/meta`).catch(() => {});
       metaQuBit = await this.qu.get(`${storePath}/meta`);
-      meta = metaQuBit?.val;
+    }
+    if (!metaQuBit) return null;
+
+    let meta = metaQuBit.val;
+    if (decrypt && isEncryptedEnvelope(meta)) {
+      meta = await decrypt(metaQuBit);
     }
     if (!meta) return null;
 
-    let chunks = await Promise.all(
+    let chunkBits = await Promise.all(
       Array.from({ length: meta.chunkCount }, (_, i) => this.qu.get(`${meta.blobPath}/chunk_${i}`))
     );
-    if (syncFetch && chunks.some((c) => !c)) {
-      await Promise.all(chunks.map((c, i) => (c ? null : syncFetch(`${meta.blobPath}/chunk_${i}`).catch(() => {}))));
-      chunks = await Promise.all(
+    if (syncFetch && chunkBits.some((c) => !c)) {
+      await Promise.all(chunkBits.map((c, i) => (c ? null : syncFetch(`${meta.blobPath}/chunk_${i}`).catch(() => {}))));
+      chunkBits = await Promise.all(
         Array.from({ length: meta.chunkCount }, (_, i) => this.qu.get(`${meta.blobPath}/chunk_${i}`))
       );
     }
-    if (chunks.some((c) => !c)) return null; // a chunk is missing - incomplete/corrupt upload, or unreachable peer
+    if (chunkBits.some((c) => !c)) return null; // a chunk is missing - incomplete/corrupt upload, or unreachable peer
 
-    const chunkBytes = chunks.map((c) => QuCrypto.fromBase64(c.val));
+    const chunkVals = [];
+    for (const c of chunkBits) {
+      let v = c.val;
+      if (decrypt && isEncryptedEnvelope(v)) v = await decrypt(c);
+      if (v == null) return null; // couldn't decrypt this chunk - not a reader, or sender unresolvable
+      chunkVals.push(v);
+    }
+    const chunkBytes = chunkVals.map((v) => QuCrypto.fromBase64(v));
     const totalLength = chunkBytes.reduce((sum, b) => sum + b.length, 0);
     const data = new Uint8Array(totalLength);
     let offset = 0;

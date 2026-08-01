@@ -35,3 +35,13 @@ export function threadMessagePath(spaceId, threadId, messageId) {
 export function threadMessagesCollectionId(threadId) {
   return `thread-${threadId}`;
 }
+
+/** @param {string} threadId @param {string} messageId @returns {string} The CollectionService collectionId used for one message's reactions. */
+export function threadReactionsCollectionId(threadId, messageId) {
+  return `thread-${threadId}-reactions-${messageId}`;
+}
+
+/** @param {string} threadId @returns {string} The CollectionService collectionId used for a thread's pinned messages. */
+export function threadPinsCollectionId(threadId) {
+  return `thread-${threadId}-pins`;
+}

@@ -1,7 +1,8 @@
 import { QuCrypto } from '@qu/core';
-import { threadMetaPath, threadMessagePath, threadMessagesCollectionId, collectionPath } from './paths.js';
+import { threadMetaPath, threadMessagePath, threadMessagesCollectionId, threadReactionsCollectionId, threadPinsCollectionId, collectionPath } from './paths.js';
 import { applyFormatting } from './thread-formatting.js';
 import { putPrivate, getPrivate } from './private-storage.js';
+import { isEncryptedEnvelope, resolveReaderXKeys, decryptEnvelope } from './crypto-envelope.js';
 
 /**
  * THREAD SERVICE — the Entity API for Threads (see @qu/engines/thread-engine.js
@@ -86,21 +87,16 @@ export class ThreadService {
    * @returns {Promise<object>} The thread's config (existing or newly created).
    */
   async createThread(spaceId, threadId, config = {}) {
-    let existing = await this.getConfig(spaceId, threadId);
     // A deterministically-derived thread (Chat's roomId(), or any app that
     // calls createThread() unconditionally on every mount - see
     // @qu/thread-ui's mountThreadView()) is very often ALREADY created by
     // the other side by the time this identity opens it for the first
-    // time. A local-only miss here must not be read as "doesn't exist" -
-    // backfilling via syncFetch first, and only creating if it's really
-    // missing everywhere, is what stops this call from blowing away an
-    // existing thread's messages collection with a fresh empty one
-    // (collections.create() is an unconditional overwrite, not a
-    // create-if-absent - see CollectionService.create()).
-    if (!existing && this.syncFetch) {
-      await this.syncFetch(threadMetaPath(spaceId, threadId)).catch(() => {});
-      existing = await this.getConfig(spaceId, threadId);
-    }
+    // time. getConfig()'s own syncFetch backfill is what stops a
+    // local-only miss from being misread as "doesn't exist" here - without
+    // it, this would blow away an existing thread's messages collection
+    // with a fresh empty one (collections.create() is an unconditional
+    // overwrite, not a create-if-absent - see CollectionService.create()).
+    const existing = await this.getConfig(spaceId, threadId);
     if (existing) return existing;
 
     const normalized = { writers: '*', readers: '*', replyMode: 'flat', formatting: [], ...config };
@@ -109,10 +105,23 @@ export class ThreadService {
     return normalized;
   }
 
-  /** @param {string|number} spaceId @param {string} threadId @returns {Promise<object|null>} */
+  /**
+   * Backfills via `syncFetch` (if provided) on a local miss - see
+   * `createThread()`'s doc comment for why this matters even for a caller
+   * that only wants to READ a config (e.g. Chat's group room view uses
+   * this directly, without ever calling `createThread()`, to tell "this
+   * group doesn't exist / I'm not in it" apart from "just hasn't synced
+   * to this session yet").
+   * @param {string|number} spaceId @param {string} threadId @returns {Promise<object|null>}
+   */
   async getConfig(spaceId, threadId) {
-    const quBit = await this.qu.get(threadMetaPath(spaceId, threadId));
-    return quBit?.val ?? null;
+    const path = threadMetaPath(spaceId, threadId);
+    const local = await this.qu.get(path);
+    if (local) return local.val;
+    if (!this.syncFetch) return null;
+    await this.syncFetch(path).catch(() => {});
+    const retried = await this.qu.get(path);
+    return retried?.val ?? null;
   }
 
   /**
@@ -336,7 +345,7 @@ export class ThreadService {
     const path = `/store/${spaceId}/threads/${threadId}/reactions/${messageId}/${actorPub}`;
     const putOptions = { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey };
     await this.qu.put(path, emoji, putOptions);
-    const collectionId = `thread-${threadId}-reactions-${messageId}`;
+    const collectionId = threadReactionsCollectionId(threadId, messageId);
     if (emoji) await this.collections.addItem(spaceId, collectionId, path, putOptions);
     else await this.collections.removeItem(spaceId, collectionId, path, putOptions);
   }
@@ -346,7 +355,7 @@ export class ThreadService {
    * @returns {Promise<Record<string, string[]>>} `{ emoji: [reactorActorPub, ...] }`.
    */
   async getReactions(spaceId, threadId, messageId) {
-    const collectionId = `thread-${threadId}-reactions-${messageId}`;
+    const collectionId = threadReactionsCollectionId(threadId, messageId);
     const paths = await this.collections.listRawPaths(spaceId, collectionId);
     const byEmoji = {};
     for (const path of paths) {
@@ -370,7 +379,7 @@ export class ThreadService {
   async setPinned(spaceId, threadId, messageId, pinned, { asSpaceId = null } = {}) {
     const signKey = await this.#signingKey(asSpaceId);
     const putOptions = { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey };
-    const collectionId = `thread-${threadId}-pins`;
+    const collectionId = threadPinsCollectionId(threadId);
     const path = threadMessagePath(spaceId, threadId, messageId);
     if (pinned) await this.collections.addItem(spaceId, collectionId, path, putOptions);
     else await this.collections.removeItem(spaceId, collectionId, path, putOptions);
@@ -378,7 +387,7 @@ export class ThreadService {
 
   /** @param {string|number} spaceId @param {string} threadId @returns {Promise<string[]>} Currently pinned message ids. */
   async listPinned(spaceId, threadId) {
-    const paths = await this.collections.listRawPaths(spaceId, `thread-${threadId}-pins`);
+    const paths = await this.collections.listRawPaths(spaceId, threadPinsCollectionId(threadId));
     return paths.map((path) => path.slice(path.lastIndexOf('/') + 1));
   }
 
@@ -444,15 +453,7 @@ export class ThreadService {
    *   closed rather than posting a partially-unprotected message.
    */
   async #resolveReaderXKeys(readerPubs) {
-    const keys = [];
-    for (const pub of readerPubs) {
-      const profile = await this.#getProfile(pub);
-      if (!profile?.xPublicKey) {
-        throw new Error(`ThreadService: reader "${pub}" has no published profile - cannot encrypt for them`);
-      }
-      keys.push(QuCrypto.fromBase64Url(profile.xPublicKey));
-    }
-    return keys;
+    return resolveReaderXKeys(readerPubs, (pub) => this.#getProfile(pub));
   }
 
   /**
@@ -462,32 +463,8 @@ export class ThreadService {
    *   decrypt it (not a listed reader, or the sender's profile/key is unresolvable).
    */
   async #decryptMessage(quBit) {
-    const val = quBit.val;
-    const isEncrypted = val && typeof val === 'object' && typeof val.iv === 'string' && typeof val.ct === 'string' && Array.isArray(val.to);
-    if (!isEncrypted) return val;
-    if (!quBit.pub) return null; // no signer identity to resolve the sender's X key from
-
-    const myXKey = await this.identity.getMainXKey();
-    const myXPubB64 = QuCrypto.toBase64(myXKey.publicKey);
-    const entry = val.to.find((e) => e.pub === myXPubB64);
-    if (!entry) return null;
-
-    const senderActorPub = QuCrypto.toBase64Url(QuCrypto.fromBase64(quBit.pub));
-    const senderProfile = await this.#getProfile(senderActorPub);
-    if (!senderProfile?.xPublicKey) return null;
-
-    try {
-      const plaintext = await QuCrypto.decrypt(
-        QuCrypto.fromBase64(val.iv),
-        QuCrypto.fromBase64(val.ct),
-        QuCrypto.fromBase64(entry.key),
-        QuCrypto.fromBase64Url(senderProfile.xPublicKey),
-        myXKey.privateKeyPkcs8
-      );
-      return JSON.parse(new TextDecoder().decode(plaintext));
-    } catch {
-      return null;
-    }
+    if (!isEncryptedEnvelope(quBit.val)) return quBit.val;
+    return decryptEnvelope(quBit, this.identity, (pub) => this.#getProfile(pub));
   }
 }
 
@@ -502,6 +479,20 @@ export const THREAD_PRESETS = {
 
   /** A shared room restricted to a fixed member list. */
   chat: (memberPubs) => ({ writers: memberPubs, readers: memberPubs, replyMode: 'flat', formatting: ['mentions'] }),
+
+  /**
+   * A named multi-member room - same encrypted-for-a-fixed-member-list
+   * shape as `chat`, plus `name` (display) and `kind: 'group'` (so a
+   * generic reader of `getConfig()` - the Chat app's room list - can tell
+   * a group apart from a 1:1 room without a separate metadata store).
+   * Membership is fixed at creation, matching this preset's own fixed
+   * `readers` list: adding/removing members would mean re-keying every
+   * future message for a different reader set, which is real future work,
+   * not implemented here (a new group is the workaround for now, same as
+   * many messengers' own "can't add someone to an already-encrypted
+   * history" limitation).
+   */
+  group: (memberPubs, name) => ({ writers: memberPubs, readers: memberPubs, replyMode: 'flat', formatting: ['mentions'], kind: 'group', name }),
 
   /** A personal inbox: anyone can send TO it, only the owner can read it - exactly a mailbox. */
   mail: (ownerPub) => ({ writers: '*', readers: [ownerPub], replyMode: 'flat', formatting: ['markdown', 'mentions'] }),

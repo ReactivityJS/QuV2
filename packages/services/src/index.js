@@ -12,6 +12,7 @@ import { AssetService } from './asset-service.js';
 import { ActorService } from './actor-service.js';
 import { StarredService } from './starred-service.js';
 import { ThreadService, THREAD_PRESETS } from './thread-service.js';
+import { ChatService } from './chat-service.js';
 import { FavoritesService } from './favorites-service.js';
 import { ContactsService } from './contacts-service.js';
 import { DirectoryService } from './directory-service.js';
@@ -29,6 +30,7 @@ export {
   StarredService,
   ThreadService,
   THREAD_PRESETS,
+  ChatService,
   FavoritesService,
   ContactsService,
   DirectoryService,
@@ -57,13 +59,15 @@ export function createServices(qu, { assetEngine, identityEngine, syncFetch }) {
   const collections = new CollectionService(qu);
   const starred = new StarredService(qu, identityEngine);
   const documents = new DocumentService(qu);
+  const threads = new ThreadService(qu, identityEngine, collections, syncFetch);
   return {
     documents,
     collections,
-    assets: new AssetService(qu, assetEngine, syncFetch),
+    assets: new AssetService(qu, assetEngine, identityEngine, syncFetch),
     actors: new ActorService(identityEngine),
     starred,
-    threads: new ThreadService(qu, identityEngine, collections, syncFetch),
+    threads,
+    chat: new ChatService(threads, identityEngine),
     favorites: new FavoritesService(starred),
     contacts: new ContactsService(starred, identityEngine),
     directory: new DirectoryService(documents, collections, identityEngine, syncFetch),

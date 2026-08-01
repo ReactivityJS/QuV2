@@ -10,7 +10,7 @@ import { QuMount } from './mount.js';
 import { QuEvents } from './events.js';
 import { QuStore } from './store.js';
 import { VolatileAdapter } from './adapters/volatile.js';
-import { QUBIT_FIELDS, isQuBit, createQuBit } from './qubit.js';
+import { QUBIT_FIELDS, isQuBit, isEncryptedEnvelope, createQuBit } from './qubit.js';
 
 /**
  * QuCore is the concrete kernel instance apps interact with. It is just
@@ -22,4 +22,4 @@ export class QuCore extends QuStore {
   static crypto = QuCrypto;
 }
 
-export { QuCrypto, QuMount, QuEvents, QuStore, VolatileAdapter, QUBIT_FIELDS, isQuBit, createQuBit };
+export { QuCrypto, QuMount, QuEvents, QuStore, VolatileAdapter, QUBIT_FIELDS, isQuBit, isEncryptedEnvelope, createQuBit };
