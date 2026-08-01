@@ -7,5 +7,9 @@
   "label": "Calendar",
   "icon": "📅",
   "navOrder": 14,
-  "requires": ["document-service"]
+  "requires": ["document-service", "collection-service", "thread-service"],
+  "pushActions": [
+    { "id": "invite", "label": "Calendar invitations" },
+    { "id": "eventChange", "label": "Shared calendar changes" }
+  ]
 }

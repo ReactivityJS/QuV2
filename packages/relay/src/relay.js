@@ -300,12 +300,19 @@ export class QuRelay {
 
     const authorPub = quBit.pub ? QuCrypto.toBase64Url(QuCrypto.fromBase64(quBit.pub)) : null;
     const mentions = Array.isArray(quBit.val?.mentions) ? quBit.val.mentions : [];
-    const appId = spaceId === 'forum' ? 'forum' : spaceId === 'chat' ? 'chat' : String(spaceId).startsWith('inbox-') ? 'inbox' : String(spaceId);
+    // `calendar-<id>` is Calendar's per-calendar space (see
+    // apps/calendar/client.js's `activity`/`invite-<actorPub>` threads) -
+    // recognized generically like `inbox-<pub>` below so every shared
+    // calendar collapses into ONE 'calendar' row in notification settings
+    // instead of one per calendar id.
+    const calendarMatch = String(spaceId).match(/^calendar-(.+)$/);
+    const appId = spaceId === 'forum' ? 'forum' : spaceId === 'chat' ? 'chat'
+      : String(spaceId).startsWith('inbox-') ? 'inbox' : calendarMatch ? 'calendar' : String(spaceId);
 
     /** @type {Array<{actorPub: string, mention: boolean}>} */
     let candidates;
     if (Array.isArray(config.readers)) {
-      // A private thread (chat/mail): every OTHER reader gets a generic "new message" notice.
+      // A private thread (chat/mail/calendar activity+invites): every OTHER reader gets a notice.
       candidates = config.readers.filter((pub) => pub !== authorPub).map((actorPub) => ({ actorPub, mention: mentions.includes(actorPub) }));
     } else {
       // A public thread (forum): notifying every reader would mean notifying the entire
@@ -313,17 +320,34 @@ export class QuRelay {
       candidates = mentions.filter((pub) => pub !== authorPub).map((actorPub) => ({ actorPub, mention: true }));
     }
 
+    // Calendar has two distinct push-worthy actions (see its manifest's
+    // `pushActions`) distinguished by threadId, not by `mention` - an
+    // `invite-<actorPub>` thread only ever has that one invitee as a
+    // candidate (see ThreadService's `mail` preset), while `activity`'s
+    // candidates are every OTHER current member of the calendar.
+    const calendarFunctionName = appId === 'calendar' ? (threadId === 'activity' ? 'eventChange' : 'invite') : null;
+
     for (const { actorPub, mention } of candidates) {
       const prefs = await this.services.notificationPrefs.getPrefsFor(actorPub);
-      const functionName = mention ? 'mention' : 'newMessage';
+      const functionName = calendarFunctionName ?? (mention ? 'mention' : 'newMessage');
       if (!NotificationPrefsService.shouldNotify(prefs, { appId, mention, functionName })) continue;
 
-      const payload = {
-        title: mention ? `Mentioned in ${appId}` : `New message in ${appId}`,
-        body: `~${(authorPub ?? 'someone').slice(0, 10)}… sent a message`,
-        appId,
-        url: `#/${appId}`,
-      };
+      // Content-blind by design (see this method's own doc comment) - even
+      // for Calendar, the relay never decrypts the activity/invite body, so
+      // wording stays generic. The one thing it CAN safely add is the
+      // calendar id itself: that's the storage path (`spaceId`), not
+      // encrypted content, so the notification can deep-link straight to
+      // the specific calendar instead of just the app root.
+      const payload = calendarFunctionName === 'invite'
+        ? { title: 'Calendar invitation', body: 'You were invited to a shared calendar.', appId, url: `#/calendar/${calendarMatch[1]}` }
+        : calendarFunctionName === 'eventChange'
+        ? { title: 'Calendar updated', body: 'A shared calendar you belong to has new activity.', appId, url: `#/calendar/${calendarMatch[1]}` }
+        : {
+            title: mention ? `Mentioned in ${appId}` : `New message in ${appId}`,
+            body: `~${(authorPub ?? 'someone').slice(0, 10)}… sent a message`,
+            appId,
+            url: `#/${appId}`,
+          };
 
       try {
         await this.#writeInAppNotification(actorPub, payload);
