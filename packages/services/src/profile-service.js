@@ -74,32 +74,36 @@ export class ProfileService {
    * meaningfully for itself; there is no "get someone else's private
    * fields" - see getPublicProfile() for what a THIRD PARTY sees instead.
    *
-   * @returns {Promise<{alias: string, avatar: string, fields: Array<{key: string, value: string, visibility: 'public'|'private'}>}>}
+   * @returns {Promise<{pub: string, epub: string, alias: string, avatar: string, fields: Array<{key: string, value: string, visibility: 'public'|'private'}>}>}
    */
   async getOwnProfile() {
     const actorPub = await this.#myActorPub();
-    const { alias = '', avatar = '', xPublicKey, ...publicExtra } = (await this.identity.getProfile(actorPub)) ?? {};
+    const { alias = '', avatar = '', xPublicKey = '', ...publicExtra } = (await this.identity.getProfile(actorPub)) ?? {};
     const privateExtra = (await getPrivate(this.qu, this.identity, privateExtraPath(actorPub))) ?? {};
 
     const fields = [
       ...Object.entries(publicExtra).map(([key, value]) => ({ key, value, visibility: 'public' })),
       ...Object.entries(privateExtra).map(([key, value]) => ({ key, value, visibility: 'private' })),
     ];
-    return { alias, avatar, fields };
+    return { pub: actorPub, epub: xPublicKey, alias, avatar, fields };
   }
 
   /**
-   * What ANYONE (not just the owner) sees for a given identity - exactly
-   * the signed public document, with the internal `xPublicKey` bookkeeping
-   * field (see @qu/identity) hidden since it's not a profile field a UI
-   * should render.
+   * What ANYONE (not just the owner) sees for a given identity - the signed
+   * public document, plus the identity's two public keys surfaced under
+   * clear names: `pub` (the Ed25519 signing key - same as `actorPub`, the
+   * identity itself) and `epub` (the X25519 encryption key - what a
+   * ThreadService reader/sender resolves to encrypt/decrypt for this
+   * identity, see thread-service.js's `#resolveReaderXKeys`). Both are
+   * shown in the public profile UI per-request - a Qu identity IS its
+   * keypair, so hiding them serves no one.
    * @param {string} actorPub
-   * @returns {Promise<{alias: string, avatar: string, [key: string]: string}|null>}
+   * @returns {Promise<{pub: string, epub: string, alias: string, avatar: string, [key: string]: string}|null>}
    */
   async getPublicProfile(actorPub) {
     const profile = await this.identity.getProfile(actorPub);
     if (!profile) return null;
-    const { xPublicKey, ...rest } = profile;
-    return rest;
+    const { xPublicKey = '', ...rest } = profile;
+    return { pub: actorPub, epub: xPublicKey, ...rest };
   }
 }

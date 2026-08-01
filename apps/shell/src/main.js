@@ -27,9 +27,10 @@
  */
 import { QuRuntime, IndexedDBAdapter } from '@qu/runtime';
 import { DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine } from '@qu/engines';
-import { QuIdentityEngine } from '@qu/identity';
+import { QuIdentityEngine, actorPath } from '@qu/identity';
 import { SyncEngine, WebSocketClientTransport } from '@qu/sync';
 import { createServices, paths } from '@qu/services';
+import { watch } from '@qu/reactive';
 import { parseHash, buildHash } from './router.js';
 import { resolveFavoriteApps } from './nav.js';
 import { loadClientModule } from './load-client-module.js';
@@ -131,6 +132,14 @@ class Shell {
     const header = document.createElement('header');
     header.className = 'qu-shell-header';
 
+    // Brand comes FIRST - the one fixed anchor of the header, everything
+    // else (history, menu, identity) reads left-to-right after it.
+    const brand = document.createElement('a');
+    brand.href = buildHash('');
+    brand.className = 'qu-shell-brand';
+    brand.title = 'QUniverse';
+    brand.innerHTML = qLogoSvgMarkup({ size: 28 });
+
     const backBtn = document.createElement('button');
     backBtn.type = 'button';
     backBtn.className = 'qu-shell-history-btn';
@@ -147,22 +156,47 @@ class Shell {
     forwardBtn.setAttribute('aria-label', t('nav.forward'));
     forwardBtn.addEventListener('click', () => history.forward());
 
-    const brand = document.createElement('a');
-    brand.href = buildHash('');
-    brand.className = 'qu-shell-brand';
-    brand.title = 'QUniverse';
-    brand.innerHTML = qLogoSvgMarkup({ size: 28 });
-
     const spacer = document.createElement('span');
     spacer.className = 'qu-shell-spacer';
 
     this.headerMenu = createDisclosureMenu({ label: t('nav.menu'), buttonContent: '☰' });
 
-    const idLink = document.createElement('span');
-    idLink.className = 'qu-shell-id';
-    idLink.textContent = `~${this.actorPub.slice(0, 10)}…`;
+    // Standalone bell - deliberately NOT inside headerMenu (the user wants
+    // new-notification visibility at a glance, not one tap deep in a
+    // hamburger menu). Links straight to the notification feed (Task #38);
+    // the badge's live count comes from _watchNotifBadge() below.
+    const bellBtn = document.createElement('a');
+    bellBtn.href = buildHash('notifications');
+    bellBtn.className = 'qu-shell-bell';
+    bellBtn.title = t('nav.notifications');
+    bellBtn.setAttribute('aria-label', t('nav.notifications'));
+    bellBtn.textContent = '🔔';
+    this.notifBadgeEl = document.createElement('span');
+    this.notifBadgeEl.className = 'qu-shell-bell-badge';
+    this.notifBadgeEl.hidden = true;
+    bellBtn.appendChild(this.notifBadgeEl);
 
-    header.append(backBtn, forwardBtn, brand, spacer, this.headerMenu.el, idLink);
+    // Reactively bound to this identity's own profile (watch(), not a
+    // one-time read - see the user's explicit "UI soll komplett reactive
+    // sein" request): shows the alias the moment it's set/changed anywhere,
+    // falling back to the short pubkey while none is set. Links to this
+    // identity's own public-profile route (#/~<pub>, see _renderRoute()).
+    const idLink = document.createElement('a');
+    idLink.className = 'qu-shell-id';
+    idLink.href = buildHash(`~${this.actorPub}`);
+    idLink.textContent = `~${this.actorPub.slice(0, 10)}…`;
+    // watch() as TRIGGER, re-fetch via ProfileService - not the raw notify
+    // value, which for a profile is a signed envelope (`{profile,
+    // signature}`, see @qu/identity's `#publishProfileWithKeys()`), not the
+    // flat fields, and hasn't had its signature verified. Same pattern
+    // used everywhere else reactive UI in this app reads Thread/profile
+    // data (see @qu/reactive's own doc comment).
+    watch(this.qu, actorPath(this.actorPub, 'profile'), async () => {
+      const profile = await this.Qu.profile.getOwnProfile();
+      idLink.textContent = profile.alias || `~${this.actorPub.slice(0, 10)}…`;
+    });
+
+    header.append(brand, backBtn, forwardBtn, spacer, this.headerMenu.el, bellBtn, idLink);
 
     this.toolbarEl = document.createElement('div');
     this.toolbarEl.className = 'qu-shell-toolbar';
@@ -195,10 +229,44 @@ class Shell {
     // function's own doc comment for why the ordering matters.)
     this.sync.subscribe('/store/actors');
     this.sync.subscribe('/store/directory');
+    this.sync.subscribe(`/store/notifications-${this.actorPub}`);
+    this._watchNotifBadge();
 
     await this._loadAdminConfig();
     await this._refreshApps();
     await this._renderRoute();
+  }
+
+  /**
+   * Live unread-count badge on the header bell - reuses the exact
+   * notifications space/thread convention `apps/notifications/client.js`
+   * writes to and reads from (space `notifications-<myPub>`, thread id
+   * `notifications`, see THREAD_PRESETS.notifications). Recomputed on two
+   * independent triggers:
+   *   - `watch()` on the thread's message-list path - a brand new
+   *     notification arriving (locally or via sync).
+   *   - the `qu:notifications-read` window event, dispatched by
+   *     apps/notifications/client.js's feed view right after it calls
+   *     `markRead()` - that write lands on a SEPARATE, private path (see
+   *     ThreadService), which the watch() above has no way to see, so the
+   *     badge would otherwise only catch up on the NEXT new notification
+   *     instead of clearing the moment the feed is opened. Same cross-app
+   *     window-event convention `qu:favorites-changed` already uses.
+   */
+  _watchNotifBadge() {
+    const spaceId = `notifications-${this.actorPub}`;
+    const listPath = paths.collectionPath(spaceId, paths.threadMessagesCollectionId('notifications'));
+    const update = async () => {
+      const [messages, lastReadAt] = await Promise.all([
+        this.Qu.threads.listMessages(spaceId, 'notifications'),
+        this.Qu.threads.getLastReadAt(spaceId, 'notifications'),
+      ]);
+      const unread = messages.filter((m) => (m.ts ?? 0) > lastReadAt).length;
+      this.notifBadgeEl.textContent = unread > 9 ? '9+' : String(unread);
+      this.notifBadgeEl.hidden = unread === 0;
+    };
+    watch(this.qu, listPath, update);
+    window.addEventListener('qu:notifications-read', update);
   }
 
   /** Fetches the relay's admin pubkey list (see @qu/relay's `/config.json`) - a UI hint only, see that route's own doc comment for why it's not a security boundary. */
@@ -303,7 +371,15 @@ class Shell {
       return this._renderHome();
     }
 
-    const app = this.apps.find((a) => a.name === appId);
+    // #/~<pub> is a reserved sigil (matching the real Qu's own #/~<fp>
+    // profile-link convention) meaning "show this identity's public
+    // profile" - always dispatches to the 'profile' app regardless of the
+    // normal by-name catalog lookup below. `segments` is passed through
+    // UNCHANGED (still `['~<pub>']`) so apps/profile/client.js parses the
+    // pub back out of segments[0] itself; the shell doesn't need to know
+    // what a pub even looks like beyond this one prefix check.
+    const catalogName = appId.startsWith('~') ? 'profile' : appId;
+    const app = this.apps.find((a) => a.name === catalogName);
     if (!app?.clientMainUrl) {
       this._renderAppToolbar(null);
       const msg = document.createElement('p');
@@ -312,7 +388,7 @@ class Shell {
       return;
     }
 
-    await this._renderAppToolbar(appId);
+    await this._renderAppToolbar(catalogName);
 
     const loading = document.createElement('p');
     loading.textContent = `Loading ${app.label ?? app.name}…`;
@@ -389,21 +465,14 @@ class Shell {
     this.toolbarEl.appendChild(this.appMenu.el);
   }
 
+  // Directory visibility used to be toggled directly on the home screen;
+  // it now lives with the rest of this identity's settings in the Profile
+  // app's own-profile view (see apps/profile/client.js) - one settings
+  // surface instead of two.
   async _renderHome() {
     const welcome = document.createElement('p');
     welcome.textContent = t('home.welcome', { actor: this.actorPub.slice(0, 16) });
     this.screenEl.appendChild(welcome);
-
-    const label = document.createElement('label');
-    label.className = 'qu-shell-visibility-toggle';
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.checked = await this.Qu.directory.isVisible(this.actorPub);
-    checkbox.addEventListener('change', async () => {
-      await this.Qu.directory.setVisible(checkbox.checked, { actorPub: this.actorPub });
-    });
-    label.append(checkbox, document.createTextNode(' ' + t('home.listedInDirectory')));
-    this.screenEl.appendChild(label);
   }
 }
 

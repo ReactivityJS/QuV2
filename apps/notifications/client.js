@@ -1,21 +1,32 @@
 /**
- * NOTIFICATIONS — the settings screen for @qu/relay's push delivery (see
- * relay.js's `#deliverThreadPush()`): turn browser push on/off for this
- * device, and the granular preferences (@mention, per-app) that decide
- * WHICH of those pushes actually get sent - see
- * @qu/services/notification-prefs-service.js for why these preferences
- * are public/signed rather than private (the relay has to be able to read
- * them to decide whether to push at all).
+ * NOTIFICATIONS — two views on the same underlying Thread (space
+ * `notifications-<myPub>`, thread id `notifications`, THREAD_PRESETS.
+ * notifications - see @qu/services/thread-service.js), matching
+ * @qu/relay's `#writeInAppNotification()` which writes into that exact
+ * space/thread whenever it decides a push-worthy event happened (see
+ * relay.js's `#deliverThreadPush()`), independent of whether the recipient
+ * has push enabled at all:
+ *   - `#/notifications` (default): the feed itself - title/body/image
+ *     (mirroring what's partially already done for push payloads),
+ *     newest first, each linking to `extra.url`. Opening it marks
+ *     everything as read (see ThreadService's `markRead()`), which is
+ *     what clears the header's bell badge - see the `qu:notifications-read`
+ *     event dispatched below and apps/shell/src/main.js's
+ *     `_watchNotifBadge()`, which listens for it.
+ *   - `#/notifications/settings`: what used to be this app's ONLY view -
+ *     device push on/off plus the granular per-app/@mention preferences
+ *     (see @qu/services/notification-prefs-service.js for why these are
+ *     public/signed rather than private).
  *
- * The per-app list here is a fixed, small set (the built-in apps that
- * actually trigger pushes today - Forum/Chat/Inbox, all Thread-backed) -
- * there's no manifest field yet for "this app produces notifications" to
- * discover it generically; a real third-party notification-producing app
- * would need its id added here (or, as future work, such a field added to
- * the manifest schema and this list built from it).
+ * The per-app list in the settings view is a fixed, small set (the
+ * built-in apps that actually trigger pushes today - Forum/Chat/Inbox, all
+ * Thread-backed) - there's no manifest field yet for "this app produces
+ * notifications" to discover it generically.
  */
 import { subscribeToPush, unsubscribeFromPush, isPushSubscribed } from '@qu/push-client';
 import { createI18n } from '@qu/i18n';
+import { watch } from '@qu/reactive';
+import { paths } from '@qu/services';
 
 const NOTIFYING_APPS = [
   { id: 'forum', label: 'Forum', icon: '💬' },
@@ -26,6 +37,10 @@ const NOTIFYING_APPS = [
 const DICT = {
   en: {
     title: 'Notifications',
+    empty: 'No notifications yet.',
+    settingsLink: 'Settings →',
+    backToFeed: '← Notifications',
+    settingsTitle: 'Notification settings',
     devicePush: 'Push on this device',
     enablePush: 'Enable',
     disablePush: 'Disable',
@@ -38,6 +53,10 @@ const DICT = {
   },
   de: {
     title: 'Benachrichtigungen',
+    empty: 'Noch keine Benachrichtigungen.',
+    settingsLink: 'Einstellungen →',
+    backToFeed: '← Benachrichtigungen',
+    settingsTitle: 'Benachrichtigungseinstellungen',
     devicePush: 'Push auf diesem Gerät',
     enablePush: 'Aktivieren',
     disablePush: 'Deaktivieren',
@@ -58,6 +77,16 @@ const STYLE = `
   .qu-notif-apps { display: flex; flex-direction: column; gap: 0.4rem; }
   .qu-notif-error { color: #c00; font-size: 0.9em; }
   .qu-notif-status { opacity: 0.7; font-size: 0.85em; }
+  .qu-notif-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+  .qu-notif-header a { color: inherit; font-size: 0.85em; }
+  .qu-notif-feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+  .qu-notif-feed li { display: flex; gap: 0.7rem; padding: 0.6rem 0.7rem; border: 1px solid #8884; border-radius: 0.4rem; }
+  .qu-notif-feed a { text-decoration: none; color: inherit; display: flex; gap: 0.7rem; flex: 1; }
+  .qu-notif-feed img { width: 2.4rem; height: 2.4rem; border-radius: 0.3rem; object-fit: cover; flex-shrink: 0; }
+  .qu-notif-feed-title { font-weight: 600; }
+  .qu-notif-feed-body { opacity: 0.8; font-size: 0.9em; }
+  .qu-notif-feed-time { opacity: 0.5; font-size: 0.8em; }
+  .qu-notif-empty { opacity: 0.7; }
 `;
 
 function ensureStyle() {
@@ -68,93 +97,183 @@ function ensureStyle() {
   document.head.appendChild(style);
 }
 
-export function mount(container, { services }) {
+export function mount(container, { qu, services, segments, subscribe }) {
   ensureStyle();
   let stopped = false;
+  let stopWatch = null;
+
+  const view = segments[1] === 'settings' ? 'settings' : 'feed';
 
   (async () => {
-    const [prefs, subscribed] = await Promise.all([services.notificationPrefs.getOwnPrefs(), isPushSubscribed()]);
+    if (view === 'settings') {
+      await renderSettings(container, services, () => stopped);
+      return;
+    }
+
+    const myActorPub = await services.actors.whoAmI();
     if (stopped) return;
-    container.textContent = '';
+    const spaceId = `notifications-${myActorPub}`;
+    subscribe(`/store/${spaceId}`); // live updates for a relay-authored notice arriving while this feed is open
 
-    const heading = document.createElement('h1');
-    heading.textContent = t('title');
-    container.appendChild(heading);
-
-    // --- Device push subscription ---
-    const deviceSection = document.createElement('div');
-    deviceSection.className = 'qu-notif-section';
-    const deviceRow = document.createElement('div');
-    deviceRow.className = 'qu-notif-row';
-    const deviceLabel = document.createElement('span');
-    deviceLabel.textContent = t('devicePush');
-    const deviceBtn = document.createElement('button');
-    deviceBtn.type = 'button';
-    const errorEl = document.createElement('p');
-    errorEl.className = 'qu-notif-error';
-
-    let isSubscribed = subscribed;
-    function renderDeviceButton() {
-      deviceBtn.textContent = isSubscribed ? t('disablePush') : t('enablePush');
-    }
-    renderDeviceButton();
-    deviceBtn.addEventListener('click', async () => {
-      errorEl.textContent = '';
-      try {
-        if (isSubscribed) await unsubscribeFromPush(services.pushSubscriptions);
-        else await subscribeToPush(services.pushSubscriptions);
-        isSubscribed = !isSubscribed;
-        renderDeviceButton();
-      } catch (err) {
-        errorEl.textContent = t('pushError', { message: err.message });
-      }
-    });
-    deviceRow.append(deviceLabel, deviceBtn);
-    deviceSection.append(deviceRow, errorEl);
-    container.appendChild(deviceSection);
-
-    // --- Granular preferences ---
-    const prefsSection = document.createElement('div');
-    prefsSection.className = 'qu-notif-section';
-
-    const enabledRow = toggleRow(t('globalEnabled'), prefs.enabled);
-    const mentionsRow = toggleRow(t('mentions'), prefs.mentions);
-
-    const perAppHeading = document.createElement('h2');
-    perAppHeading.textContent = t('perApp');
-    const appsEl = document.createElement('div');
-    appsEl.className = 'qu-notif-apps';
-    const appToggles = new Map();
-    for (const app of NOTIFYING_APPS) {
-      const appEnabled = prefs.apps?.[app.id]?.enabled !== false; // default on
-      const row = toggleRow(`${app.icon} ${app.label}`, appEnabled);
-      appToggles.set(app.id, row.checkbox);
-      appsEl.appendChild(row.row);
-    }
-
-    const saveBtn = document.createElement('button');
-    saveBtn.type = 'button';
-    saveBtn.textContent = t('save');
-    const status = document.createElement('span');
-    status.className = 'qu-notif-status';
-
-    saveBtn.addEventListener('click', async () => {
-      const apps = {};
-      for (const [appId, checkbox] of appToggles) apps[appId] = { enabled: checkbox.checked };
-      await services.notificationPrefs.savePrefs({
-        enabled: enabledRow.checkbox.checked,
-        mentions: mentionsRow.checkbox.checked,
-        apps,
-      });
-      status.textContent = t('saved');
-      setTimeout(() => { status.textContent = ''; }, 1500);
-    });
-
-    prefsSection.append(enabledRow.row, mentionsRow.row, perAppHeading, appsEl, saveBtn, status);
-    container.appendChild(prefsSection);
+    const listPath = paths.collectionPath(spaceId, paths.threadMessagesCollectionId('notifications'));
+    stopWatch = watch(qu, listPath, () => renderFeed(container, services, spaceId, () => stopped));
   })();
 
-  return () => { stopped = true; };
+  return () => { stopped = true; stopWatch?.(); };
+}
+
+async function renderFeed(container, services, spaceId, isStopped) {
+  const messages = await services.threads.listMessages(spaceId, 'notifications');
+  if (isStopped()) return;
+  container.textContent = '';
+
+  const header = document.createElement('div');
+  header.className = 'qu-notif-header';
+  const heading = document.createElement('h1');
+  heading.textContent = t('title');
+  const settingsLink = document.createElement('a');
+  settingsLink.href = '#/notifications/settings';
+  settingsLink.textContent = t('settingsLink');
+  header.append(heading, settingsLink);
+  container.appendChild(header);
+
+  if (messages.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'qu-notif-empty';
+    empty.textContent = t('empty');
+    container.appendChild(empty);
+  } else {
+    const list = document.createElement('ul');
+    list.className = 'qu-notif-feed';
+    for (const message of [...messages].reverse()) list.appendChild(feedRow(message)); // newest first
+    container.appendChild(list);
+  }
+
+  // Opening the feed is what "reading" it means - clears the header
+  // bell's badge. That badge watches the message-LIST path (see
+  // apps/shell/src/main.js's `_watchNotifBadge()`), which this write does
+  // NOT touch (markRead() is a private, separate path - see
+  // ThreadService), so the badge needs an explicit nudge: the same
+  // cross-app window-event convention `qu:favorites-changed` already
+  // established for favorites.
+  await services.threads.markRead(spaceId, 'notifications');
+  window.dispatchEvent(new CustomEvent('qu:notifications-read'));
+}
+
+function feedRow(message) {
+  const li = document.createElement('li');
+  const a = document.createElement('a');
+  a.href = message.url || '#/notifications';
+
+  if (message.image) {
+    const img = document.createElement('img');
+    img.src = message.image;
+    img.alt = '';
+    a.appendChild(img);
+  }
+
+  const text = document.createElement('div');
+  const title = document.createElement('div');
+  title.className = 'qu-notif-feed-title';
+  title.textContent = message.title || message.body;
+  const body = document.createElement('div');
+  body.className = 'qu-notif-feed-body';
+  body.textContent = message.title ? message.body : '';
+  const time = document.createElement('div');
+  time.className = 'qu-notif-feed-time';
+  time.textContent = message.ts ? new Date(message.ts).toLocaleString() : '';
+  text.append(title, body, time);
+  a.appendChild(text);
+
+  li.appendChild(a);
+  return li;
+}
+
+async function renderSettings(container, services, isStopped) {
+  const [prefs, subscribed] = await Promise.all([services.notificationPrefs.getOwnPrefs(), isPushSubscribed()]);
+  if (isStopped()) return;
+  container.textContent = '';
+
+  const back = document.createElement('a');
+  back.href = '#/notifications';
+  back.textContent = t('backToFeed');
+  container.appendChild(back);
+
+  const heading = document.createElement('h1');
+  heading.textContent = t('settingsTitle');
+  container.appendChild(heading);
+
+  // --- Device push subscription ---
+  const deviceSection = document.createElement('div');
+  deviceSection.className = 'qu-notif-section';
+  const deviceRow = document.createElement('div');
+  deviceRow.className = 'qu-notif-row';
+  const deviceLabel = document.createElement('span');
+  deviceLabel.textContent = t('devicePush');
+  const deviceBtn = document.createElement('button');
+  deviceBtn.type = 'button';
+  const errorEl = document.createElement('p');
+  errorEl.className = 'qu-notif-error';
+
+  let isSubscribed = subscribed;
+  function renderDeviceButton() {
+    deviceBtn.textContent = isSubscribed ? t('disablePush') : t('enablePush');
+  }
+  renderDeviceButton();
+  deviceBtn.addEventListener('click', async () => {
+    errorEl.textContent = '';
+    try {
+      if (isSubscribed) await unsubscribeFromPush(services.pushSubscriptions);
+      else await subscribeToPush(services.pushSubscriptions);
+      isSubscribed = !isSubscribed;
+      renderDeviceButton();
+    } catch (err) {
+      errorEl.textContent = t('pushError', { message: err.message });
+    }
+  });
+  deviceRow.append(deviceLabel, deviceBtn);
+  deviceSection.append(deviceRow, errorEl);
+  container.appendChild(deviceSection);
+
+  // --- Granular preferences ---
+  const prefsSection = document.createElement('div');
+  prefsSection.className = 'qu-notif-section';
+
+  const enabledRow = toggleRow(t('globalEnabled'), prefs.enabled);
+  const mentionsRow = toggleRow(t('mentions'), prefs.mentions);
+
+  const perAppHeading = document.createElement('h2');
+  perAppHeading.textContent = t('perApp');
+  const appsEl = document.createElement('div');
+  appsEl.className = 'qu-notif-apps';
+  const appToggles = new Map();
+  for (const app of NOTIFYING_APPS) {
+    const appEnabled = prefs.apps?.[app.id]?.enabled !== false; // default on
+    const row = toggleRow(`${app.icon} ${app.label}`, appEnabled);
+    appToggles.set(app.id, row.checkbox);
+    appsEl.appendChild(row.row);
+  }
+
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.textContent = t('save');
+  const status = document.createElement('span');
+  status.className = 'qu-notif-status';
+
+  saveBtn.addEventListener('click', async () => {
+    const apps = {};
+    for (const [appId, checkbox] of appToggles) apps[appId] = { enabled: checkbox.checked };
+    await services.notificationPrefs.savePrefs({
+      enabled: enabledRow.checkbox.checked,
+      mentions: mentionsRow.checkbox.checked,
+      apps,
+    });
+    status.textContent = t('saved');
+    setTimeout(() => { status.textContent = ''; }, 1500);
+  });
+
+  prefsSection.append(enabledRow.row, mentionsRow.row, perAppHeading, appsEl, saveBtn, status);
+  container.appendChild(prefsSection);
 }
 
 function toggleRow(label, checked) {

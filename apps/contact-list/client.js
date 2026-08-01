@@ -17,7 +17,8 @@ const STYLE_ID = 'qu-contact-list-style';
 const STYLE = `
   .qu-contact-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
   .qu-contact-list li { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.7rem; border: 1px solid #8884; border-radius: 0.4rem; }
-  .qu-contact-list .qu-contact-name { flex: 1; font-family: ui-monospace, monospace; }
+  .qu-contact-list .qu-contact-name { flex: 1; font-family: ui-monospace, monospace; text-decoration: none; color: inherit; }
+  .qu-contact-list .qu-contact-name:hover { text-decoration: underline; }
   .qu-contact-list button { background: none; border: 1px solid #8884; border-radius: 0.3rem; cursor: pointer; padding: 0.2rem 0.5rem; }
 `;
 
@@ -68,8 +69,9 @@ export function mount(container, { services }) {
 
 function row({ actorPub, profile }, services, refresh) {
   const li = document.createElement('li');
-  const name = document.createElement('span');
+  const name = document.createElement('a');
   name.className = 'qu-contact-name';
+  name.href = `#/~${actorPub}`;
   name.textContent = profile?.alias ?? `~${actorPub.slice(0, 16)}…`;
 
   const removeBtn = document.createElement('button');

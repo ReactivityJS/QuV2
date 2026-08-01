@@ -28,7 +28,7 @@ import { QuLoader, discoverLocalPackages } from '@qu/loader';
 import { QuIdentityEngine } from '@qu/identity';
 import { SyncEngine } from '@qu/sync';
 import { DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine } from '@qu/engines';
-import { createServices, NotificationPrefsService } from '@qu/services';
+import { createServices, NotificationPrefsService, THREAD_PRESETS } from '@qu/services';
 import { generateVapidKeys, sendWebPush } from '@qu/push';
 
 import { FsAdapter } from './adapters/fs-adapter.js';
@@ -149,6 +149,20 @@ export class QuRelay {
       await this.identity.importMnemonic(this.identity.generateMnemonic());
     }
 
+    // A published profile is what makes this identity's X25519 key
+    // resolvable by anyone else - see @qu/services/thread-service.js's
+    // `#resolveReaderXKeys()`/`#decryptMessage()`, which both fail closed
+    // (silently treat the message as undecryptable) for a signer with no
+    // profile. Without this, `#writeInAppNotification()` below - which
+    // signs+encrypts each in-app notification under THIS identity - would
+    // write messages no recipient could ever actually decrypt. Same
+    // "publish immediately, don't wait for a UI visit" reasoning
+    // apps/shell's boot() already applies to a brand-new end-user identity.
+    const ownPub = QuCrypto.toBase64Url((await this.identity.getMainKey()).publicKey);
+    if (!(await this.identity.getProfile(ownPub))) {
+      await this.identity.publishMainProfile({});
+    }
+
     await this.#setupVapidKeys();
 
     this._httpServer = createServer((req, res) => this.#handleHttp(req, res));
@@ -215,10 +229,16 @@ export class QuRelay {
   }
 
   /**
-   * Push delivery for one thread message: figures out who should be
+   * Notification delivery for one thread message: figures out who should be
    * notified, checks each candidate's own NotificationPrefsService
-   * settings, and sends a generic (never-the-actual-content) Web Push to
-   * every one of their registered devices.
+   * settings, then does TWO independent things for each candidate that
+   * passes - write an in-app notification record to their own
+   * notifications Thread (always, so the header bell/feed - see
+   * apps/shell/src/main.js's `_watchNotifBadge()` and
+   * apps/notifications/client.js - has something to show even with push
+   * off or unsupported), and send a generic (never-the-actual-content) Web
+   * Push to every one of their registered devices (only if this relay has
+   * VAPID keys AND they have subscriptions - unrelated to the first part).
    *
    * appId is derived from `spaceId` by a small, deliberately ad hoc
    * convention matching this repo's own built-in apps (forum/chat/
@@ -232,7 +252,12 @@ export class QuRelay {
    * @param {object} quBit - The message QuBit as just persisted.
    */
   async #deliverThreadPush(spaceId, threadId, quBit) {
-    if (!this.vapidKeys) return;
+    // A relay-authored notice about a message IN a notifications thread
+    // would loop forever (deliver -> write notice -> deliver -> ...) -
+    // notifications threads are a delivery TARGET, never a delivery
+    // SOURCE. Checked first, before any other work.
+    if (String(spaceId).startsWith('notifications-')) return;
+
     const config = await this.services.threads.getConfig(spaceId, threadId);
     if (!config) return;
 
@@ -256,13 +281,21 @@ export class QuRelay {
       const functionName = mention ? 'mention' : 'newMessage';
       if (!NotificationPrefsService.shouldNotify(prefs, { appId, mention, functionName })) continue;
 
-      const subscriptions = await this.services.pushSubscriptions.listSubscriptionsFor(actorPub);
       const payload = {
         title: mention ? `Mentioned in ${appId}` : `New message in ${appId}`,
         body: `~${(authorPub ?? 'someone').slice(0, 10)}… sent a message`,
         appId,
         url: `#/${appId}`,
       };
+
+      try {
+        await this.#writeInAppNotification(actorPub, payload);
+      } catch (err) {
+        console.error(`[QuRelay] in-app notification write failed for ~${actorPub.slice(0, 10)}…:`, err.message);
+      }
+
+      if (!this.vapidKeys) continue;
+      const subscriptions = await this.services.pushSubscriptions.listSubscriptionsFor(actorPub);
       for (const subscription of subscriptions) {
         try {
           const result = await sendWebPush(subscription, payload, this.vapidKeys);
@@ -278,6 +311,27 @@ export class QuRelay {
         }
       }
     }
+  }
+
+  /**
+   * Writes one notification into `actorPub`'s own notifications Thread
+   * (space `notifications-<actorPub>`, same convention
+   * apps/notifications/client.js reads from) - `createThread()` is
+   * idempotent (see ThreadService), so this is safe to call before that
+   * identity has ever opened the Notifications app. Posted under the
+   * RELAY's own identity: THREAD_PRESETS.notifications() sets `writers:
+   * '*'`, so no special authorization is needed for a system notice, same
+   * as any other writer.
+   * @param {string} actorPub - The notification's owner/recipient.
+   * @param {{title: string, body: string, appId: string, url: string}} payload
+   */
+  async #writeInAppNotification(actorPub, payload) {
+    const spaceId = `notifications-${actorPub}`;
+    await this.services.threads.createThread(spaceId, 'notifications', THREAD_PRESETS.notifications(actorPub));
+    await this.services.threads.postMessage(spaceId, 'notifications', {
+      body: payload.body,
+      extra: { title: payload.title, url: payload.url, appId: payload.appId },
+    });
   }
 
   async #handleHttp(req, res) {

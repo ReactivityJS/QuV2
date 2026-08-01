@@ -55,8 +55,19 @@ import {
 
 const SEED_PATH = '/store/secure/identity/seed';
 
-/** @param {string} actorPub - base64url actor public key. @param {string} kind */
-function actorPath(actorPub, kind) {
+/**
+ * The one place that knows how an actor's public documents map to storage
+ * paths (profile, attestation, ...) - exported (see index.js) so apps that
+ * need to e.g. `watch()` a specific identity's profile path directly (the
+ * shell's header alias, the Profile app - see apps/shell/src/main.js and
+ * apps/profile/client.js) don't hand-roll the same string template in
+ * three places. Unrelated to this package's OTHER `paths` export (BIP32
+ * key-derivation paths, see paths.js) - same word, two different kinds of
+ * "path", kept apart by export name (`actorPath` vs the `paths` namespace).
+ * @param {string} actorPub - base64url actor public key.
+ * @param {string} kind
+ */
+export function actorPath(actorPub, kind) {
   return `/store/actors/~${actorPub}/${kind}`;
 }
 

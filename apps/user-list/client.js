@@ -18,7 +18,8 @@ const STYLE_ID = 'qu-user-list-style';
 const STYLE = `
   .qu-user-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
   .qu-user-list li { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.7rem; border: 1px solid #8884; border-radius: 0.4rem; }
-  .qu-user-list .qu-user-name { flex: 1; font-family: ui-monospace, monospace; }
+  .qu-user-list .qu-user-name { flex: 1; font-family: ui-monospace, monospace; text-decoration: none; color: inherit; }
+  .qu-user-list .qu-user-name:hover { text-decoration: underline; }
   .qu-user-list button { background: none; border: none; cursor: pointer; font-size: 1.1em; }
 `;
 
@@ -70,8 +71,9 @@ export function mount(container, { services }) {
 
 function row(actorPub, profile, isContact, services) {
   const li = document.createElement('li');
-  const name = document.createElement('span');
+  const name = document.createElement('a');
   name.className = 'qu-user-name';
+  name.href = `#/~${actorPub}`;
   name.textContent = profile?.alias ?? `~${actorPub.slice(0, 16)}…`;
 
   const toggle = document.createElement('button');

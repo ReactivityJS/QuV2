@@ -1,6 +1,7 @@
 import { QuCrypto } from '@qu/core';
 import { threadMetaPath, threadMessagePath, threadMessagesCollectionId, collectionPath } from './paths.js';
 import { applyFormatting } from './thread-formatting.js';
+import { putPrivate, getPrivate } from './private-storage.js';
 
 /**
  * THREAD SERVICE — the Entity API for Threads (see @qu/engines/thread-engine.js
@@ -42,6 +43,12 @@ export class ThreadService {
     this.identity = identityEngine;
     this.collections = collectionService;
     this.syncFetch = syncFetch;
+  }
+
+  /** @returns {Promise<string>} base64url pubkey of this identity's main key. */
+  async #myActorPub() {
+    const mainKey = await this.identity.getMainKey();
+    return QuCrypto.toBase64Url(mainKey.publicKey);
   }
 
   /**
@@ -95,18 +102,45 @@ export class ThreadService {
   }
 
   /**
+   * Records "I've seen everything in this thread up to now" - a generic,
+   * per-identity, private read-marker usable by any thread (Chat unread
+   * counts, and the header's notification badge - see
+   * apps/notifications/client.js and apps/shell/src/main.js). Private
+   * because how far you've read is nobody else's business.
+   * @param {string|number} spaceId @param {string} threadId
+   */
+  async markRead(spaceId, threadId) {
+    const actorPub = await this.#myActorPub();
+    await putPrivate(this.qu, this.identity, `/store/actors/~${actorPub}/private/thread-read/${spaceId}/${threadId}`, { readAt: Date.now() });
+  }
+
+  /**
+   * @param {string|number} spaceId @param {string} threadId
+   * @returns {Promise<number>} Epoch ms of the last `markRead()` call, or 0 if never marked.
+   */
+  async getLastReadAt(spaceId, threadId) {
+    const actorPub = await this.#myActorPub();
+    const marker = await getPrivate(this.qu, this.identity, `/store/actors/~${actorPub}/private/thread-read/${spaceId}/${threadId}`);
+    return marker?.readAt ?? 0;
+  }
+
+  /**
    * Posts a message. Applies the thread's configured formatters, enforces
    * writer ACL (via ThreadEngine, on the `qu.put()` below), and encrypts
    * for the thread's readers if it isn't public.
    *
    * @param {string|number} spaceId
    * @param {string} threadId
-   * @param {{body: string, replyTo?: string, asSpaceId?: string|number}} params
+   * @param {{body: string, replyTo?: string, asSpaceId?: string|number, extra?: object}} params
    *   `asSpaceId` posts under a pseudonymous space identity (see
-   *   @qu/identity) instead of the main identity.
+   *   @qu/identity) instead of the main identity. `extra` is merged into the
+   *   stored message as-is - e.g. relay-authored notifications attach
+   *   `{title, url, appId, image}` alongside the normal human-authored
+   *   `body`/`formattedHtml`/`mentions` shape (see relay.js's
+   *   `#deliverThreadPush()` and apps/notifications/client.js).
    * @returns {Promise<object>} The stored message (plain value).
    */
-  async postMessage(spaceId, threadId, { body, replyTo = null, asSpaceId = null }) {
+  async postMessage(spaceId, threadId, { body, replyTo = null, asSpaceId = null, extra = {} }) {
     const config = await this.getConfig(spaceId, threadId);
     if (!config) {
       throw new Error(`ThreadService.postMessage: no thread "${threadId}" in space "${spaceId}" - call createThread() first`);
@@ -121,7 +155,7 @@ export class ThreadService {
     // the id embedded in the message body are guaranteed to be the same
     // value, not two independently-generated UUIDs.
     const messageId = globalThis.crypto.randomUUID();
-    const message = { _id: messageId, body, formattedHtml, mentions, author: authorPub, replyTo };
+    const message = { _id: messageId, body, formattedHtml, mentions, author: authorPub, replyTo, ...extra };
     const putOptions = { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey };
 
     if (config.readers !== '*') {
@@ -153,7 +187,7 @@ export class ThreadService {
       const quBit = await this.qu.get(path);
       if (!quBit) continue;
       const val = await this.#decryptMessage(quBit);
-      if (val) messages.push({ id: val._id, ...val });
+      if (val) messages.push({ id: val._id, ts: quBit.ts, ...val });
     }
     return messages;
   }
