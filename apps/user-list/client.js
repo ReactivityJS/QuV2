@@ -57,7 +57,7 @@ export function mount(container, { services }) {
     const list = document.createElement('ul');
     list.className = 'qu-user-list';
     for (const entry of others) {
-      const profile = await services.actors.getProfile(entry.actorPub);
+      const profile = await services.profile.getPublicProfile(entry.actorPub);
       if (stopped) return;
       list.appendChild(row(entry.actorPub, profile, contactPubs.has(entry.actorPub), services));
     }

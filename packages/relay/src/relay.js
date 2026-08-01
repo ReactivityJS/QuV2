@@ -103,6 +103,7 @@ export class QuRelay {
     this.registry.registerService('contacts-service', this.services.contacts);
     this.registry.registerService('directory-service', this.services.directory);
     this.registry.registerService('cms-service', this.services.cms);
+    this.registry.registerService('profile-service', this.services.profile);
 
     this.loader = new QuLoader(this.core, this.registry);
 

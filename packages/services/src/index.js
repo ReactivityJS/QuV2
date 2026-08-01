@@ -16,6 +16,7 @@ import { FavoritesService } from './favorites-service.js';
 import { ContactsService } from './contacts-service.js';
 import { DirectoryService } from './directory-service.js';
 import { CmsService } from './cms-service.js';
+import { ProfileService } from './profile-service.js';
 
 export {
   DocumentService,
@@ -29,6 +30,7 @@ export {
   ContactsService,
   DirectoryService,
   CmsService,
+  ProfileService,
 };
 export * as paths from './paths.js';
 export { unwrap, unwrapAll } from './unwrap.js';
@@ -36,7 +38,7 @@ export { unwrap, unwrapAll } from './unwrap.js';
 /**
  * @param {import('@qu/core').QuCore} qu
  * @param {{assetEngine: import('@qu/engines').AssetEngine, identityEngine: import('@qu/identity').QuIdentityEngine}} deps
- * @returns {{documents: DocumentService, collections: CollectionService, assets: AssetService, actors: ActorService, starred: StarredService, threads: ThreadService, favorites: FavoritesService, contacts: ContactsService}}
+ * @returns {{documents: DocumentService, collections: CollectionService, assets: AssetService, actors: ActorService, starred: StarredService, threads: ThreadService, favorites: FavoritesService, contacts: ContactsService, directory: DirectoryService, cms: CmsService, profile: ProfileService}}
  */
 export function createServices(qu, { assetEngine, identityEngine }) {
   const collections = new CollectionService(qu);
@@ -53,5 +55,6 @@ export function createServices(qu, { assetEngine, identityEngine }) {
     contacts: new ContactsService(starred, identityEngine),
     directory: new DirectoryService(documents, collections, identityEngine),
     cms: new CmsService(documents, collections),
+    profile: new ProfileService(qu, identityEngine),
   };
 }

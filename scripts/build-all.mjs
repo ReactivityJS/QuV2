@@ -108,5 +108,6 @@ await buildBrowserApp('app-list client', 'apps/app-list/client.js', 'apps/app-li
 await buildBrowserApp('user-list client', 'apps/user-list/client.js', 'apps/user-list/dist/client.js');
 await buildBrowserApp('contact-list client', 'apps/contact-list/client.js', 'apps/contact-list/dist/client.js');
 await buildBrowserApp('relay-admin client', 'apps/relay-admin/client.js', 'apps/relay-admin/dist/client.js');
+await buildBrowserApp('profile client', 'apps/profile/client.js', 'apps/profile/dist/client.js');
 
 console.log('Done.');
