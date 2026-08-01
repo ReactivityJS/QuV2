@@ -20,9 +20,15 @@
  * place a user needs to read/copy the whole thing (verifying a contact's
  * key out of band, etc).
  */
-import { createI18n } from '@qu/i18n';
+import { createI18n, getStoredLocale, setLocale } from '@qu/i18n';
 import { watch } from '@qu/reactive';
 import { actorPath } from '@qu/identity';
+
+/** Locales every app's dictionary in this codebase actually ships - see @qu/i18n's own doc comment for why this is a device preference, not per-identity. */
+const AVAILABLE_LOCALES = [
+  { code: 'en', label: 'English' },
+  { code: 'de', label: 'Deutsch' },
+];
 
 const DICT = {
   en: {
@@ -44,6 +50,7 @@ const DICT = {
     saved: 'Saved',
     settings: 'Settings',
     listedInDirectory: 'Listed in directory (visible to the User List)',
+    language: 'Language',
     notificationSettings: 'Notification settings →',
     addContact: 'Add contact',
     removeContact: 'Remove contact',
@@ -67,6 +74,7 @@ const DICT = {
     saved: 'Gespeichert',
     settings: 'Einstellungen',
     listedInDirectory: 'In der Nutzerliste sichtbar',
+    language: 'Sprache',
     notificationSettings: 'Benachrichtigungseinstellungen →',
     addContact: 'Kontakt hinzufügen',
     removeContact: 'Kontakt entfernen',
@@ -214,6 +222,30 @@ async function renderOwnProfile(container, services, isStopped) {
   });
   visibilityLabel.append(visibilityCheckbox, document.createTextNode(t('listedInDirectory')));
   settings.appendChild(visibilityLabel);
+
+  const languageLabel = document.createElement('label');
+  const languageSpan = document.createElement('span');
+  languageSpan.textContent = t('language');
+  const languageSelect = document.createElement('select');
+  const currentLocale = getStoredLocale();
+  for (const { code, label } of AVAILABLE_LOCALES) {
+    const option = document.createElement('option');
+    option.value = code;
+    option.textContent = label;
+    if (code === currentLocale) option.selected = true;
+    languageSelect.appendChild(option);
+  }
+  languageSelect.addEventListener('change', () => {
+    // Not live mid-session - @qu/i18n's createI18n() resolves the locale
+    // once, when each already-loaded app's module first runs (see that
+    // package's own doc comment) - a reload is the simplest way to make
+    // every mounted app (shell chrome included) actually pick the new
+    // choice up, rather than rebuilding i18n as an observable just for this.
+    setLocale(languageSelect.value);
+    location.reload();
+  });
+  languageLabel.append(languageSpan, languageSelect);
+  settings.appendChild(languageLabel);
 
   const notifLink = document.createElement('a');
   notifLink.href = '#/notifications/settings';

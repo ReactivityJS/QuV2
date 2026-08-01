@@ -40,17 +40,61 @@ export function detectLocale(supportedLocales, fallback = 'en') {
   return supportedLocales.includes(fallback) ? fallback : (supportedLocales[0] ?? fallback);
 }
 
+const LOCALE_STORAGE_KEY = 'qu-locale';
+
+/**
+ * @returns {string|null} The user's explicitly chosen locale (see
+ *   setLocale()), or null if they've never set one (plain browser
+ *   auto-detection applies - see createI18n()). A device-level preference,
+ *   not per-identity - deliberately so: which language to render in isn't
+ *   sensitive, and tying it to the identity would mean every Qu instance
+ *   sharing a device (a public/shared computer) fights over one setting
+ *   instead of each just keeping their own.
+ */
+export function getStoredLocale() {
+  try {
+    return localStorage.getItem(LOCALE_STORAGE_KEY);
+  } catch {
+    return null; // localStorage unavailable (e.g. private browsing, disabled storage) - no override
+  }
+}
+
+/**
+ * Persists the user's locale choice for THIS device - every app's own
+ * `createI18n()` call picks it up automatically (see that function's own
+ * doc comment), no per-app wiring needed. Takes effect on next page load,
+ * not live mid-session - see apps/profile/client.js's language selector,
+ * which reloads right after calling this.
+ * @param {string|null} locale - null clears the override, reverting to
+ *   plain browser auto-detection.
+ */
+export function setLocale(locale) {
+  try {
+    if (locale) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
+    else localStorage.removeItem(LOCALE_STORAGE_KEY);
+  } catch {
+    // localStorage unavailable - the choice just won't persist across reloads, not worth surfacing as an error
+  }
+}
+
 /**
  * @param {Record<string, Record<string, string>>} dictionaries - locale -> { key: template }.
  *   A template may reference `{paramName}` placeholders.
  * @param {{locale?: string, fallback?: string}} [options] - `locale` forces a
- *   locale (skip auto-detection, e.g. for tests or a user-chosen setting);
- *   `fallback` (default 'en') is used both as the last-resort dictionary for
- *   missing keys AND as detectLocale()'s fallback.
+ *   locale (skip auto-detection AND the stored user preference below,
+ *   e.g. for tests); `fallback` (default 'en') is used both as the
+ *   last-resort dictionary for missing keys AND as detectLocale()'s
+ *   fallback.
  * @returns {{t: (key: string, params?: Record<string, string|number>) => string, locale: string}}
  */
 export function createI18n(dictionaries, { locale, fallback = 'en' } = {}) {
-  const resolvedLocale = locale ?? detectLocale(Object.keys(dictionaries), fallback);
+  // Priority: an explicit `locale` (a caller that already knows better,
+  // e.g. a test) > the user's own stored choice (see setLocale() -
+  // deliberately checked here, once, so every app's OWN createI18n() call
+  // honors it automatically instead of every app needing its own
+  // read-localStorage boilerplate) > plain browser auto-detection.
+  const stored = getStoredLocale();
+  const resolvedLocale = locale ?? (stored && dictionaries[stored] ? stored : detectLocale(Object.keys(dictionaries), fallback));
 
   function t(key, params = {}) {
     const template = dictionaries[resolvedLocale]?.[key] ?? dictionaries[fallback]?.[key];
