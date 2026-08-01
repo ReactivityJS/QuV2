@@ -255,6 +255,155 @@ export class ThreadService {
     return (await this.listMessages(spaceId, threadId)).filter((m) => m.replyTo === parentMessageId);
   }
 
+  // =========================================================================
+  // REACTIONS, PINS, PRESENCE — ported from QUniverse V1's modules/chat.js
+  // and modules/presence.js (calls/WebRTC deliberately excluded). V1 could
+  // enumerate "every reactor of message X" via a queryable store
+  // (`session.query()`); @qu/core's QuStore has no such wildcard/prefix
+  // query (see DirectoryService's own doc comment for the same limitation
+  // stated elsewhere), so each of these uses a small CollectionService
+  // index instead - exactly the same pattern threadMessagesCollectionId()
+  // already uses to make a thread's OWN messages enumerable. Presence
+  // doesn't need an index at all: a chat room already has a fixed member
+  // list (THREAD_PRESETS.chat's `readers`), so "who's online" just means
+  // reading one slot per already-known member, not discovering who exists.
+  //
+  // SECURITY NOTE, same one V1's own source states plainly for these three
+  // (unlike a thread MESSAGE, which ThreadEngine's writer ACL protects):
+  // a reaction/pin/presence write is NOT ACL-checked by ThreadEngine (it
+  // only recognizes `.../msgs/...` paths) - any current writer of the
+  // room can technically write to any OTHER member's reaction/presence
+  // slot by path. The path is addressing, not trust: a UI must always key
+  // off the QuBit's own verified `pub` (see `#actorPubOf()` below), never
+  // trust a path segment as proof of who wrote it.
+  // =========================================================================
+
+  /** @returns {Promise<{privateKeyPkcs8: ArrayBuffer, publicKey: Uint8Array}>} */
+  async #signingKey(asSpaceId) {
+    return asSpaceId ? this.identity.getSpaceKey(asSpaceId) : this.identity.getMainKey();
+  }
+
+  /** @param {object} quBit @returns {string|null} base64url actor pubkey, or null if unsigned. */
+  #actorPubOf(quBit) {
+    return quBit?.pub ? QuCrypto.toBase64Url(QuCrypto.fromBase64(quBit.pub)) : null;
+  }
+
+  /**
+   * Sets (or clears) this identity's OWN reaction on a message - a second
+   * call with a different emoji simply replaces the first (one reaction
+   * per person per message, same rule WhatsApp/Matrix/Slack all use), a
+   * `null` emoji clears it.
+   * @param {string|number} spaceId @param {string} threadId @param {string} messageId
+   * @param {string|null} emoji
+   * @param {{asSpaceId?: string|number}} [options]
+   */
+  async setReaction(spaceId, threadId, messageId, emoji, { asSpaceId = null } = {}) {
+    const signKey = await this.#signingKey(asSpaceId);
+    const actorPub = QuCrypto.toBase64Url(signKey.publicKey);
+    const path = `/store/${spaceId}/threads/${threadId}/reactions/${messageId}/${actorPub}`;
+    const putOptions = { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey };
+    await this.qu.put(path, emoji, putOptions);
+    const collectionId = `thread-${threadId}-reactions-${messageId}`;
+    if (emoji) await this.collections.addItem(spaceId, collectionId, path, putOptions);
+    else await this.collections.removeItem(spaceId, collectionId, path, putOptions);
+  }
+
+  /**
+   * @param {string|number} spaceId @param {string} threadId @param {string} messageId
+   * @returns {Promise<Record<string, string[]>>} `{ emoji: [reactorActorPub, ...] }`.
+   */
+  async getReactions(spaceId, threadId, messageId) {
+    const collectionId = `thread-${threadId}-reactions-${messageId}`;
+    const paths = await this.collections.listRawPaths(spaceId, collectionId);
+    const byEmoji = {};
+    for (const path of paths) {
+      const quBit = await this.qu.get(path);
+      const reactorPub = this.#actorPubOf(quBit);
+      if (!reactorPub || !quBit.val) continue;
+      (byEmoji[quBit.val] ??= []).push(reactorPub);
+    }
+    return byEmoji;
+  }
+
+  /**
+   * Pins (or unpins) a message - any current writer of the thread may pin
+   * or unpin any message (V1's own rule too - see modules/chat.js), so
+   * there's no per-person state to track, just membership in one
+   * per-thread collection.
+   * @param {string|number} spaceId @param {string} threadId @param {string} messageId
+   * @param {boolean} pinned
+   * @param {{asSpaceId?: string|number}} [options]
+   */
+  async setPinned(spaceId, threadId, messageId, pinned, { asSpaceId = null } = {}) {
+    const signKey = await this.#signingKey(asSpaceId);
+    const putOptions = { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey };
+    const collectionId = `thread-${threadId}-pins`;
+    const path = threadMessagePath(spaceId, threadId, messageId);
+    if (pinned) await this.collections.addItem(spaceId, collectionId, path, putOptions);
+    else await this.collections.removeItem(spaceId, collectionId, path, putOptions);
+  }
+
+  /** @param {string|number} spaceId @param {string} threadId @returns {Promise<string[]>} Currently pinned message ids. */
+  async listPinned(spaceId, threadId) {
+    const paths = await this.collections.listRawPaths(spaceId, `thread-${threadId}-pins`);
+    return paths.map((path) => path.slice(path.lastIndexOf('/') + 1));
+  }
+
+  /**
+   * Publishes this identity's own presence in a thread. Call again every
+   * `intervalMs` (see startHeartbeat() below) - staleness, not an
+   * explicit "offline", is what getPresence() actually trusts, since an
+   * ungraceful disconnect (closing a tab) never gets a chance to publish
+   * 'offline'.
+   * @param {string|number} spaceId @param {string} threadId @param {'online'|'offline'} status
+   * @param {{asSpaceId?: string|number}} [options]
+   */
+  async setPresence(spaceId, threadId, status, { asSpaceId = null } = {}) {
+    const signKey = await this.#signingKey(asSpaceId);
+    const path = `/store/${spaceId}/threads/${threadId}/presence/${QuCrypto.toBase64Url(signKey.publicKey)}`;
+    await this.qu.put(path, { status, lastSeen: Date.now() }, { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey });
+  }
+
+  /**
+   * @param {string|number} spaceId @param {string} threadId
+   * @param {string[]} memberPubs - Whose presence to check - a chat room
+   *   already has a fixed member list (see THREAD_PRESETS.chat), so unlike
+   *   reactions/pins this never needs its own discovery index.
+   * @param {{staleAfterMs?: number}} [options]
+   * @returns {Promise<Record<string, {status: string, lastSeen: number, online: boolean}>>}
+   */
+  async getPresence(spaceId, threadId, memberPubs, { staleAfterMs = 20_000 } = {}) {
+    const now = Date.now();
+    const result = {};
+    await Promise.all(memberPubs.map(async (pub) => {
+      const quBit = await this.qu.get(`/store/${spaceId}/threads/${threadId}/presence/${pub}`);
+      if (!quBit?.val) return;
+      const { status, lastSeen } = quBit.val;
+      result[pub] = { status, lastSeen, online: status === 'online' && now - lastSeen < staleAfterMs };
+    }));
+    return result;
+  }
+
+  /**
+   * Publishes 'online' every `intervalMs`, and 'offline' once when stopped
+   * (best-effort - an ungraceful disconnect skips this; readers must still
+   * treat staleness, not just the last published status, as the source of
+   * truth - see getPresence()).
+   * @param {string|number} spaceId @param {string} threadId
+   * @param {{intervalMs?: number, asSpaceId?: string|number}} [options]
+   * @returns {() => Promise<void>} Stop function.
+   */
+  startHeartbeat(spaceId, threadId, { intervalMs = 8_000, asSpaceId = null } = {}) {
+    this.setPresence(spaceId, threadId, 'online', { asSpaceId }).catch(() => {});
+    const timer = setInterval(() => {
+      this.setPresence(spaceId, threadId, 'online', { asSpaceId }).catch(() => {});
+    }, intervalMs);
+    return async () => {
+      clearInterval(timer);
+      await this.setPresence(spaceId, threadId, 'offline', { asSpaceId }).catch(() => {});
+    };
+  }
+
   /**
    * @param {Array<string>} readerPubs - base64url Ed25519 actor pubkeys.
    * @returns {Promise<Array<Uint8Array>>} Their raw X25519 public keys.
