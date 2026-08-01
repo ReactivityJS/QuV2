@@ -33,6 +33,7 @@ const DICT = {
     create: 'Create',
     newItem: 'Add an item…',
     add: 'Add',
+    edit: 'Edit',
     remove: 'Remove',
     back: '← My lists',
     untitled: 'Untitled list',
@@ -45,6 +46,7 @@ const DICT = {
     create: 'Erstellen',
     newItem: 'Eintrag hinzufügen…',
     add: 'Hinzufügen',
+    edit: 'Bearbeiten',
     remove: 'Entfernen',
     back: '← Meine Listen',
     untitled: 'Unbenannte Liste',
@@ -61,8 +63,9 @@ const STYLE = `
   .qu-todo-new input { flex: 1; padding: 0.4rem; }
   .qu-todo-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
   .qu-todo-items li { display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0.5rem; }
-  .qu-todo-items li[data-done="true"] span { text-decoration: line-through; opacity: 0.6; }
-  .qu-todo-items li span { flex: 1; }
+  .qu-todo-items li[data-done="true"] span.qu-todo-text { text-decoration: line-through; opacity: 0.6; }
+  .qu-todo-items li span.qu-todo-text { flex: 1; }
+  .qu-todo-items li span.qu-todo-text[contenteditable="true"] { text-decoration: none; opacity: 1; outline: 1px dashed #8888; border-radius: 0.3rem; padding: 0.1rem 0.3rem; }
   .qu-todo-items li button { background: none; border: none; cursor: pointer; opacity: 0.6; }
 `;
 
@@ -213,7 +216,39 @@ export function mount(container, { qu, services, segments, subscribe }) {
     });
 
     const span = document.createElement('span');
+    span.className = 'qu-todo-text';
     span.textContent = item.text;
+
+    // Contenteditable in place, not a separate edit MODE - the list model
+    // has no per-item owner (see this file's own doc comment: the link
+    // itself is the permission, same as add/remove/toggle already are),
+    // so there's nothing to gate this behind beyond having the list open.
+    const saveEdit = async () => {
+      const text = span.textContent.trim();
+      if (!text || text === item.text) {
+        span.textContent = item.text; // revert an empty/unchanged edit
+        return;
+      }
+      const current = (await services.documents.get(spaceId, 'list'))?.items ?? [];
+      await services.documents.update(spaceId, 'list', { items: current.map((i) => (i.id === item.id ? { ...i, text } : i)) });
+    };
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.textContent = '✎';
+    editBtn.title = t('edit');
+    editBtn.addEventListener('click', () => {
+      span.contentEditable = 'true';
+      span.focus();
+      document.getSelection()?.selectAllChildren(span);
+    });
+    span.addEventListener('blur', () => {
+      span.contentEditable = 'false';
+      saveEdit();
+    });
+    span.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); span.blur(); }
+      if (e.key === 'Escape') { span.textContent = item.text; span.blur(); }
+    });
 
     const removeBtn = document.createElement('button');
     removeBtn.type = 'button';
@@ -224,7 +259,7 @@ export function mount(container, { qu, services, segments, subscribe }) {
       await services.documents.update(spaceId, 'list', { items: current.filter((i) => i.id !== item.id) });
     });
 
-    li.append(checkbox, span, removeBtn);
+    li.append(checkbox, span, editBtn, removeBtn);
     return li;
   }
 

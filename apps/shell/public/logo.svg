@@ -1,19 +1,4 @@
-/**
- * Q LOGO — one shared SVG markup generator used for the header wordmark,
- * the PWA manifest icon (see pwa.js), the favicon (see
- * scripts/build-favicon.mjs, which rasterizes this same markup), and
- * public/logo.svg - so there's exactly one place that defines what "the Q"
- * looks like. A cosmic-portal "Q": a blue-to-purple gradient ring around a
- * starfield/spiral-galaxy core, with an orange-to-cyan constellation tail
- * standing in for the letterform's descender - no external asset/font
- * dependency, safe to inline directly into HTML or base64-encode into a
- * manifest icon's `data:` URI.
- *
- * @param {{size?: number}} [options]
- * @returns {string} Self-contained `<svg>...</svg>` markup.
- */
-export function qLogoSvgMarkup({ size = 32 } = {}) {
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="${size}" height="${size}" role="img" aria-label="QUniverse">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="64" height="64" role="img" aria-label="QUniverse">
     <defs>
       <linearGradient id="qu-bg" x1="0" y1="0" x2="100" y2="100" gradientUnits="userSpaceOnUse">
         <stop offset="0%" stop-color="#0a0e24"/>
@@ -89,10 +74,4 @@ export function qLogoSvgMarkup({ size = 32 } = {}) {
         <circle cx="68" cy="78" r="1.6"/>
       </g>
     </g>
-  </svg>`;
-}
-
-/** @returns {string} A `data:image/svg+xml` URI of the logo at the given size, e.g. for a manifest icon or <img src>. */
-export function qLogoDataUri(options) {
-  return `data:image/svg+xml;base64,${btoa(qLogoSvgMarkup(options))}`;
-}
+  </svg>

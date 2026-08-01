@@ -404,6 +404,16 @@ export class QuRelay {
           res.writeHead(200, { 'content-type': 'text/javascript', 'service-worker-allowed': '/' }).end(body);
           return;
         }
+        if (req.url === '/favicon.ico') {
+          const body = await readFile(SHELL_PUBLIC_DIR + 'favicon.ico');
+          res.writeHead(200, { 'content-type': 'image/x-icon' }).end(body);
+          return;
+        }
+        if (req.url === '/logo.svg') {
+          const body = await readFile(SHELL_PUBLIC_DIR + 'logo.svg');
+          res.writeHead(200, { 'content-type': 'image/svg+xml' }).end(body);
+          return;
+        }
       }
 
       res.writeHead(404).end('Not Found');

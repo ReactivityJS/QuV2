@@ -29,6 +29,13 @@ const STYLE = `
   .qu-thread-empty { opacity: 0.6; font-size: 0.9em; }
   .qu-thread-composer { display: flex; gap: 0.4rem; }
   .qu-thread-composer textarea { flex: 1; resize: vertical; min-height: 2.4rem; font: inherit; padding: 0.4rem; }
+  .qu-thread-message-row { display: flex; align-items: flex-start; gap: 0.4rem; }
+  .qu-thread-message-row .qu-thread-body-col { flex: 1; min-width: 0; }
+  .qu-thread-edit-btn { background: none; border: none; cursor: pointer; opacity: 0.5; font-size: 0.85em; flex-shrink: 0; }
+  .qu-thread-edit-btn:hover { opacity: 1; }
+  .qu-thread-body[contenteditable="true"] { outline: 1px dashed #8888; border-radius: 0.3rem; padding: 0.2rem 0.3rem; }
+  .qu-thread-edit-actions { display: flex; gap: 0.4rem; margin-top: 0.3rem; }
+  .qu-thread-edited-mark { opacity: 0.5; font-size: 0.75em; margin-left: 0.4rem; }
 `;
 
 function ensureStyle() {
@@ -61,6 +68,7 @@ export function mountThreadView(container, {
   ensureStyle();
   let stopped = false;
   let unwatch = null;
+  let myActorPub = null; // resolved before the first render - see the IIFE below
 
   const root = document.createElement('div');
   root.className = 'qu-thread-view';
@@ -104,8 +112,44 @@ export function mountThreadView(container, {
     const author = document.createElement('span');
     author.className = 'qu-thread-author';
     author.textContent = `~${message.author.slice(0, 10)}…`;
+    if (message.editedAt) {
+      const edited = document.createElement('span');
+      edited.className = 'qu-thread-edited-mark';
+      edited.textContent = '(edited)';
+      author.appendChild(edited);
+    }
+
     const body = document.createElement('span');
     body.className = 'qu-thread-body';
+    renderBody(body, message);
+
+    const row = document.createElement('div');
+    row.className = 'qu-thread-message-row';
+    const bodyCol = document.createElement('div');
+    bodyCol.className = 'qu-thread-body-col';
+    bodyCol.append(author, body);
+    row.appendChild(bodyCol);
+
+    // Own messages only - ThreadService.editMessage() enforces this same
+    // check server/store-side too (see its own doc comment for why a
+    // public thread's `writers: '*'` ACL alone isn't enough to stop
+    // someone overwriting a DIFFERENT author's message by path); this is
+    // just the UI not offering an edit affordance that would fail anyway.
+    if (message.author === myActorPub) {
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'qu-thread-edit-btn';
+      editBtn.textContent = '✎';
+      editBtn.title = 'Edit';
+      editBtn.addEventListener('click', () => startEdit(body, bodyCol, message));
+      row.appendChild(editBtn);
+    }
+
+    li.appendChild(row);
+    return li;
+  }
+
+  function renderBody(body, message) {
     if (message.formattedHtml) {
       // Safe by construction - ThreadService only ever populates this via
       // thread-formatting.js's formatMarkdown(), which HTML-escapes the
@@ -115,8 +159,49 @@ export function mountThreadView(container, {
     } else {
       body.textContent = message.body;
     }
-    li.append(author, body);
-    return li;
+  }
+
+  function startEdit(body, bodyCol, message) {
+    body.contentEditable = 'true';
+    body.textContent = message.body; // edit the raw body, not the rendered markdown HTML
+    body.focus();
+
+    const actions = document.createElement('div');
+    actions.className = 'qu-thread-edit-actions';
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.textContent = 'Save';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = 'Cancel';
+    actions.append(saveBtn, cancelBtn);
+    bodyCol.appendChild(actions);
+
+    const endEdit = () => {
+      body.contentEditable = 'false';
+      actions.remove();
+    };
+    cancelBtn.addEventListener('click', () => {
+      renderBody(body, message);
+      endEdit();
+    });
+    saveBtn.addEventListener('click', async () => {
+      const newBody = body.textContent.trim();
+      endEdit();
+      if (!newBody || newBody === message.body) {
+        renderBody(body, message);
+        return;
+      }
+      await services.threads.editMessage(spaceId, threadId, message.id, { body: newBody, asSpaceId });
+      // The edit lands at the MESSAGE's own path, not the collection path
+      // watch() below observes (see that watch() call's own doc comment
+      // for why only collection changes retrigger it) - reload explicitly
+      // so this tab sees its own edit immediately. Another tab with this
+      // same thread open won't see the edit until it next reloads for an
+      // unrelated reason (a new message arriving) - a known limitation of
+      // not watching every individual message path, not a silent bug.
+      reload();
+    });
   }
 
   form.addEventListener('submit', async (event) => {
@@ -151,6 +236,7 @@ export function mountThreadView(container, {
   }
 
   (async () => {
+    myActorPub = asSpaceId ? null : await services.actors.whoAmI();
     await services.threads.createThread(spaceId, threadId, threadConfig);
     if (stopped) return;
     await reload();

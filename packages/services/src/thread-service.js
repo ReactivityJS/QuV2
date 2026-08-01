@@ -171,6 +171,59 @@ export class ThreadService {
   }
 
   /**
+   * Overwrites an existing message's body in place (same path, same
+   * `_id`/`replyTo`), re-applying the thread's formatters and re-encrypting
+   * for its readers exactly like `postMessage()` - editing is really just
+   * "post again at the same id".
+   *
+   * AUTHOR-ONLY, enforced HERE rather than by ThreadEngine's ACL: the
+   * engine's `writers` check only answers "is this signer allowed to post
+   * IN this thread at all" - for a public thread (`writers: '*'`) that
+   * would let literally anyone overwrite anyone else's message just by
+   * knowing its id, which the write ACL was never meant to prevent. This
+   * check is the actual guard.
+   *
+   * @param {string|number} spaceId
+   * @param {string} threadId
+   * @param {string} messageId
+   * @param {{body: string, asSpaceId?: string|number}} params
+   * @returns {Promise<object>} The updated message (plain value).
+   * @throws {Error} If the message doesn't exist, can't be read, or the
+   *   caller isn't its original author.
+   */
+  async editMessage(spaceId, threadId, messageId, { body, asSpaceId = null }) {
+    const config = await this.getConfig(spaceId, threadId);
+    if (!config) {
+      throw new Error(`ThreadService.editMessage: no thread "${threadId}" in space "${spaceId}"`);
+    }
+
+    const path = threadMessagePath(spaceId, threadId, messageId);
+    const quBit = await this.qu.get(path);
+    if (!quBit) throw new Error(`ThreadService.editMessage: no message "${messageId}"`);
+    const existing = await this.#decryptMessage(quBit);
+    if (!existing) throw new Error(`ThreadService.editMessage: cannot read message "${messageId}"`);
+
+    const signKey = asSpaceId ? await this.identity.getSpaceKey(asSpaceId) : await this.identity.getMainKey();
+    const authorPub = QuCrypto.toBase64Url(signKey.publicKey);
+    if (existing.author !== authorPub) {
+      throw new Error(`ThreadService.editMessage: only the original author can edit message "${messageId}"`);
+    }
+
+    const { formattedHtml, mentions } = applyFormatting(body, config.formatting);
+    const message = { _id: messageId, body, formattedHtml, mentions, author: authorPub, replyTo: existing.replyTo ?? null, editedAt: Date.now() };
+    const putOptions = { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey };
+
+    if (config.readers !== '*') {
+      const xKey = asSpaceId ? await this.identity.getSpaceXKey(asSpaceId) : await this.identity.getMainXKey();
+      putOptions.encryptWith = await this.#resolveReaderXKeys(config.readers);
+      putOptions.senderXPrivateKey = xKey.privateKeyPkcs8;
+    }
+
+    await this.qu.put(path, message, putOptions);
+    return { id: messageId, ...message };
+  }
+
+  /**
    * Lists every message in a thread, newest-last, decrypting each if the
    * thread is private and this identity is one of its readers.
    * @param {string|number} spaceId
