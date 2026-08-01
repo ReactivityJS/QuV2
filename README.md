@@ -320,6 +320,7 @@ mounted app for free - none of it is something an app has to opt into.
 | `forum` | A public board: topics (Documents) each backed by a public Thread (`THREAD_PRESETS.forum`) |
 | `chat` | A 1:1 room per Contact, backed by a private Thread (`THREAD_PRESETS.chat`) - the room id is derived from both members' pubkeys, so either side lands in the same room with no invite step |
 | `inbox` | A personal mailbox (`THREAD_PRESETS.mail`): anyone can write to it, only the owner can read it |
+| `todo` | A shared todo list per link (no invite step - the link is the permission), live-synced; "My Lists" auto-remembers any link you open |
 | `notes` | The original minimal example app - a per-identity private note list |
 
 `forum`/`chat`/`inbox` share one message-list-plus-composer view,

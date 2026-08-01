@@ -112,5 +112,6 @@ await buildBrowserApp('profile client', 'apps/profile/client.js', 'apps/profile/
 await buildBrowserApp('forum client', 'apps/forum/client.js', 'apps/forum/dist/client.js');
 await buildBrowserApp('chat client', 'apps/chat/client.js', 'apps/chat/dist/client.js');
 await buildBrowserApp('inbox client', 'apps/inbox/client.js', 'apps/inbox/dist/client.js');
+await buildBrowserApp('todo client', 'apps/todo/client.js', 'apps/todo/dist/client.js');
 
 console.log('Done.');

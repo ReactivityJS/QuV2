@@ -1,0 +1,11 @@
+{
+  "name": "todo",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "Shared ToDo",
+  "icon": "✅",
+  "navOrder": 13,
+  "requires": ["document-service"]
+}
