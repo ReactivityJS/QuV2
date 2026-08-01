@@ -1,5 +1,5 @@
 import { QuCrypto } from '@qu/core';
-import { documentPath } from './paths.js';
+import { documentPath, collectionPath } from './paths.js';
 
 const DIRECTORY_SPACE = 'directory';
 const VISIBLE_COLLECTION = 'visible';
@@ -30,11 +30,20 @@ export class DirectoryService {
    * @param {import('./document-service.js').DocumentService} documentService
    * @param {import('./collection-service.js').CollectionService} collectionService
    * @param {import('@qu/identity').QuIdentityEngine} identityEngine
+   * @param {(path: string) => Promise<object|null>} [syncFetch] - Optional:
+   *   `SyncEngine.fetch()` (see @qu/sync), for backfilling directory data
+   *   this identity doesn't have LOCALLY yet - same reasoning as
+   *   ThreadService's own constructor doc comment. Without it, a directory
+   *   entry (or the visible-collection document itself) published before
+   *   this session subscribed would never show up in listVisible(), no
+   *   matter how long it waits (`subscribe()` only ever covers FUTURE
+   *   writes - see SyncEngine's own doc comment).
    */
-  constructor(documentService, collectionService, identityEngine) {
+  constructor(documentService, collectionService, identityEngine, syncFetch = null) {
     this.documents = documentService;
     this.collections = collectionService;
     this.identity = identityEngine;
+    this.syncFetch = syncFetch;
   }
 
   /**
@@ -66,9 +75,34 @@ export class DirectoryService {
     else await this.collections.removeItem(DIRECTORY_SPACE, VISIBLE_COLLECTION, entryPath);
   }
 
-  /** @returns {Promise<Array<object>>} Every currently visible directory entry. */
+  /**
+   * @returns {Promise<Array<object>>} Every currently visible directory
+   *   entry - backfilled via `syncFetch` (if provided) on a local miss
+   *   before giving up, both for the visible-collection document itself
+   *   AND for any individual entry it references that hasn't synced yet
+   *   (resolves to `null` otherwise - see @qu/engines' CollectionEngine -
+   *   which this always filters out, so a caller never has to null-check).
+   */
   async listVisible() {
-    return (await this.collections.list(DIRECTORY_SPACE, VISIBLE_COLLECTION)) ?? [];
+    let items = await this.collections.list(DIRECTORY_SPACE, VISIBLE_COLLECTION);
+
+    if (items === null && this.syncFetch) {
+      try {
+        await this.syncFetch(collectionPath(DIRECTORY_SPACE, VISIBLE_COLLECTION));
+      } catch {
+        return []; // peer unreachable, or genuinely nobody's listed - either way, nothing more to try
+      }
+      items = await this.collections.list(DIRECTORY_SPACE, VISIBLE_COLLECTION);
+    }
+    if (!items) return [];
+
+    if (this.syncFetch && items.some((item) => item === null)) {
+      const rawPaths = await this.collections.listRawPaths(DIRECTORY_SPACE, VISIBLE_COLLECTION);
+      await Promise.all(items.map((item, i) => (item === null ? this.syncFetch(rawPaths[i]).catch(() => {}) : null)));
+      items = (await this.collections.list(DIRECTORY_SPACE, VISIBLE_COLLECTION)) ?? [];
+    }
+
+    return items.filter(Boolean);
   }
 
   /** @param {string} actorPub @returns {Promise<boolean>} */

@@ -1,4 +1,5 @@
 import { QuCrypto } from '@qu/core';
+import { actorPath } from '@qu/identity';
 import { putPrivate, getPrivate } from './private-storage.js';
 
 /** @param {string} actorPub @returns {string} */
@@ -31,10 +32,17 @@ export class ProfileService {
   /**
    * @param {import('@qu/core').QuCore} qu
    * @param {import('@qu/identity').QuIdentityEngine} identityEngine
+   * @param {(path: string) => Promise<object|null>} [syncFetch] - Optional:
+   *   `SyncEngine.fetch()` (see @qu/sync), for backfilling a profile this
+   *   identity doesn't have LOCALLY yet - same reasoning as ThreadService's
+   *   own constructor doc comment. Without it, `getPublicProfile()` for
+   *   someone whose profile was published before this session subscribed
+   *   would return null forever, no matter how long it waits.
    */
-  constructor(qu, identityEngine) {
+  constructor(qu, identityEngine, syncFetch = null) {
     this.qu = qu;
     this.identity = identityEngine;
+    this.syncFetch = syncFetch;
   }
 
   async #myActorPub() {
@@ -101,7 +109,15 @@ export class ProfileService {
    * @returns {Promise<{pub: string, epub: string, alias: string, avatar: string, [key: string]: string}|null>}
    */
   async getPublicProfile(actorPub) {
-    const profile = await this.identity.getProfile(actorPub);
+    let profile = await this.identity.getProfile(actorPub);
+    if (!profile && this.syncFetch) {
+      try {
+        await this.syncFetch(actorPath(actorPub, 'profile'));
+      } catch {
+        return null; // peer unreachable, or genuinely has no profile - either way, nothing more to try
+      }
+      profile = await this.identity.getProfile(actorPub);
+    }
     if (!profile) return null;
     const { xPublicKey = '', ...rest } = profile;
     return { pub: actorPub, epub: xPublicKey, ...rest };

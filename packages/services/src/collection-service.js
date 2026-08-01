@@ -46,7 +46,7 @@ export class CollectionService {
    * @returns {Promise<void>}
    */
   async addItem(spaceId, collectionId, itemPath, options = {}) {
-    const currentPaths = await this.#rawPaths(spaceId, collectionId);
+    const currentPaths = await this.listRawPaths(spaceId, collectionId);
     if (currentPaths.includes(itemPath)) return; // already present, avoid duplicate entries
     await this.create(spaceId, collectionId, [...currentPaths, itemPath], options);
   }
@@ -61,7 +61,7 @@ export class CollectionService {
    * @returns {Promise<void>}
    */
   async removeItem(spaceId, collectionId, itemPath, options = {}) {
-    const currentPaths = await this.#rawPaths(spaceId, collectionId);
+    const currentPaths = await this.listRawPaths(spaceId, collectionId);
     if (!currentPaths.includes(itemPath)) return;
     await this.create(spaceId, collectionId, currentPaths.filter((p) => p !== itemPath), options);
   }
@@ -70,9 +70,17 @@ export class CollectionService {
    * Reads the RAW (unresolved) list of item paths, bypassing
    * CollectionEngine's read-time $ref/$list resolution - addItem()/
    * removeItem() need the original paths to rewrite the list, not the
-   * resolved values list() returns.
+   * resolved values list() returns. Also PUBLIC (unlike the old
+   * `#rawPaths` this replaces) for callers that need to correlate a
+   * `list()` result containing `null` gaps (an item whose own document
+   * hasn't synced to this device yet - see @qu/engines' CollectionEngine)
+   * back to the individual path that's missing, e.g. to `syncFetch()` just
+   * that one path - see DirectoryService.listVisible() for a concrete use.
+   * @param {string|number} spaceId
+   * @param {string} collectionId
+   * @returns {Promise<string[]>}
    */
-  async #rawPaths(spaceId, collectionId) {
+  async listRawPaths(spaceId, collectionId) {
     const { adapter, rel } = this.qu.resolveMount(collectionPath(spaceId, collectionId));
     const raw = await adapter.get(rel);
     return raw?.val?.$list ?? [];
