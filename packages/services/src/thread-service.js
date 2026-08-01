@@ -125,6 +125,48 @@ export class ThreadService {
   }
 
   /**
+   * Grows a thread's reader list in place - the missing piece
+   * THREAD_PRESETS.chat/group's own doc comment flags as future work
+   * ("membership fixed at creation... real future work, not implemented
+   * here"). Needed for a thread whose membership is expected to change
+   * over time (e.g. a shared calendar gaining a new invitee) WITHOUT
+   * re-keying history: only messages posted AFTER this call are
+   * encrypted for (and so visible to) the newly added reader - exactly
+   * the same "can't see history from before you joined" trade-off most
+   * messengers accept for group membership changes.
+   *
+   * A no-op (not an error) for an already-public thread (`readers: '*'`)
+   * or a reader already present - safe to call unconditionally.
+   * @param {string|number} spaceId @param {string} threadId @param {string} actorPub
+   * @returns {Promise<object>} The thread's (possibly updated) config.
+   */
+  async addReader(spaceId, threadId, actorPub) {
+    const config = await this.getConfig(spaceId, threadId);
+    if (!config) throw new Error(`ThreadService.addReader: no thread "${threadId}" in space "${spaceId}" - call createThread() first`);
+    if (!Array.isArray(config.readers) || config.readers.includes(actorPub)) return config;
+    const updated = { ...config, readers: [...config.readers, actorPub] };
+    await this.qu.put(threadMetaPath(spaceId, threadId), updated);
+    return updated;
+  }
+
+  /**
+   * The inverse of `addReader()` - stops a former member from being
+   * resolved as an encryption target or push candidate for future
+   * messages (past messages remain readable to them; this isn't
+   * retroactive, same caveat as `addReader()`).
+   * @param {string|number} spaceId @param {string} threadId @param {string} actorPub
+   * @returns {Promise<object>} The thread's (possibly updated) config.
+   */
+  async removeReader(spaceId, threadId, actorPub) {
+    const config = await this.getConfig(spaceId, threadId);
+    if (!config) throw new Error(`ThreadService.removeReader: no thread "${threadId}" in space "${spaceId}"`);
+    if (!Array.isArray(config.readers)) return config;
+    const updated = { ...config, readers: config.readers.filter((pub) => pub !== actorPub) };
+    await this.qu.put(threadMetaPath(spaceId, threadId), updated);
+    return updated;
+  }
+
+  /**
    * Records "I've seen everything in this thread up to now" - a generic,
    * per-identity, private read-marker usable by any thread (Chat unread
    * counts, and the header's notification badge - see
@@ -499,4 +541,15 @@ export const THREAD_PRESETS = {
 
   /** System/app-generated notices, visible only to the owner, no formatting. */
   notifications: (ownerPub) => ({ writers: '*', readers: [ownerPub], replyMode: 'flat', formatting: [] }),
+
+  /**
+   * A membership list that GROWS over time (via `addReader()`/
+   * `removeReader()`, unlike `chat`/`group`'s fixed list) - e.g. Calendar's
+   * `activity` thread, whose readers must track a shared calendar's current
+   * member list as people are invited or removed. `writers: '*'` because
+   * only the owning app's own code posts into it (a system activity feed,
+   * not open user content), so there's no separate writer allowlist to
+   * maintain in lockstep with `readers`.
+   */
+  activity: (memberPubs) => ({ writers: '*', readers: memberPubs, replyMode: 'flat', formatting: [] }),
 };
