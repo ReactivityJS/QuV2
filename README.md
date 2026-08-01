@@ -326,6 +326,7 @@ mounted app for free - none of it is something an app has to opt into.
 | `inbox` | A personal mailbox (`THREAD_PRESETS.mail`): anyone can write to it, only the owner can read it |
 | `todo` | A shared todo list per link (no invite step - the link is the permission), live-synced; "My Lists" auto-remembers any link you open |
 | `notifications` | Push notification settings: enable/disable push for this device, plus granular @mention/per-app preferences the relay enforces server-side |
+| `geochase` | Live-GPS hunted/hunters game, ported from QUniverse V1's `hunt-lib.mjs` - map-free (distance/bearing text, see GeoChaseService's own doc comment for why) |
 | `notes` | The original minimal example app - a per-identity private note list |
 
 `forum`/`chat`/`inbox` share one message-list-plus-composer view,
@@ -451,10 +452,11 @@ a warning instead; the owner's own client naturally re-subscribes over time.
 ## What's deliberately not here yet
 
 The Foundation/Engine/Service/Loader stack, the QUniverse shell, Forum/
-Chat/Inbox/ToDo/Notifications, and a working Thread primitive are all here
-and tested. What's NOT: a richer permission model beyond Thread's writers/
-readers list, search, and a "Geo Chase" live-location game (present in
-QUniverse V1 - see `examples/hunt-lib.mjs` in the old `reactivityjs/Qu`
-repo - not yet ported). Each is a natural next app/Service, built the same
-way every app above was: as a thin consumer of what already exists, added
-when something actually needs it.
+Chat/Inbox/ToDo/Notifications/Geo Chase, and a working Thread primitive
+are all here and tested. What's NOT: a richer permission model beyond
+Thread's writers/readers list, search, and a real interactive map for Geo
+Chase (it currently ships distance/bearing text - see
+GeoChaseService's own doc comment for why, and what a Leaflet-based
+upgrade would look like). Each is a natural next app/Service, built the
+same way every app above was: as a thin consumer of what already exists,
+added when something actually needs it.

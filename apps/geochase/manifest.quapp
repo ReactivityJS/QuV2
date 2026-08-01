@@ -1,0 +1,11 @@
+{
+  "name": "geochase",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "Geo Chase",
+  "icon": "🧭",
+  "navOrder": 14,
+  "requires": ["document-service", "collection-service"]
+}

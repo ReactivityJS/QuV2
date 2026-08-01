@@ -114,5 +114,6 @@ await buildBrowserApp('chat client', 'apps/chat/client.js', 'apps/chat/dist/clie
 await buildBrowserApp('inbox client', 'apps/inbox/client.js', 'apps/inbox/dist/client.js');
 await buildBrowserApp('todo client', 'apps/todo/client.js', 'apps/todo/dist/client.js');
 await buildBrowserApp('notifications client', 'apps/notifications/client.js', 'apps/notifications/dist/client.js');
+await buildBrowserApp('geochase client', 'apps/geochase/client.js', 'apps/geochase/dist/client.js');
 
 console.log('Done.');

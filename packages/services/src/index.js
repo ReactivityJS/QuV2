@@ -19,6 +19,7 @@ import { CmsService } from './cms-service.js';
 import { ProfileService } from './profile-service.js';
 import { NotificationPrefsService } from './notification-prefs-service.js';
 import { PushSubscriptionService } from './push-subscription-service.js';
+import { GeoChaseService, distanceMeters, predictNextRadius } from './geochase-service.js';
 
 export {
   DocumentService,
@@ -35,6 +36,9 @@ export {
   ProfileService,
   NotificationPrefsService,
   PushSubscriptionService,
+  GeoChaseService,
+  distanceMeters,
+  predictNextRadius,
 };
 export * as paths from './paths.js';
 export { unwrap, unwrapAll } from './unwrap.js';
@@ -67,5 +71,6 @@ export function createServices(qu, { assetEngine, identityEngine, syncFetch }) {
     profile: new ProfileService(qu, identityEngine),
     notificationPrefs: new NotificationPrefsService(qu, identityEngine),
     pushSubscriptions: new PushSubscriptionService(documents, collections, identityEngine),
+    geochase: new GeoChaseService(qu, documents, collections, identityEngine),
   };
 }

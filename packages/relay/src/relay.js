@@ -116,6 +116,7 @@ export class QuRelay {
     this.registry.registerService('profile-service', this.services.profile);
     this.registry.registerService('notification-prefs-service', this.services.notificationPrefs);
     this.registry.registerService('push-subscription-service', this.services.pushSubscriptions);
+    this.registry.registerService('geochase-service', this.services.geochase);
 
     this.loader = new QuLoader(this.core, this.registry);
     this.vapidKeys = null;

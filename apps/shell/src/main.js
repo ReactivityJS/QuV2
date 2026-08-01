@@ -346,10 +346,19 @@ class Shell {
     // which only cover what the SHELL chrome needs) - e.g. Forum/Chat/Inbox
     // subscribing to their own space so @qu/reactive's `watch()` (what
     // @qu/thread-ui's message view is built on) actually has live data to
-    // react to, not just this browser's own writes.
+    // react to, not just this browser's own writes. `fetch` is the
+    // COMPLEMENTARY pull for data that's NOT going to arrive via
+    // subscribe() no matter how long an app waits - subscribe() only ever
+    // covers writes made AFTER subscribing (see SyncEngine's own doc
+    // comment), so a value written ONCE and never updated again (e.g. Geo
+    // Chase's game config - see apps/geochase/client.js) needs an explicit
+    // one-time pull when opened via a link shared after the fact, the
+    // same reasoning ThreadService's own `syncFetch` backfill already
+    // applies to a not-yet-synced profile.
     const stop = mod.mount(this.screenEl, {
       qu: this.qu, services: this.Qu, appId, segments,
       subscribe: (pathPrefix) => this.sync.subscribe(pathPrefix),
+      fetch: (path) => this.sync.fetch(path),
     });
     this.stopMountedApp = typeof stop === 'function' ? stop : null;
   }
