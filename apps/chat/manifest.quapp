@@ -1,0 +1,11 @@
+{
+  "name": "chat",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "Chat",
+  "icon": "💭",
+  "navOrder": 11,
+  "requires": ["document-service", "collection-service", "thread-service"]
+}

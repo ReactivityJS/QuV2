@@ -1,0 +1,15 @@
+{
+  "name": "@qu/thread-ui",
+  "version": "2.0.0",
+  "description": "The one message-list-plus-composer view Forum, Chat and the Inbox app are all built from (see @qu/services' ThreadService/THREAD_PRESETS for the config-only layer beneath it) - a browser-only UI primitive, the ThreadService counterpart to @qu/ui's Qu-Components.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@qu/reactive": "^2.0.0",
+    "@qu/services": "^2.0.0"
+  },
+  "license": "MIT"
+}

@@ -1,3 +1,51 @@
+import { QuCrypto } from '@qu/core';
+
+/**
+ * Any path under this prefix never leaves the local device via SyncEngine,
+ * regardless of what any peer subscribed to (checked at broadcast AND at
+ * incoming-write time - see the two checks below, not just one). This is
+ * the one hard-coded safety rail in an otherwise fully generic replication
+ * layer: @qu/identity's master seed lives at `/store/secure/identity/seed`
+ * (see identity.js's SEED_PATH) written with NO signWith/encryptWith - by
+ * design, since encrypting it with a Qu key derived FROM itself would be
+ * circular. That makes it the one piece of data in this whole system that
+ * must never be replicated anywhere, under any subscription - a client
+ * broadly subscribing (or being subscribed to) for "everything under
+ * /store" (see @qu/relay's per-connection auto-subscribe) must not be able
+ * to accidentally leak or receive it. Any future local-only secret should
+ * live under this same prefix to get this guarantee for free.
+ */
+const LOCAL_ONLY_PREFIX = '/store/secure/';
+
+/**
+ * @param {object} quBit
+ * @returns {Promise<boolean>} Whether an author claim on this QuBit
+ *   actually checks out. A QuBit with no `sig` makes no authorship claim at
+ *   all (plenty of legitimate app data is written unsigned - see
+ *   DocumentService/CollectionService, which don't require signing) and is
+ *   accepted as-is: sync doesn't retroactively demand authenticity nothing
+ *   ever promised. A QuBit WITH a `sig` (and/or `pub`) IS making a claim -
+ *   "actor X wrote this exact value" - and that claim must cryptographically
+ *   check out or the write is rejected outright, since accepting an
+ *   unverified `pub`+`sig` pair from the wire would let any connected peer
+ *   forge writes under someone else's identity (e.g. a fabricated Thread
+ *   message attributed to a real, unrelated actor).
+ */
+async function isAuthentic(quBit) {
+  if (!quBit.sig) return true;
+  if (!quBit.pub) return false; // a signature with no claimed signer can never verify
+  try {
+    const payload = JSON.stringify({ path: quBit.path, val: quBit.val, ts: quBit.ts, pub: quBit.pub });
+    return await QuCrypto.verify(
+      new TextEncoder().encode(payload),
+      QuCrypto.fromBase64(quBit.sig),
+      QuCrypto.fromBase64(quBit.pub)
+    );
+  } catch {
+    return false; // malformed base64, wrong-length key, etc. - treat exactly like "did not verify"
+  }
+}
+
 /**
  * SYNC ENGINE — path-based pub/sub replication between Qu peers.
  *
@@ -9,9 +57,28 @@
  *   2. Incoming synced QuBits from peers are written straight to the mounted
  *      adapter, bypassing QuStore's seal step - a synced QuBit already
  *      carries its original signature/timestamp; re-signing it locally
- *      would forge a new signature from data we didn't actually write.
+ *      would forge a new signature from data we didn't actually write. They
+ *      ARE checked for authenticity first (see isAuthentic() above) and
+ *      then re-broadcast to this peer's OWN subscribers (excluding whoever
+ *      just sent it), so a relay acts as a genuine hub - not just a
+ *      dead-end recipient - for however many clients are subscribed to it.
  *   3. `fetch(path)` lets a peer explicitly request a value it doesn't have
  *      yet (e.g. after subscribing, to backfill history).
+ *
+ * SECURITY NOTE - what step 2's verification does NOT cover: it proves the
+ * claimed author really did sign this exact value, but it does NOT re-check
+ * an Engine-level ACL (e.g. "is this pub actually a writer on THIS
+ * Thread?" - see @qu/engines/thread-engine.js). That check only runs
+ * inside QuStore.put()'s TRANSFORM step on the ORIGINATING peer, which a
+ * synced write never goes through here (see point 2's own explanation of
+ * why re-running seal/transform on already-sealed data would be wrong).
+ * A correctly-signed-but-unauthorized write can therefore still end up
+ * PERSISTED via sync, though for an encrypted (non-'*') Thread it will not
+ * be READABLE by real readers (see ThreadService's own encryption, which a
+ * bypassing writer has no way to satisfy without a real reader's key) -
+ * closing that remaining gap for good would mean giving synced writes a
+ * restricted, replay-safe path back through the relevant Engine's own
+ * checks, which is real future work, not something papered over here.
  *
  * Compared to the original prototype, this version drops the defensive
  * "maybe pub/sig arrived as a Buffer, maybe as a plain object, let's guess"
@@ -23,6 +90,7 @@
 export class SyncEngine {
   #qu;
   #transport;
+  #publishAllTo;
   #subscriptions = new Map(); // path/prefix -> Set<peerId>
   #pendingRequests = new Map(); // requestId -> {resolve, reject, timeout}
   #requestCounter = 0;
@@ -31,13 +99,43 @@ export class SyncEngine {
   /**
    * @param {import('@qu/core').QuCore} qu
    * @param {import('./transport.js').Transport} transport
+   * @param {{publishAllTo?: string}} [options] - `publishAllTo`: ALWAYS
+   *   forward every local write (except LOCAL_ONLY_PREFIX) to this one
+   *   peerId, unconditionally - no subscription round-trip required. This
+   *   is what a star-topology CLIENT (a browser shell talking to its one
+   *   relay, see apps/shell's connect()) should set: `subscribe()` only
+   *   ever covers what the REMOTE side later decides to tell you about
+   *   (and requires that round-trip to complete first), which creates an
+   *   unavoidable race for anything the CLIENT itself writes very early
+   *   (e.g. a brand-new identity's own public profile, published the
+   *   moment it's created - see apps/shell's boot()) - if that write
+   *   happens before the relay's own subscribe-back message has arrived,
+   *   subscription-based broadcasting would silently drop it. Unconditional
+   *   publish to a known, single upstream peer has no such race: it works
+   *   the instant the transport is connected. Left unset (the default) for
+   *   relay-to-relay peering, where publishing EVERYTHING unconditionally
+   *   to whoever merely connected would be too permissive - that direction
+   *   stays exactly as explicit/subscription-based as before.
    */
-  constructor(qu, transport) {
+  constructor(qu, transport, { publishAllTo = null } = {}) {
     this.#qu = qu;
     this.#transport = transport;
+    this.#publishAllTo = publishAllTo;
 
-    this.#unsubscribeLocalWrites = this.#qu.onStorageChange(({ path, quBit }) => {
-      this.#broadcastToSubscribers(path, { type: 'sync', path, quBit });
+    this.#unsubscribeLocalWrites = this.#qu.onStorageChange(({ path, quBit, origin }) => {
+      // `origin === 'sync'` means this notify came from QuStore.putSealed()
+      // (see its own doc comment) - i.e. THIS SyncEngine (or another one
+      // sharing this qu instance) just persisted a write that arrived FROM
+      // a peer, not a genuinely new local write. #handleSync already does
+      // its own, correctly origin-EXCLUDED re-broadcast for that case right
+      // after persisting - broadcasting it AGAIN here, with no origin to
+      // exclude, would bounce the write straight back to whoever sent it,
+      // which bounces it back again, forever.
+      if (origin === 'sync') return;
+      if (path.startsWith(LOCAL_ONLY_PREFIX)) return; // see LOCAL_ONLY_PREFIX doc comment above
+      const message = { type: 'sync', path, quBit };
+      if (this.#publishAllTo) this.#transport.sendTo(this.#publishAllTo, message);
+      this.#broadcastToSubscribers(path, message, this.#publishAllTo); // publishAllTo already got it above - never send it twice
     });
 
     this.#transport.onMessage(({ data, peerId }) => {
@@ -126,10 +224,18 @@ export class SyncEngine {
     });
   }
 
-  #broadcastToSubscribers(path, message) {
+  /**
+   * @param {string} path
+   * @param {object} message
+   * @param {string|null} [excludePeerId] - Never re-send to whoever this
+   *   message originated from (relevant only for hub re-broadcast, see
+   *   #handleSync - a peer already has the write it just sent us).
+   */
+  #broadcastToSubscribers(path, message, excludePeerId = null) {
     for (const [prefix, peers] of this.#subscriptions) {
       if (!path.startsWith(prefix)) continue;
       for (const peerId of peers) {
+        if (peerId === excludePeerId) continue;
         if (peerId !== this.#transport.getPeerId()) this.#transport.sendTo(peerId, message);
       }
     }
@@ -138,7 +244,7 @@ export class SyncEngine {
   #handleIncoming(message, peerId) {
     switch (message.type) {
       case 'sync':
-        return this.#handleSync(message);
+        return this.#handleSync(message, peerId);
       case 'request':
         return this.#handleRequest(message, peerId);
       case 'response':
@@ -152,15 +258,41 @@ export class SyncEngine {
     }
   }
 
-  async #handleSync({ path, quBit }) {
+  /**
+   * @param {{path: string, quBit: object}} message
+   * @param {string} originPeerId - Whoever sent this over the transport - a
+   *   relay re-broadcasting this to ITS OWN subscribers must never echo it
+   *   straight back to them.
+   */
+  async #handleSync({ path, quBit }, originPeerId) {
+    if (path.startsWith(LOCAL_ONLY_PREFIX)) {
+      console.warn(`[SyncEngine] refusing synced write for local-only path "${path}"`);
+      return;
+    }
     if (!isValidQuBit(quBit)) {
-      console.warn(`[SyncEngine] ignoring invalid synced QuBit for "${path}"`);
+      console.warn(`[SyncEngine] ignoring malformed synced QuBit for "${path}"`);
+      return;
+    }
+    if (!(await isAuthentic(quBit))) {
+      console.warn(`[SyncEngine] rejecting synced QuBit for "${path}": signature does not verify`);
       return;
     }
     await this.#persistDirectly(path, quBit);
+    // Hub re-broadcast: a relay with N subscribed clients must forward what
+    // ONE of them just sent to the OTHER N-1, not just persist it locally -
+    // otherwise only writes the relay itself originates would ever reach a
+    // second client, which defeats the entire point of a shared relay (see
+    // the class doc comment's security note for what this re-broadcast does
+    // and does not guarantee).
+    this.#broadcastToSubscribers(path, { type: 'sync', path, quBit }, originPeerId);
   }
 
   async #handleRequest({ requestId, path }, peerId) {
+    if (path.startsWith(LOCAL_ONLY_PREFIX)) {
+      console.warn(`[SyncEngine] refusing to serve fetch() request for local-only path "${path}"`);
+      this.#transport.sendTo(peerId, { type: 'response', requestId, path, quBit: null });
+      return;
+    }
     try {
       const { adapter, rel } = this.#qu.resolveMount(path);
       const quBit = await adapter.get(rel);
@@ -185,12 +317,16 @@ export class SyncEngine {
     pending.resolve(quBit ?? null);
   }
 
-  /** Writes an already-sealed QuBit straight to the adapter, bypassing QuStore's seal step. */
+  /**
+   * Writes an already-sealed QuBit straight to its mount and notifies
+   * local storage-change listeners (see QuStore.putSealed() for why this
+   * must notify, not just persist - @qu/reactive's `watch()`, and
+   * everything built on it, would otherwise never react to anything
+   * arriving from another peer).
+   */
   async #persistDirectly(path, quBit) {
     try {
-      const { adapter, rel } = this.#qu.resolveMount(path);
-      if (!adapter.put) return;
-      await adapter.put(rel, quBit);
+      await this.#qu.putSealed(path, quBit);
     } catch (err) {
       console.error(`[SyncEngine] failed to persist synced QuBit for "${path}":`, err);
     }

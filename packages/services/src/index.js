@@ -37,10 +37,15 @@ export { unwrap, unwrapAll } from './unwrap.js';
 
 /**
  * @param {import('@qu/core').QuCore} qu
- * @param {{assetEngine: import('@qu/engines').AssetEngine, identityEngine: import('@qu/identity').QuIdentityEngine}} deps
+ * @param {{assetEngine: import('@qu/engines').AssetEngine, identityEngine: import('@qu/identity').QuIdentityEngine, syncFetch?: (path: string) => Promise<object|null>}} deps
+ *   `syncFetch` - typically `(path) => sync.fetch(path)` (see @qu/sync) -
+ *   is forwarded to ThreadService so it can backfill a profile that hasn't
+ *   synced yet (see ThreadService's own constructor doc comment for why);
+ *   omit it for a server-side/relay QuCore, which has no equivalent single
+ *   upstream peer to fetch from.
  * @returns {{documents: DocumentService, collections: CollectionService, assets: AssetService, actors: ActorService, starred: StarredService, threads: ThreadService, favorites: FavoritesService, contacts: ContactsService, directory: DirectoryService, cms: CmsService, profile: ProfileService}}
  */
-export function createServices(qu, { assetEngine, identityEngine }) {
+export function createServices(qu, { assetEngine, identityEngine, syncFetch }) {
   const collections = new CollectionService(qu);
   const starred = new StarredService(qu, identityEngine);
   const documents = new DocumentService(qu);
@@ -50,7 +55,7 @@ export function createServices(qu, { assetEngine, identityEngine }) {
     assets: new AssetService(qu, assetEngine),
     actors: new ActorService(identityEngine),
     starred,
-    threads: new ThreadService(qu, identityEngine, collections),
+    threads: new ThreadService(qu, identityEngine, collections, syncFetch),
     favorites: new FavoritesService(starred),
     contacts: new ContactsService(starred, identityEngine),
     directory: new DirectoryService(documents, collections, identityEngine),

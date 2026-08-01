@@ -54,26 +54,64 @@ async function boot() {
   const assetEngine = new AssetEngine(qu);
   new ThreadEngine(qu);
 
+  // Set up the relay connection BEFORE any local write happens (identity
+  // creation, the new-identity profile publish below) - not because we
+  // wait for it (we don't - connect() runs in the background, see the
+  // catch() below), but because SyncEngine only ever observes writes from
+  // the moment it's CONSTRUCTED onward (no history replay - see
+  // sync-engine.js's own doc comment), and WebSocketClientTransport queues
+  // anything sent before the handshake completes rather than dropping or
+  // throwing (see websocket-client.js). Constructing both early, and
+  // fire-and-forgetting connect() itself, means every local write from
+  // here on is guaranteed to reach the relay once it's up, WITHOUT making
+  // the whole page wait on a network round-trip just to render its shell.
+  const wsScheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const relayUrl = CONFIG.relayUrl ?? `${wsScheme}//${location.host}`;
+  const transport = new WebSocketClientTransport(relayUrl);
+  // publishAllTo: 'relay' - see SyncEngine's own doc comment for why a
+  // star-topology client (this shell, talking to its one relay) wants
+  // unconditional publish rather than subscription-based broadcasting for
+  // its OWN writes.
+  const sync = new SyncEngine(qu, transport, { publishAllTo: 'relay' });
+  transport.connect().catch((err) => console.error('[shell] relay connection failed:', err));
+
   const identity = new QuIdentityEngine(qu);
   if (!(await identity.hasIdentity())) {
     const mnemonic = identity.generateMnemonic();
     await identity.importMnemonic(mnemonic);
     console.warn('[shell] New identity created. Recovery phrase (save this somewhere safe):', mnemonic);
+    // Publish an (initially empty) public profile immediately, rather than
+    // waiting for a visit to the Profile app - the ONLY thing another
+    // identity needs to encrypt something FOR this one (an encrypted
+    // Thread's reader key, an @qu/identity attestation, ...) is the
+    // xPublicKey this always includes (see QuIdentityEngine's
+    // publishMainProfile()), which is derivable the moment an identity
+    // exists. Without this, the very first Chat/Inbox message to a
+    // brand-new identity would fail with "no published profile" until they
+    // happened to open Profile first - alias/avatar can be filled in
+    // later, but the key an encrypted message needs shouldn't be gated on
+    // a UI visit that has nothing to do with encryption.
+    await identity.publishMainProfile({});
   }
 
-  const Qu = createServices(qu, { assetEngine, identityEngine: identity });
+  // See ThreadService's constructor doc comment (@qu/services) for why it
+  // needs this: encrypting for a reader, or decrypting a message from a
+  // sender, whose profile hasn't happened to sync to THIS session yet
+  // (subscribe() only covers writes made after subscribing - no history
+  // replay) would otherwise fail for no reason a user could fix.
+  const Qu = createServices(qu, { assetEngine, identityEngine: identity, syncFetch: (path) => sync.fetch(path) });
   const actorPub = await Qu.actors.whoAmI();
 
-  const shell = new Shell(qu, Qu, actorPub);
+  const shell = new Shell(qu, Qu, actorPub, sync);
   await shell.mount(document.body);
-  await shell.connect();
 }
 
 class Shell {
-  constructor(qu, Qu, actorPub) {
+  constructor(qu, Qu, actorPub, sync) {
     this.qu = qu;
     this.Qu = Qu;
     this.actorPub = actorPub;
+    this.sync = sync;
     this.apps = [];
     this.adminPubs = [];
     this.stopMountedApp = null;
@@ -145,30 +183,20 @@ class Shell {
       this._renderAppToolbar(this._currentAppId());
     });
 
-    await this._loadAdminConfig();
-    await this._refreshApps();
-    await this._renderRoute();
-  }
-
-  async connect() {
-    // Mirror the page's own scheme (https -> wss, http -> ws) and host
-    // (incl. port, if any) rather than hardcoding ws:// - behind a TLS-
-    // offloading reverse proxy the browser is on https:// while the relay
-    // itself only ever speaks plain ws:// on its own port, so a hardcoded
-    // scheme here would either mixed-content-block (http URL from an https
-    // page) or simply be wrong once a proxy sits in front of the relay.
-    const wsScheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = CONFIG.relayUrl ?? `${wsScheme}//${location.host}`;
-    const transport = new WebSocketClientTransport(url);
-    await transport.connect();
-    this.sync = new SyncEngine(this.qu, transport);
     // A small, fixed set of prefixes covering what the shell itself needs
     // live: public profiles/attestations (contacts, directory), and the
     // directory's own visibility index. Apps mounted later are responsible
     // for subscribing to whatever ELSE they need (their own spaces) -
-    // the shell has no way to know that in advance.
+    // the shell has no way to know that in advance. (This SyncEngine was
+    // already constructed - and its transport's connect() already kicked
+    // off - back in boot(), before any local write could happen; see that
+    // function's own doc comment for why the ordering matters.)
     this.sync.subscribe('/store/actors');
     this.sync.subscribe('/store/directory');
+
+    await this._loadAdminConfig();
+    await this._refreshApps();
+    await this._renderRoute();
   }
 
   /** Fetches the relay's admin pubkey list (see @qu/relay's `/config.json`) - a UI hint only, see that route's own doc comment for why it's not a security boundary. */
@@ -310,7 +338,17 @@ class Shell {
     }
 
     this.screenEl.textContent = '';
-    const stop = mod.mount(this.screenEl, { qu: this.qu, services: this.Qu, appId, segments });
+    // `subscribe` lets an app ask the shell's ONE relay connection to also
+    // push live updates for a space the shell itself has no way to know
+    // about in advance (see this.sync's own default subscriptions above,
+    // which only cover what the SHELL chrome needs) - e.g. Forum/Chat/Inbox
+    // subscribing to their own space so @qu/reactive's `watch()` (what
+    // @qu/thread-ui's message view is built on) actually has live data to
+    // react to, not just this browser's own writes.
+    const stop = mod.mount(this.screenEl, {
+      qu: this.qu, services: this.Qu, appId, segments,
+      subscribe: (pathPrefix) => this.sync.subscribe(pathPrefix),
+    });
     this.stopMountedApp = typeof stop === 'function' ? stop : null;
   }
 

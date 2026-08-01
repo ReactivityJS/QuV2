@@ -258,6 +258,51 @@ export class QuStore {
   }
 
   /**
+   * Persists an ALREADY-SEALED QuBit (signature/encryption/timestamp
+   * already final) directly to its mount and notifies local
+   * storage-change listeners - the PERSIST+NOTIFY half of `put()`'s
+   * pipeline (steps 3-4), without TRANSFORM/SEAL (steps 1-2).
+   *
+   * This exists for @qu/sync's SyncEngine: an incoming synced QuBit from
+   * another peer already carries its true original signature - re-running
+   * SEAL on it would forge a NEW signature over data this device didn't
+   * actually write (see `put()`'s own docs for why). But skipping NOTIFY
+   * too - which a naive "just call adapter.put() directly" would - leaves
+   * every LOCAL watcher blind to anything arriving from another peer:
+   * @qu/reactive's `watch()`, and everything built on it (`<qu-view>`,
+   * `<qu-list>`, @qu/thread-ui, ...), only ever re-runs in response to the
+   * `storage:put` event this method fires, same as a genuinely local
+   * write. Without it, a shared relay's whole "live" premise silently
+   * doesn't work for anything but the writer's own browser tab.
+   *
+   * Not part of the Engine pipeline - Engines never call this. It's
+   * infrastructure-only, for a caller (SyncEngine) that already performed
+   * its OWN validation (signature verification) before ever reaching here.
+   *
+   * The notify payload's `origin: 'sync'` marker (absent on a normal
+   * `put()`'s notify) is what lets SyncEngine tell "a write I should
+   * broadcast to MY subscribers, because it's genuinely new" apart from "a
+   * write I just received FROM a peer and am only re-persisting for local
+   * reactivity" - without it, SyncEngine's own generic notify listener
+   * would re-broadcast an incoming synced write right back out unfiltered
+   * (it has no origin peer to exclude, unlike the DELIBERATE hub
+   * re-broadcast `#handleSync` already does elsewhere), bouncing the same
+   * write back to whoever just sent it - which bounces it right back
+   * again, forever. See @qu/sync/sync-engine.js's own constructor for the
+   * listener that checks this field.
+   *
+   * @param {string} path
+   * @param {import('./qubit.js').QuBit} quBit
+   * @returns {Promise<void>}
+   */
+  async putSealed(path, quBit) {
+    const { adapter, rel } = this.#mount.resolve(path);
+    if (!adapter.put) return;
+    await adapter.put(rel, quBit);
+    await this.#notify.emit('storage:put', { path, quBit, origin: 'sync' });
+  }
+
+  /**
    * Builds and seals a QuBit: sets pub (if signing), encrypts `val` (if
    * requested), then signs the final payload. Order matters - we always sign
    * over the *ciphertext*, never the plaintext, so a signature never leaks

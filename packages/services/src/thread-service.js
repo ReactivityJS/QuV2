@@ -23,11 +23,42 @@ export class ThreadService {
    * @param {import('@qu/core').QuCore} qu
    * @param {import('@qu/identity').QuIdentityEngine} identityEngine
    * @param {import('./collection-service.js').CollectionService} collectionService
+   * @param {(path: string) => Promise<object|null>} [syncFetch] - Optional:
+   *   `SyncEngine.fetch()` (see @qu/sync), for backfilling a profile this
+   *   identity doesn't have LOCALLY yet. `subscribe()`-based sync only ever
+   *   covers writes made AFTER subscribing (see SyncEngine's own doc
+   *   comment) - a chat partner's, or a total stranger's (Inbox: any
+   *   writer can send), profile may well have been published before this
+   *   session ever connected. Without a way to backfill it on demand,
+   *   encrypting FOR a reader (`#resolveReaderXKeys`) or decrypting a
+   *   message FROM a sender (`#decryptMessage`) whose profile hasn't
+   *   happened to sync yet would fail every time for no fixable reason
+   *   from the UI's perspective. Omit this (e.g. server-side/relay usage,
+   *   which has no peer to fetch from in the same sense) and both methods
+   *   simply behave as before - local-only, no fallback.
    */
-  constructor(qu, identityEngine, collectionService) {
+  constructor(qu, identityEngine, collectionService, syncFetch = null) {
     this.qu = qu;
     this.identity = identityEngine;
     this.collections = collectionService;
+    this.syncFetch = syncFetch;
+  }
+
+  /**
+   * @param {string} actorPub
+   * @returns {Promise<object|null>} Same as `identity.getProfile()`, but
+   *   backfills via `syncFetch` (if provided) on a local miss before giving
+   *   up - see the constructor's own doc comment for why.
+   */
+  async #getProfile(actorPub) {
+    const local = await this.identity.getProfile(actorPub);
+    if (local || !this.syncFetch) return local;
+    try {
+      await this.syncFetch(`/store/actors/~${actorPub}/profile`);
+    } catch {
+      return null; // peer unreachable, or genuinely has no profile - either way, nothing more to try
+    }
+    return this.identity.getProfile(actorPub); // re-read now that syncFetch (on success) persisted it locally
   }
 
   /**
@@ -146,7 +177,7 @@ export class ThreadService {
   async #resolveReaderXKeys(readerPubs) {
     const keys = [];
     for (const pub of readerPubs) {
-      const profile = await this.identity.getProfile(pub);
+      const profile = await this.#getProfile(pub);
       if (!profile?.xPublicKey) {
         throw new Error(`ThreadService: reader "${pub}" has no published profile - cannot encrypt for them`);
       }
@@ -173,7 +204,7 @@ export class ThreadService {
     if (!entry) return null;
 
     const senderActorPub = QuCrypto.toBase64Url(QuCrypto.fromBase64(quBit.pub));
-    const senderProfile = await this.identity.getProfile(senderActorPub);
+    const senderProfile = await this.#getProfile(senderActorPub);
     if (!senderProfile?.xPublicKey) return null;
 
     try {

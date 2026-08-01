@@ -1,0 +1,11 @@
+{
+  "name": "inbox",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "Inbox",
+  "icon": "📥",
+  "navOrder": 12,
+  "requires": ["document-service", "collection-service", "thread-service"]
+}
