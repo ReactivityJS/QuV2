@@ -91,7 +91,8 @@ export class SyncEngine {
   #qu;
   #transport;
   #publishAllTo;
-  #subscriptions = new Map(); // path/prefix -> Set<peerId>
+  #subscriptions = new Map(); // path/prefix -> Set<peerId> (subscribers TO us)
+  #mySubscriptions = new Map(); // path/prefix -> targetPeerId (subscriptions WE made, see subscribe() below)
   #pendingRequests = new Map(); // requestId -> {resolve, reject, timeout}
   #requestCounter = 0;
   #unsubscribeLocalWrites;
@@ -145,6 +146,21 @@ export class SyncEngine {
       }
       this.#handleIncoming(data, peerId);
     });
+
+    // A reconnected transport is a BRAND NEW connection as far as the
+    // remote side is concerned (see WebSocketClientTransport's own doc
+    // comment on `onReconnect()` for why) - it has no memory of what we'd
+    // previously asked it to subscribe us to. Only client-style transports
+    // that can actually drop and reconnect implement this hook (duck-typed
+    // check - a relay's WebSocketServerTransport, which only ever accepts
+    // connections rather than initiating/losing one of its own, doesn't).
+    if (typeof this.#transport.onReconnect === 'function') {
+      this.#transport.onReconnect(() => {
+        for (const { prefix, targetPeerId } of this.#mySubscriptions.values()) {
+          this.#transport.sendTo(targetPeerId, { type: 'subscribe', path: prefix });
+        }
+      });
+    }
   }
 
   /** Stops listening to local writes. Call when tearing down this SyncEngine. */
@@ -177,12 +193,18 @@ export class SyncEngine {
    */
   subscribe(pathPrefix, targetPeerId = null) {
     const prefix = pathPrefix.replace(/\*$/, '');
+    // Remembered so a reconnected transport (see the constructor's
+    // onReconnect() hook above) can replay it - the remote side's own
+    // bookkeeping for this subscription lives entirely on a connection
+    // that no longer exists once a reconnect happens.
+    this.#mySubscriptions.set(`${targetPeerId ?? ''}:${prefix}`, { prefix, targetPeerId });
     this.#transport.sendTo(targetPeerId, { type: 'subscribe', path: prefix });
   }
 
   /** @param {string} pathPrefix @param {string} [targetPeerId] */
   unsubscribe(pathPrefix, targetPeerId = null) {
     const prefix = pathPrefix.replace(/\*$/, '');
+    this.#mySubscriptions.delete(`${targetPeerId ?? ''}:${prefix}`);
     this.#transport.sendTo(targetPeerId, { type: 'unsubscribe', path: prefix });
   }
 
