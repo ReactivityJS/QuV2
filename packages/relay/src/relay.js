@@ -21,13 +21,15 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 
+import { QuCrypto } from '@qu/core';
 import { QuRuntime } from '@qu/runtime';
 import { Registry } from '@qu/foundation';
 import { QuLoader, discoverLocalPackages } from '@qu/loader';
 import { QuIdentityEngine } from '@qu/identity';
 import { SyncEngine } from '@qu/sync';
 import { DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine } from '@qu/engines';
-import { createServices } from '@qu/services';
+import { createServices, NotificationPrefsService } from '@qu/services';
+import { generateVapidKeys, sendWebPush } from '@qu/push';
 
 import { FsAdapter } from './adapters/fs-adapter.js';
 import { WebSocketServerTransport } from './transports/websocket-server-transport.js';
@@ -55,6 +57,13 @@ const SHELL_PUBLIC_DIR = fileURLToPath(new URL('../../../apps/shell/public/', im
  * @property {boolean} [serveShell=true] - Serve the QUniverse shell at `/` (see apps/shell).
  * @property {string[]} [adminPubs=[]] - base64url actor pubkeys the shell UI treats as relay
  *   admins (see `/config.json` above for the security caveat - this is a UI hint, not an ACL).
+ * @property {string} [vapidPublicKey] - Pin the relay's Web Push VAPID keypair across restarts
+ *   (see @qu/push) - both this and `vapidPrivateKey` must be given together, or neither. Without
+ *   them, a fresh keypair is generated on first boot and persisted under LOCAL_ONLY_PREFIX (see
+ *   @qu/sync/sync-engine.js) - never synced anywhere, same treatment as the identity seed.
+ * @property {string} [vapidPrivateKey]
+ * @property {string} [vapidSubject='mailto:admin@example.com'] - Required by every push service
+ *   (RFC 8292) so they have someone to contact about abuse - override this for a real deployment.
  */
 
 export class QuRelay {
@@ -68,6 +77,7 @@ export class QuRelay {
       remoteApps: [],
       serveShell: true,
       adminPubs: [],
+      vapidSubject: 'mailto:admin@example.com',
       ...options,
     };
 
@@ -104,8 +114,11 @@ export class QuRelay {
     this.registry.registerService('directory-service', this.services.directory);
     this.registry.registerService('cms-service', this.services.cms);
     this.registry.registerService('profile-service', this.services.profile);
+    this.registry.registerService('notification-prefs-service', this.services.notificationPrefs);
+    this.registry.registerService('push-subscription-service', this.services.pushSubscriptions);
 
     this.loader = new QuLoader(this.core, this.registry);
+    this.vapidKeys = null;
 
     this._httpServer = null;
     this._wss = null;
@@ -135,12 +148,31 @@ export class QuRelay {
       await this.identity.importMnemonic(this.identity.generateMnemonic());
     }
 
+    await this.#setupVapidKeys();
+
     this._httpServer = createServer((req, res) => this.#handleHttp(req, res));
     this._wss = new WebSocketServer({ server: this._httpServer });
     await new Promise((resolve) => this._httpServer.listen(this.options.port, resolve));
 
     this.transport = new WebSocketServerTransport(this._wss);
     this.sync = new SyncEngine(this.core, this.transport);
+
+    // Push delivery: fires for EVERY thread message write this relay ever
+    // sees, whether authored locally (rare - the relay itself is never a
+    // Thread participant in practice) or arriving via sync (the normal
+    // case, since every browser client's messages are synced TO this
+    // relay - see @qu/sync's `publishAllTo`). Deliberately a plain
+    // `onStorageChange` listener here, NOT inside SyncEngine - this has
+    // nothing to do with replication, it's the relay noticing its own
+    // data changed, same as any other reactive consumer.
+    this.core.onStorageChange(({ path, quBit }) => {
+      const match = path.match(/^\/store\/([^/]+)\/threads\/([^/]+)\/msgs\/([^/]+)$/);
+      if (!match) return;
+      const [, spaceId, threadId] = match;
+      this.#deliverThreadPush(spaceId, threadId, quBit).catch((err) => {
+        console.error(`[QuRelay] push delivery failed for ${path}:`, err);
+      });
+    });
 
     const localApps = await discoverLocalPackages(this.options.appsDir);
     for (const app of localApps) {
@@ -154,6 +186,97 @@ export class QuRelay {
     console.log(`[QuRelay] listening on http://localhost:${this.port} (peer ${this.transport.getPeerId()})`);
     console.log(`[QuRelay] loaded apps: ${this.loader.listLoaded().join(', ') || '(none)'}`);
     return this;
+  }
+
+  /**
+   * Resolves this relay's VAPID keypair: explicit `options.vapidPublicKey`
+   * + `vapidPrivateKey` win if both are given; otherwise a keypair
+   * persisted under LOCAL_ONLY_PREFIX (see @qu/sync/sync-engine.js) is
+   * reused across restarts, or generated once on first boot - the exact
+   * same "pin explicitly, or auto-generate-and-persist" pattern this
+   * relay already uses for its own operational identity (see boot()'s
+   * `identityMnemonic` handling just above).
+   */
+  async #setupVapidKeys() {
+    if (this.options.vapidPublicKey && this.options.vapidPrivateKey) {
+      this.vapidKeys = { publicKey: this.options.vapidPublicKey, privateKey: this.options.vapidPrivateKey, subject: this.options.vapidSubject };
+      return;
+    }
+    const stored = await this.core.get('/store/secure/push/vapid');
+    const record = stored?.val ?? stored;
+    if (record) {
+      this.vapidKeys = { ...record, subject: this.options.vapidSubject };
+      return;
+    }
+    const generated = generateVapidKeys();
+    await this.core.put('/store/secure/push/vapid', generated);
+    this.vapidKeys = { ...generated, subject: this.options.vapidSubject };
+  }
+
+  /**
+   * Push delivery for one thread message: figures out who should be
+   * notified, checks each candidate's own NotificationPrefsService
+   * settings, and sends a generic (never-the-actual-content) Web Push to
+   * every one of their registered devices.
+   *
+   * appId is derived from `spaceId` by a small, deliberately ad hoc
+   * convention matching this repo's own built-in apps (forum/chat/
+   * inbox-<pub>) - there is no formal "which app owns this space" registry
+   * to consult instead; a third-party app using its own space naming
+   * would currently just fall back to the raw spaceId as its appId, which
+   * still works for per-app prefs, just without a nicer label.
+   *
+   * @param {string|number} spaceId
+   * @param {string} threadId
+   * @param {object} quBit - The message QuBit as just persisted.
+   */
+  async #deliverThreadPush(spaceId, threadId, quBit) {
+    if (!this.vapidKeys) return;
+    const config = await this.services.threads.getConfig(spaceId, threadId);
+    if (!config) return;
+
+    const authorPub = quBit.pub ? QuCrypto.toBase64Url(QuCrypto.fromBase64(quBit.pub)) : null;
+    const mentions = Array.isArray(quBit.val?.mentions) ? quBit.val.mentions : [];
+    const appId = spaceId === 'forum' ? 'forum' : spaceId === 'chat' ? 'chat' : String(spaceId).startsWith('inbox-') ? 'inbox' : String(spaceId);
+
+    /** @type {Array<{actorPub: string, mention: boolean}>} */
+    let candidates;
+    if (Array.isArray(config.readers)) {
+      // A private thread (chat/mail): every OTHER reader gets a generic "new message" notice.
+      candidates = config.readers.filter((pub) => pub !== authorPub).map((actorPub) => ({ actorPub, mention: mentions.includes(actorPub) }));
+    } else {
+      // A public thread (forum): notifying every reader would mean notifying the entire
+      // relay for every post - only explicit @mentions get pushed here.
+      candidates = mentions.filter((pub) => pub !== authorPub).map((actorPub) => ({ actorPub, mention: true }));
+    }
+
+    for (const { actorPub, mention } of candidates) {
+      const prefs = await this.services.notificationPrefs.getPrefsFor(actorPub);
+      const functionName = mention ? 'mention' : 'newMessage';
+      if (!NotificationPrefsService.shouldNotify(prefs, { appId, mention, functionName })) continue;
+
+      const subscriptions = await this.services.pushSubscriptions.listSubscriptionsFor(actorPub);
+      const payload = {
+        title: mention ? `Mentioned in ${appId}` : `New message in ${appId}`,
+        body: `~${(authorPub ?? 'someone').slice(0, 10)}… sent a message`,
+        appId,
+        url: `#/${appId}`,
+      };
+      for (const subscription of subscriptions) {
+        try {
+          const result = await sendWebPush(subscription, payload, this.vapidKeys);
+          if (result.expired) {
+            // Cannot clean this up ourselves - unsubscribing is a signed write only the
+            // subscription's OWNER can make (see PushSubscriptionService). Logged so an
+            // operator watching relay logs can see stale subscriptions accumulating; the
+            // owner's own client naturally re-subscribes/cleans up next time it runs.
+            console.warn(`[QuRelay] push subscription for ~${actorPub.slice(0, 10)}… has expired`);
+          }
+        } catch (err) {
+          console.error(`[QuRelay] push send failed for ~${actorPub.slice(0, 10)}…:`, err.message);
+        }
+      }
+    }
   }
 
   async #handleHttp(req, res) {
@@ -188,6 +311,15 @@ export class QuRelay {
       // that only an admin's client would ever render the button.
       if (req.url === '/config.json') {
         res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ adminPubs: this.options.adminPubs }));
+        return;
+      }
+
+      // The public half of this relay's VAPID keypair - what a browser's
+      // `PushManager.subscribe({applicationServerKey: ...})` needs (see
+      // apps/notifications). Public by definition (VAPID's whole point is
+      // identifying the sender, same as a TLS cert - never a secret).
+      if (req.url === '/push/vapid-public-key') {
+        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ publicKey: this.vapidKeys?.publicKey ?? null }));
         return;
       }
 

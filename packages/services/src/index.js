@@ -17,6 +17,8 @@ import { ContactsService } from './contacts-service.js';
 import { DirectoryService } from './directory-service.js';
 import { CmsService } from './cms-service.js';
 import { ProfileService } from './profile-service.js';
+import { NotificationPrefsService } from './notification-prefs-service.js';
+import { PushSubscriptionService } from './push-subscription-service.js';
 
 export {
   DocumentService,
@@ -31,6 +33,8 @@ export {
   DirectoryService,
   CmsService,
   ProfileService,
+  NotificationPrefsService,
+  PushSubscriptionService,
 };
 export * as paths from './paths.js';
 export { unwrap, unwrapAll } from './unwrap.js';
@@ -61,5 +65,7 @@ export function createServices(qu, { assetEngine, identityEngine, syncFetch }) {
     directory: new DirectoryService(documents, collections, identityEngine),
     cms: new CmsService(documents, collections),
     profile: new ProfileService(qu, identityEngine),
+    notificationPrefs: new NotificationPrefsService(qu, identityEngine),
+    pushSubscriptions: new PushSubscriptionService(documents, collections, identityEngine),
   };
 }

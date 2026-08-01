@@ -1,0 +1,11 @@
+{
+  "name": "notifications",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "Notifications",
+  "icon": "🔔",
+  "navOrder": 9,
+  "requires": []
+}

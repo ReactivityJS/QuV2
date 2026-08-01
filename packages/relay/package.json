@@ -19,6 +19,7 @@
     "@qu/sync": "^2.0.0",
     "@qu/engines": "^2.0.0",
     "@qu/services": "^2.0.0",
+    "@qu/push": "^2.0.0",
     "ws": "^8.18.0"
   },
   "license": "MIT"

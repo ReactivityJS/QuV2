@@ -52,7 +52,7 @@ async function findPackages(groupDir) {
 // meant to run in a browser - bundled with platform: 'node' so those
 // builtins stay external instead of esbuild trying (and failing) to
 // resolve them as regular packages.
-const NODE_ONLY_PACKAGES = new Set(['@qu/loader', '@qu/relay']);
+const NODE_ONLY_PACKAGES = new Set(['@qu/loader', '@qu/relay', '@qu/push']);
 
 async function buildPackage({ name, dir, pkg }) {
   const entry = join(dir, pkg.main ?? 'src/index.js');
@@ -113,5 +113,6 @@ await buildBrowserApp('forum client', 'apps/forum/client.js', 'apps/forum/dist/c
 await buildBrowserApp('chat client', 'apps/chat/client.js', 'apps/chat/dist/client.js');
 await buildBrowserApp('inbox client', 'apps/inbox/client.js', 'apps/inbox/dist/client.js');
 await buildBrowserApp('todo client', 'apps/todo/client.js', 'apps/todo/dist/client.js');
+await buildBrowserApp('notifications client', 'apps/notifications/client.js', 'apps/notifications/dist/client.js');
 
 console.log('Done.');

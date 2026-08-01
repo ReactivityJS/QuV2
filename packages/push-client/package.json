@@ -1,0 +1,11 @@
+{
+  "name": "@qu/push-client",
+  "version": "2.0.0",
+  "description": "The browser-side half of Web Push: subscribe/unsubscribe via the Push API against a relay's VAPID key, and forward a service worker's notification-click into an in-page navigation. Used by both the shell (registers the click listener) and any notification-settings app (subscribe/unsubscribe UI) - see @qu/push for the Node-only sending half this pairs with.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "license": "MIT"
+}

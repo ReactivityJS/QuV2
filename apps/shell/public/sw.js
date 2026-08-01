@@ -1,19 +1,19 @@
 /**
- * QUNIVERSE SERVICE WORKER — currently exists ONLY to make the shell
- * installable (Chromium requires a registered service worker with a
- * `fetch` handler as one of its installability criteria - see pwa.js). No
- * offline caching strategy on purpose: QUniverse's data is Qu itself
- * (IndexedDB-backed, synced over WebSocket, see @qu/runtime), not static
- * assets worth intercepting here - a caching layer for the SHELL BUNDLE
- * itself would be a reasonable future addition, but isn't needed for
- * installability and would add its own cache-invalidation complexity this
- * file deliberately avoids for now.
+ * QUNIVERSE SERVICE WORKER — makes the shell installable (Chromium
+ * requires a registered service worker with a `fetch` handler - see
+ * pwa.js) and handles incoming Web Push notifications. No offline caching
+ * strategy on purpose: QUniverse's data is Qu itself (IndexedDB-backed,
+ * synced over WebSocket, see @qu/runtime), not static assets worth
+ * intercepting here.
  *
- * This is also where push notification handling (`push`/`notificationclick`
- * listeners) will be added once that feature lands - see the "Push
- * notifications" entry in README's roadmap. Kept as a plain passthrough
- * until then rather than shipping half-built push handling with nothing
- * yet publishing to it.
+ * Push payloads are always the GENERIC template @qu/relay's push delivery
+ * builds (title/body/appId/url - see relay.js's `#deliverThreadPush()`) -
+ * NEVER decrypted message content, since the push service in between
+ * (FCM, Mozilla's push service, ...) is untrusted; this worker has no way
+ * to decrypt a Thread message even if it wanted to (that needs the
+ * identity's X25519 key, which never leaves the page's own IndexedDB - see
+ * @qu/identity). Clicking a notification just opens/focuses the shell at
+ * the `url` the payload named.
  */
 
 const SW_VERSION = 'v1';
@@ -28,4 +28,36 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   event.respondWith(fetch(event.request));
+});
+
+self.addEventListener('push', (event) => {
+  let payload = { title: 'QUniverse', body: 'You have a new notification.', url: '#/' };
+  try {
+    if (event.data) payload = { ...payload, ...event.data.json() };
+  } catch {
+    // Malformed/empty push payload - fall back to the generic message above rather than showing nothing.
+  }
+  event.waitUntil(
+    self.registration.showNotification(payload.title, {
+      body: payload.body,
+      data: { url: payload.url },
+      tag: payload.appId, // a second push for the same app REPLACES the previous notification instead of stacking silently
+    })
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const url = event.notification.data?.url ?? '#/';
+  event.waitUntil(
+    (async () => {
+      const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      const existing = clientsList.find((c) => 'focus' in c);
+      if (existing) {
+        existing.postMessage({ type: 'qu-notification-click', url });
+        return existing.focus();
+      }
+      return self.clients.openWindow(url);
+    })()
+  );
 });

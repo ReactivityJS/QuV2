@@ -285,6 +285,44 @@ try {
   }
 
   // ---------------------------------------------------------------------
+  section('Push: VAPID JWT signature verifies; payload encryption round-trips');
+  // ---------------------------------------------------------------------
+  {
+    const { generateVapidKeys, signVapidJwt, encryptPayload, decryptPayload, fromBase64Url } = await import('@qu/push');
+    const { createECDH, createPublicKey, verify: cryptoVerify, randomBytes } = await import('node:crypto');
+
+    // --- VAPID: the JWT's signature must actually verify against the public key ---
+    const vapid = generateVapidKeys();
+    const jwt = signVapidJwt({ audience: 'https://example-push-service.test', subject: 'mailto:ops@example.test' }, vapid.privateKey);
+    const [headerB64, payloadB64, sigB64] = jwt.split('.');
+    const rawPublic = fromBase64Url(vapid.publicKey); // 0x04 || x || y
+    const jwk = { kty: 'EC', crv: 'P-256', x: rawPublic.subarray(1, 33).toString('base64url'), y: rawPublic.subarray(33, 65).toString('base64url') };
+    const publicKeyObject = createPublicKey({ key: jwk, format: 'jwk' });
+    const verified = cryptoVerify(
+      'sha256',
+      Buffer.from(`${headerB64}.${payloadB64}`),
+      { key: publicKeyObject, dsaEncoding: 'ieee-p1363' },
+      fromBase64Url(sigB64)
+    );
+    assert.equal(verified, true, 'VAPID JWT signature must verify against its own public key');
+    const claims = JSON.parse(fromBase64Url(payloadB64).toString('utf8'));
+    assert.equal(claims.aud, 'https://example-push-service.test');
+
+    // --- Payload encryption: encrypt as the SENDER, decrypt as a simulated RECEIVER (a browser, in reality) ---
+    const receiverEcdh = createECDH('prime256v1');
+    receiverEcdh.generateKeys();
+    const authSecret = randomBytes(16);
+    const clientKeys = { p256dh: receiverEcdh.getPublicKey('base64url'), auth: authSecret.toString('base64url') };
+
+    const plaintext = JSON.stringify({ title: 'New message', body: 'Alice sent you a message in Chat' });
+    const encrypted = encryptPayload(new TextEncoder().encode(plaintext), clientKeys);
+    const decrypted = decryptPayload(encrypted, { uaPrivateD: receiverEcdh.getPrivateKey(), authSecret });
+    assert.equal(new TextDecoder().decode(decrypted), plaintext, 'decrypted push payload must match the original plaintext');
+
+    console.log('    OK - VAPID JWT verifies, and RFC 8291 payload encryption round-trips (see @qu/push for what this does NOT prove - no live push service in this environment)');
+  }
+
+  // ---------------------------------------------------------------------
   console.log('\nAll smoke tests passed.');
 } finally {
   for (const relay of relays) await relay.close();

@@ -35,6 +35,7 @@ import { resolveFavoriteApps } from './nav.js';
 import { loadClientModule } from './load-client-module.js';
 import { qLogoSvgMarkup } from './logo.js';
 import { registerServiceWorker } from './pwa.js';
+import { listenForNotificationClicks } from '@qu/push-client';
 import { createDisclosureMenu, menuItem } from './menu.js';
 import { buildAppContextMenu } from './context-menu.js';
 import { t } from './i18n.js';
@@ -44,6 +45,7 @@ const CONFIG = globalThis.QU_SHELL_CONFIG ?? {};
 
 async function boot() {
   registerServiceWorker();
+  listenForNotificationClicks((url) => { location.hash = url; });
 
   const runtime = new QuRuntime({ storeAdapter: new IndexedDBAdapter('quniverse-store') });
   const qu = runtime.core;

@@ -1,0 +1,11 @@
+{
+  "name": "@qu/push",
+  "version": "2.0.0",
+  "description": "Dependency-free Web Push (RFC 8291 payload encryption + RFC 8292 VAPID auth) using only node:crypto - the relay's side of browser push notifications. Ported conceptually from QUniverse V1's relay/webpush.mjs (see that file's history for why hand-rolling this beats a dependency: it's a small, stable, fully-specified RFC, and the relay already treats every OTHER signature/encryption primitive as core infrastructure, not something to outsource).",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "license": "MIT"
+}

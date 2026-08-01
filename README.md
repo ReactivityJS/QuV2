@@ -176,6 +176,8 @@ present (copy `relay.config.example.json`) -> environment variables:
 | `QU_SERVE_SHELL` | `serveShell` | `0` disables the shell at `/` |
 | `QU_REMOTE_APPS_JSON` | `remoteApps` | `'[{"manifestUrl":"https://...","trustedPublisherPubs":["..."]}]'` |
 | `QU_ADMIN_PUBS` | `adminPubs` | `"<pubkey1>,<pubkey2>"` - shows the Relay Admin nav entry for these identities (see below - a UI hint, not an ACL) |
+| `QU_VAPID_PUBLIC_KEY` / `QU_VAPID_PRIVATE_KEY` | `vapidPublicKey` / `vapidPrivateKey` | Pin the relay's Web Push keypair (see below) - give both or neither; without them, one is generated on first boot and persisted locally |
+| `QU_VAPID_SUBJECT` | `vapidSubject` | `"mailto:ops@example.com"` - required by push services (RFC 8292) so they have someone to contact about abuse |
 
 Env vars exist specifically so a container/orchestrator never needs to bake
 or bind-mount a config file just to set a port or data directory - see
@@ -279,6 +281,8 @@ answered and rejected the request. Narrow it down in this order:
 | `@qu/services` | The Entity API: Document/Collection/Asset/Actor/Starred/Thread/Favorites/Contacts/Directory/Cms |
 | `@qu/relay` | Node.js peer: persists to disk, syncs over WebSocket, serves the shell, boots/serves apps |
 | `@qu/i18n` | `createI18n(dictionaries)` - a locale-keyed string table + `t(key, params)`, used by the shell chrome and every built-in app below so multi-language support is a data change, not a retrofit |
+| `@qu/push` | Node-only: dependency-free Web Push (RFC 8291 payload encryption + RFC 8292 VAPID auth), the relay's side of sending a push |
+| `@qu/push-client` | Browser-only: subscribe/unsubscribe via the Push API, forward a service worker's notification-click into an in-page navigation |
 
 ## Shell chrome
 
@@ -321,6 +325,7 @@ mounted app for free - none of it is something an app has to opt into.
 | `chat` | A 1:1 room per Contact, backed by a private Thread (`THREAD_PRESETS.chat`) - the room id is derived from both members' pubkeys, so either side lands in the same room with no invite step |
 | `inbox` | A personal mailbox (`THREAD_PRESETS.mail`): anyone can write to it, only the owner can read it |
 | `todo` | A shared todo list per link (no invite step - the link is the permission), live-synced; "My Lists" auto-remembers any link you open |
+| `notifications` | Push notification settings: enable/disable push for this device, plus granular @mention/per-app preferences the relay enforces server-side |
 | `notes` | The original minimal example app - a per-identity private note list |
 
 `forum`/`chat`/`inbox` share one message-list-plus-composer view,
@@ -407,13 +412,49 @@ message an operator didn't review is a different, much larger trust
 boundary than "this deployment's operator chose to load this app" - worth
 naming explicitly so it isn't accidentally widened later.
 
+## Push notifications
+
+`apps/notifications` (device on/off) + `@qu/services`'
+NotificationPrefsService (granular: a global switch, @mention, and
+per-app) + `@qu/relay`'s push delivery (`#deliverThreadPush()` in
+relay.js, triggered by every Thread message write) + `@qu/push`
+(Node-only VAPID/RFC 8291 sending) + `@qu/push-client` (browser-only
+subscribe/unsubscribe) + `apps/shell/public/sw.js` (`push`/
+`notificationclick` handlers).
+
+Preferences are PUBLIC and signed, not private/encrypted like a
+Profile field - deliberately, since the RELAY has to be able to read them
+to decide whether to push at all, and it has no way to decrypt something
+only the owner's own key can read (see NotificationPrefsService's own doc
+comment).
+
+**Verified, and what that does/doesn't prove:** `scripts/smoke-test.mjs`
+round-trips a real VAPID JWT (signed, then signature-verified) and a real
+RFC 8291 payload (encrypted, then decrypted) - proving the crypto itself is
+spec-correct. Separately (not part of routine `npm test:smoke`, since it
+needs a throwaway local HTTP server), an end-to-end push was sent through
+the ENTIRE real pipeline - relay sees a synced chat message, resolves the
+recipient, checks their prefs, sends a real HTTP POST with `Content-Encoding:
+aes128gcm` and a `vapid t=...` auth header to a local mock push endpoint,
+which decrypted it back to the original payload - and confirmed a disabled
+per-app preference correctly suppresses delivery. What this has NOT been
+verified against: a genuine push service (FCM, Mozilla's push service, ...)
+with a real browser subscription - this environment has no outbound path to
+one. Do one real subscribe-and-push test from an actual deployment before
+relying on this in production.
+
+**Known limitation:** an expired/invalid push subscription can't be cleaned
+up by the relay itself - removing it is a signed write only the
+subscription's OWNER can make (see PushSubscriptionService). The relay logs
+a warning instead; the owner's own client naturally re-subscribes over time.
+
 ## What's deliberately not here yet
 
-The Foundation/Engine/Service/Loader stack, the QUniverse shell, and a
-working Thread primitive covering Forum/Chat/Mail/Notifications are all
-here and tested. What's NOT: the actual Forum/Chat/Mail/Notifications
-*apps* themselves (thin UI over `ThreadService` + the right preset - see
-`apps/notes` for the shape any of them would take), a richer permission
-model beyond Thread's writers/readers, and search. Each is a natural next
-app/Service, built the same way `apps/notes` and `ThreadService` were: as a
-thin consumer of what already exists, added when something actually needs it.
+The Foundation/Engine/Service/Loader stack, the QUniverse shell, Forum/
+Chat/Inbox/ToDo/Notifications, and a working Thread primitive are all here
+and tested. What's NOT: a richer permission model beyond Thread's writers/
+readers list, search, and a "Geo Chase" live-location game (present in
+QUniverse V1 - see `examples/hunt-lib.mjs` in the old `reactivityjs/Qu`
+repo - not yet ported). Each is a natural next app/Service, built the same
+way every app above was: as a thin consumer of what already exists, added
+when something actually needs it.
