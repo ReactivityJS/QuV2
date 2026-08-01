@@ -53,6 +53,8 @@ const SHELL_PUBLIC_DIR = fileURLToPath(new URL('../../../apps/shell/public/', im
  *   Without it, a fresh one is generated on first boot and then reused (see hasIdentity()).
  * @property {RemoteAppConfig[]} [remoteApps] - Additional apps to load from remote manifest URLs at boot.
  * @property {boolean} [serveShell=true] - Serve the QUniverse shell at `/` (see apps/shell).
+ * @property {string[]} [adminPubs=[]] - base64url actor pubkeys the shell UI treats as relay
+ *   admins (see `/config.json` above for the security caveat - this is a UI hint, not an ACL).
  */
 
 export class QuRelay {
@@ -65,6 +67,7 @@ export class QuRelay {
       port: 8080,
       remoteApps: [],
       serveShell: true,
+      adminPubs: [],
       ...options,
     };
 
@@ -172,6 +175,21 @@ export class QuRelay {
         return;
       }
 
+      // Public, non-secret config the shell UI needs before it knows
+      // anything else: which actor pubkeys are relay admins, so it can show
+      // (or hide) the "Relay Admin" nav entry for the connected identity.
+      // This is a UX convenience ONLY, never an authorization boundary - a
+      // pubkey being "in the list" is public information anyone could read
+      // here regardless; any actual privileged admin ACTION this relay
+      // exposes in the future must independently verify a signed request
+      // against this same list server-side, exactly like every other
+      // writer/reader ACL in this codebase (see ThreadEngine), not trust
+      // that only an admin's client would ever render the button.
+      if (req.url === '/config.json') {
+        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ adminPubs: this.options.adminPubs }));
+        return;
+      }
+
       if (await serveApps(req, res, this.options.appsDir)) return;
 
       if (this.options.serveShell) {
@@ -183,6 +201,19 @@ export class QuRelay {
         if (req.url === '/shell-bundle.js' || req.url === '/shell-bundle.js.map') {
           const body = await readFile(SHELL_DIST_DIR + req.url.replace('/shell-bundle', 'bundle'));
           res.writeHead(200, { 'content-type': 'text/javascript' }).end(body);
+          return;
+        }
+        // Same-origin-root PWA files (see apps/shell/src/pwa.js) - a service
+        // worker's default scope is the directory it's served FROM, so
+        // sw.js specifically must be served at "/", not under some subpath.
+        if (req.url === '/manifest.webmanifest') {
+          const body = await readFile(SHELL_PUBLIC_DIR + 'manifest.webmanifest');
+          res.writeHead(200, { 'content-type': 'application/manifest+json' }).end(body);
+          return;
+        }
+        if (req.url === '/sw.js') {
+          const body = await readFile(SHELL_PUBLIC_DIR + 'sw.js');
+          res.writeHead(200, { 'content-type': 'text/javascript', 'service-worker-allowed': '/' }).end(body);
           return;
         }
       }

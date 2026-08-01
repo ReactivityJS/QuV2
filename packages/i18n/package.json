@@ -1,0 +1,11 @@
+{
+  "name": "@qu/i18n",
+  "version": "2.0.0",
+  "description": "Minimal, dependency-free i18n: a locale-keyed dictionary plus t(key, params). Not a full ICU/pluralization engine - just enough structure that every app's user-facing strings live in one lookup table per locale from day one, instead of a retrofit later.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "license": "MIT"
+}

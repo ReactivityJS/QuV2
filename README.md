@@ -151,6 +151,7 @@ present (copy `relay.config.example.json`) -> environment variables:
 | `QU_IDENTITY_MNEMONIC` | `identityMnemonic` | `"word1 word2 ... word24"` |
 | `QU_SERVE_SHELL` | `serveShell` | `0` disables the shell at `/` |
 | `QU_REMOTE_APPS_JSON` | `remoteApps` | `'[{"manifestUrl":"https://...","trustedPublisherPubs":["..."]}]'` |
+| `QU_ADMIN_PUBS` | `adminPubs` | `"<pubkey1>,<pubkey2>"` - shows the Relay Admin nav entry for these identities (see below - a UI hint, not an ACL) |
 
 Env vars exist specifically so a container/orchestrator never needs to bake
 or bind-mount a config file just to set a port or data directory - see
@@ -253,6 +254,45 @@ answered and rejected the request. Narrow it down in this order:
 | `@qu/engines` | DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine |
 | `@qu/services` | The Entity API: Document/Collection/Asset/Actor/Starred/Thread/Favorites/Contacts/Directory/Cms |
 | `@qu/relay` | Node.js peer: persists to disk, syncs over WebSocket, serves the shell, boots/serves apps |
+| `@qu/i18n` | `createI18n(dictionaries)` - a locale-keyed string table + `t(key, params)`, used by the shell chrome and every built-in app below so multi-language support is a data change, not a retrofit |
+
+## Shell chrome
+
+Everything in this section lives in `apps/shell` and applies to every
+mounted app for free - none of it is something an app has to opt into.
+
+- **Header**: a Q logomark (`apps/shell/src/logo.js`, also the PWA icon),
+  back/forward buttons (plain `history.back()`/`forward()` - meaningful
+  because every route is a real hash-based history entry, see router.js),
+  the connected identity's short pubkey, and a **menu** (`☰`) listing
+  favorited apps (see FavoritesService), then the fixed **App List** entry,
+  then **Relay Admin** if the connected identity's pubkey is in
+  `QU_ADMIN_PUBS` (see above).
+- **Per-app context menu** (`⋯`, top-right of whichever app is mounted):
+  Share (Web Share API, falls back to clipboard), Install this page as a
+  shortcut / Install QUniverse as a PWA (`apps/shell/src/pwa.js` - swaps the
+  `<link rel=manifest>` to a per-page Blob manifest so a Chromium install
+  picks up the CURRENT route as its `start_url`), a link back home, and a
+  Favorite toggle for the current app - the same mechanism the App List app
+  and the header menu both read/write, kept in sync across all three via a
+  `qu:favorites-changed` window event (see main.js's doc comment on it) so a
+  favorite change made in one place shows up everywhere without a page reload.
+- **PWA**: `apps/shell/public/manifest.webmanifest` + `public/sw.js` (served
+  at `/manifest.webmanifest` and `/sw.js` by `@qu/relay`) make the shell
+  installable; the service worker is currently a bare passthrough (see its
+  own doc comment for why, and what it's reserved for next).
+- **i18n**: `apps/shell/src/i18n.js` - German + English today, more locales
+  are a dictionary addition, not a code change (see `@qu/i18n` above).
+
+### Built-in apps
+
+| App | What it does |
+|---|---|
+| `app-list` | Every mountable app on this relay; favoriting one pins it into the header menu |
+| `user-list` | Everyone visible in the public directory (opt-in from the shell's home screen); favoriting one adds them as a Contact |
+| `contact-list` | This identity's Contacts (added from User List), each with their live-resolved public profile |
+| `relay-admin` | Read-only relay status (peer id, loaded apps, configured admins) - see its own doc comment for why this is safe to keep read-only-and-client-gated for now, and what a real privileged admin action would additionally require |
+| `notes` | The original minimal example app - a per-identity private note list |
 
 ## Writing an app
 

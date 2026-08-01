@@ -15,6 +15,15 @@
  * can load anything a Loader-style manifest points at, local or remote,
  * because @qu/foundation's Registry + integrity/signature checking make
  * that safe to do without adding a new trust boundary silently.
+ *
+ * URL SCHEME: every route is `#/<appId>/<...path>` (see router.js) - the
+ * first segment always selects which app's manifest to mount (its "space"
+ * in the loose sense: the self-contained area of the page that app owns),
+ * everything after is that app's own business (e.g. a thread id, a room).
+ * Every app built for this shell is expected to follow this scheme for its
+ * OWN internal navigation too (build hashes with `buildHash()`, never a
+ * hand-rolled `#...` string) - that's what makes the header's back/forward
+ * buttons below meaningful: hash changes are real browser history entries.
  */
 import { QuRuntime, IndexedDBAdapter } from '@qu/runtime';
 import { DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine } from '@qu/engines';
@@ -22,13 +31,20 @@ import { QuIdentityEngine } from '@qu/identity';
 import { SyncEngine, WebSocketClientTransport } from '@qu/sync';
 import { createServices, paths } from '@qu/services';
 import { parseHash, buildHash } from './router.js';
-import { visibleApps, sortByNavOrder, resolveFavoriteApps } from './nav.js';
+import { resolveFavoriteApps } from './nav.js';
 import { loadClientModule } from './load-client-module.js';
+import { qLogoSvgMarkup } from './logo.js';
+import { registerServiceWorker } from './pwa.js';
+import { createDisclosureMenu, menuItem } from './menu.js';
+import { buildAppContextMenu } from './context-menu.js';
+import { t } from './i18n.js';
 
-/** @type {{trustedPublisherPubs?: string[]}} */
+/** @type {{trustedPublisherPubs?: string[], locale?: string}} */
 const CONFIG = globalThis.QU_SHELL_CONFIG ?? {};
 
 async function boot() {
+  registerServiceWorker();
+
   const runtime = new QuRuntime({ storeAdapter: new IndexedDBAdapter('quniverse-store') });
   const qu = runtime.core;
   qu.mount('blob', new IndexedDBAdapter('quniverse-blob'));
@@ -59,7 +75,13 @@ class Shell {
     this.Qu = Qu;
     this.actorPub = actorPub;
     this.apps = [];
+    this.adminPubs = [];
     this.stopMountedApp = null;
+    this.appMenu = null;
+  }
+
+  get isAdmin() {
+    return this.adminPubs.includes(this.actorPub);
   }
 
   async mount(root) {
@@ -68,24 +90,62 @@ class Shell {
 
     const header = document.createElement('header');
     header.className = 'qu-shell-header';
+
+    const backBtn = document.createElement('button');
+    backBtn.type = 'button';
+    backBtn.className = 'qu-shell-history-btn';
+    backBtn.textContent = '◀';
+    backBtn.title = t('nav.back');
+    backBtn.setAttribute('aria-label', t('nav.back'));
+    backBtn.addEventListener('click', () => history.back());
+
+    const forwardBtn = document.createElement('button');
+    forwardBtn.type = 'button';
+    forwardBtn.className = 'qu-shell-history-btn';
+    forwardBtn.textContent = '▶';
+    forwardBtn.title = t('nav.forward');
+    forwardBtn.setAttribute('aria-label', t('nav.forward'));
+    forwardBtn.addEventListener('click', () => history.forward());
+
     const brand = document.createElement('a');
     brand.href = buildHash('');
     brand.className = 'qu-shell-brand';
-    brand.textContent = 'QUniverse';
-    this.navEl = document.createElement('nav');
-    this.navEl.className = 'qu-shell-nav';
+    brand.title = 'QUniverse';
+    brand.innerHTML = qLogoSvgMarkup({ size: 28 });
+
+    const spacer = document.createElement('span');
+    spacer.className = 'qu-shell-spacer';
+
+    this.headerMenu = createDisclosureMenu({ label: t('nav.menu'), buttonContent: '☰' });
+
     const idLink = document.createElement('span');
     idLink.className = 'qu-shell-id';
     idLink.textContent = `~${this.actorPub.slice(0, 10)}…`;
-    header.append(brand, this.navEl, idLink);
+
+    header.append(backBtn, forwardBtn, brand, spacer, this.headerMenu.el, idLink);
+
+    this.toolbarEl = document.createElement('div');
+    this.toolbarEl.className = 'qu-shell-toolbar';
 
     this.screenEl = document.createElement('main');
     this.screenEl.className = 'qu-shell-screen';
 
-    root.append(header, this.screenEl);
+    root.append(header, this.toolbarEl, this.screenEl);
 
     window.addEventListener('hashchange', () => this._renderRoute());
+    // The one cross-app notification convention this shell defines: ANY
+    // favorite mutation, from ANYWHERE (the header menu below, the per-app
+    // context menu, or a fully independent app like App-List/apps/app-list -
+    // each mounted as its own bundle with no reference back to this Shell
+    // instance) dispatches this instead of calling a render method directly,
+    // so every place favorites are shown stays in sync no matter which of
+    // them made the change.
+    window.addEventListener('qu:favorites-changed', () => {
+      this._renderHeaderMenu();
+      this._renderAppToolbar(this._currentAppId());
+    });
 
+    await this._loadAdminConfig();
     await this._refreshApps();
     await this._renderRoute();
   }
@@ -111,6 +171,17 @@ class Shell {
     this.sync.subscribe('/store/directory');
   }
 
+  /** Fetches the relay's admin pubkey list (see @qu/relay's `/config.json`) - a UI hint only, see that route's own doc comment for why it's not a security boundary. */
+  async _loadAdminConfig() {
+    try {
+      const res = await fetch('/config.json');
+      this.adminPubs = res.ok ? (await res.json()).adminPubs ?? [] : [];
+    } catch (e) {
+      console.warn('[shell] failed to load /config.json:', e);
+      this.adminPubs = [];
+    }
+  }
+
   async _refreshApps() {
     try {
       const res = await fetch('/apps.json');
@@ -119,49 +190,76 @@ class Shell {
       console.error('[shell] failed to load /apps.json:', e);
       this.apps = [];
     }
-    await this._renderNav();
+    await this._renderHeaderMenu();
   }
 
-  async _renderNav() {
-    this.navEl.textContent = '';
-    const visible = sortByNavOrder(visibleApps(this.apps));
+  /**
+   * The header's dropdown menu: pinned (favorited) apps first - see
+   * FavoritesService, toggled from either the App-List app or the per-app
+   * context menu (context-menu.js) - then the two fixed entries every
+   * QUniverse install has: App List (browse/favorite everything) and,
+   * only for an admin pubkey (see `isAdmin` above), Relay Admin.
+   */
+  async _renderHeaderMenu() {
+    const panel = this.headerMenu.panel;
+    panel.textContent = '';
 
     const favoriteIds = await this.Qu.favorites.list();
     const favorites = resolveFavoriteApps(this.apps, favoriteIds);
-    for (const app of favorites) {
-      this.navEl.appendChild(this._navLink(app, true));
+
+    if (favorites.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'qu-menu-empty';
+      empty.textContent = t('nav.favorites.empty');
+      panel.appendChild(empty);
+    } else {
+      for (const app of favorites) panel.appendChild(this._favoriteMenuRow(app));
     }
-    if (favorites.length && visible.length) {
-      const sep = document.createElement('span');
-      sep.className = 'qu-shell-nav-sep';
-      sep.textContent = '|';
-      this.navEl.appendChild(sep);
-    }
-    for (const app of visible) {
-      this.navEl.appendChild(this._navLink(app, favoriteIds.includes(app.name)));
-    }
+
+    const sep = document.createElement('hr');
+    sep.className = 'qu-menu-sep';
+    panel.appendChild(sep);
+
+    panel.appendChild(this._menuLink(buildHash('app-list'), `🗂 ${t('nav.appList')}`));
+    if (this.isAdmin) panel.appendChild(this._menuLink(buildHash('relay-admin'), `🛠 ${t('nav.admin')}`));
   }
 
-  _navLink(app, isFavorite) {
+  _favoriteMenuRow(app) {
+    const row = document.createElement('div');
+    row.className = 'qu-menu-fav-row';
+    row.append(
+      this._menuLink(buildHash(app.name), `${app.icon ?? ''} ${app.label ?? app.name}`.trim()),
+      this._favoriteToggle(app.name, true)
+    );
+    return row;
+  }
+
+  _menuLink(href, label) {
     const a = document.createElement('a');
-    a.href = buildHash(app.name);
-    a.className = 'qu-shell-nav-link';
-    a.textContent = `${app.icon ?? ''} ${app.label ?? app.name}`.trim();
-    const star = document.createElement('button');
-    star.type = 'button';
-    star.className = 'qu-shell-fav-toggle';
-    star.textContent = isFavorite ? '★' : '☆';
-    star.title = isFavorite ? 'Remove from favorites' : 'Add to favorites';
-    star.addEventListener('click', async (e) => {
+    a.href = href;
+    a.className = 'qu-menu-link';
+    a.textContent = label;
+    a.addEventListener('click', () => this.headerMenu.close());
+    return a;
+  }
+
+  _favoriteToggle(appId, isFavorite) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'qu-menu-fav-toggle';
+    btn.textContent = isFavorite ? '★' : '☆';
+    btn.title = isFavorite ? t('appMenu.favorite.remove') : t('appMenu.favorite.add');
+    btn.addEventListener('click', async (e) => {
       e.preventDefault();
-      if (isFavorite) await this.Qu.favorites.remove(app.name);
-      else await this.Qu.favorites.add(app.name);
-      await this._renderNav();
+      if (isFavorite) await this.Qu.favorites.remove(appId);
+      else await this.Qu.favorites.add(appId);
+      window.dispatchEvent(new CustomEvent('qu:favorites-changed'));
     });
-    const wrap = document.createElement('span');
-    wrap.className = 'qu-shell-nav-item';
-    wrap.append(a, star);
-    return wrap;
+    return btn;
+  }
+
+  _currentAppId() {
+    return parseHash(location.hash).appId;
   }
 
   async _renderRoute() {
@@ -170,15 +268,21 @@ class Shell {
     this.screenEl.textContent = '';
 
     const { appId, segments } = parseHash(location.hash);
-    if (!appId) return this._renderHome();
+    if (!appId) {
+      this._renderAppToolbar(null);
+      return this._renderHome();
+    }
 
     const app = this.apps.find((a) => a.name === appId);
     if (!app?.clientMainUrl) {
+      this._renderAppToolbar(null);
       const msg = document.createElement('p');
       msg.textContent = `Unknown or non-mountable app: "${appId}"`;
       this.screenEl.appendChild(msg);
       return;
     }
+
+    await this._renderAppToolbar(appId);
 
     const loading = document.createElement('p');
     loading.textContent = `Loading ${app.label ?? app.name}…`;
@@ -210,9 +314,35 @@ class Shell {
     this.stopMountedApp = typeof stop === 'function' ? stop : null;
   }
 
+  /**
+   * The per-app "⋯" context menu (Share/Install/Back/Favorite - see
+   * context-menu.js), rendered in the toolbar row above whichever app is
+   * currently mounted. Rebuilt on every route change (its favorite-state
+   * label depends on which app is now current) - `destroy()` first, since
+   * it registers its own outside-click listener (see menu.js).
+   * @param {string|null} appId - null on the home screen, which has no context menu.
+   */
+  async _renderAppToolbar(appId) {
+    this.appMenu?.destroy();
+    this.appMenu = null;
+    this.toolbarEl.textContent = '';
+    if (!appId) return;
+
+    const isFavorite = await this.Qu.favorites.isFavorite(appId);
+    this.appMenu = buildAppContextMenu({
+      isFavorite,
+      onToggleFavorite: async () => {
+        if (isFavorite) await this.Qu.favorites.remove(appId);
+        else await this.Qu.favorites.add(appId);
+        window.dispatchEvent(new CustomEvent('qu:favorites-changed')); // triggers the listener in mount(), which rebuilds this same toolbar with the new label
+      },
+    });
+    this.toolbarEl.appendChild(this.appMenu.el);
+  }
+
   async _renderHome() {
     const welcome = document.createElement('p');
-    welcome.textContent = `Welcome, ~${this.actorPub.slice(0, 16)}…`;
+    welcome.textContent = t('home.welcome', { actor: this.actorPub.slice(0, 16) });
     this.screenEl.appendChild(welcome);
 
     const label = document.createElement('label');
@@ -223,7 +353,7 @@ class Shell {
     checkbox.addEventListener('change', async () => {
       await this.Qu.directory.setVisible(checkbox.checked, { actorPub: this.actorPub });
     });
-    label.append(checkbox, document.createTextNode(' Listed in directory'));
+    label.append(checkbox, document.createTextNode(' ' + t('home.listedInDirectory')));
     this.screenEl.appendChild(label);
   }
 }

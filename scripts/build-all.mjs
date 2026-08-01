@@ -99,9 +99,14 @@ for (const p of packages) await buildPackage(p);
 console.log('Building browser apps...');
 await buildBrowserApp('demo app', 'apps/demo/src/main.js', 'apps/demo/dist/bundle.js');
 await buildBrowserApp('shell', 'apps/shell/src/main.js', 'apps/shell/dist/bundle.js');
-// notes/client.js is served by @qu/relay under /apps/notes/dist/client.js
-// (see manifest.quapp's clientMain) - it needs bundling too, same reason
-// as the shell: bare imports like '@qu/ui' don't resolve in a raw browser.
+// Every app below is served by @qu/relay under /apps/<name>/dist/client.js
+// (see each manifest.quapp's clientMain) - each needs bundling for the same
+// reason as the shell: bare imports like '@qu/ui'/'@qu/i18n' don't resolve
+// in a raw browser.
 await buildBrowserApp('notes client', 'apps/notes/client.js', 'apps/notes/dist/client.js');
+await buildBrowserApp('app-list client', 'apps/app-list/client.js', 'apps/app-list/dist/client.js');
+await buildBrowserApp('user-list client', 'apps/user-list/client.js', 'apps/user-list/dist/client.js');
+await buildBrowserApp('contact-list client', 'apps/contact-list/client.js', 'apps/contact-list/dist/client.js');
+await buildBrowserApp('relay-admin client', 'apps/relay-admin/client.js', 'apps/relay-admin/dist/client.js');
 
 console.log('Done.');

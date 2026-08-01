@@ -1,0 +1,18 @@
+{
+  "name": "QUniverse",
+  "short_name": "QUniverse",
+  "description": "A Qu-based ecosystem of apps that share one identity, one connection, one nav.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b0b12",
+  "theme_color": "#5b5bd6",
+  "icons": [
+    {
+      "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgcm9sZT0iaW1nIiBhcmlhLWxhYmVsPSJRVW5pdmVyc2UiPgogICAgPGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMzIiIGZpbGw9IiM1YjViZDYiLz4KICAgIDxjaXJjbGUgY3g9IjMyIiBjeT0iMzAiIHI9IjE2IiBmaWxsPSJub25lIiBzdHJva2U9IiNmZmZmZmYiIHN0cm9rZS13aWR0aD0iNiIvPgogICAgPGxpbmUgeDE9IjQxIiB5MT0iMzkiIHgyPSI1MCIgeTI9IjQ4IiBzdHJva2U9IiNmZmZmZmYiIHN0cm9rZS13aWR0aD0iNiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+CiAgPC9zdmc+",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

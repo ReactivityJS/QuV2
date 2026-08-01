@@ -1,0 +1,11 @@
+{
+  "name": "app-list",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "App List",
+  "icon": "🗂",
+  "navOrder": 5,
+  "requires": []
+}

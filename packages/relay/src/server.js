@@ -32,6 +32,9 @@ const ENV_MAPPING = {
   QU_APPS_DIR: { key: 'appsDir' },
   QU_IDENTITY_MNEMONIC: { key: 'identityMnemonic' },
   QU_SERVE_SHELL: { key: 'serveShell', parse: parseBooleanEnv },
+  // Comma-separated base64url actor pubkeys - see relay.js's `/config.json`
+  // route for what this does (and does not) authorize.
+  QU_ADMIN_PUBS: { key: 'adminPubs', parse: (raw) => raw.split(',').map((s) => s.trim()).filter(Boolean) },
   // JSON array, same shape as relay.config.json's "remoteApps" field - the
   // one option that doesn't reduce to a single scalar, so it's still JSON
   // rather than getting its own ad-hoc mini-syntax.

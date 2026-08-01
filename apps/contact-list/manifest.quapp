@@ -1,0 +1,11 @@
+{
+  "name": "contact-list",
+  "version": "1.0.0",
+  "kind": "app",
+  "main": "./index.js",
+  "clientMain": "./dist/client.js",
+  "label": "Contacts",
+  "icon": "📇",
+  "navOrder": 7,
+  "requires": []
+}
