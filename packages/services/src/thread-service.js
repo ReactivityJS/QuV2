@@ -86,7 +86,21 @@ export class ThreadService {
    * @returns {Promise<object>} The thread's config (existing or newly created).
    */
   async createThread(spaceId, threadId, config = {}) {
-    const existing = await this.getConfig(spaceId, threadId);
+    let existing = await this.getConfig(spaceId, threadId);
+    // A deterministically-derived thread (Chat's roomId(), or any app that
+    // calls createThread() unconditionally on every mount - see
+    // @qu/thread-ui's mountThreadView()) is very often ALREADY created by
+    // the other side by the time this identity opens it for the first
+    // time. A local-only miss here must not be read as "doesn't exist" -
+    // backfilling via syncFetch first, and only creating if it's really
+    // missing everywhere, is what stops this call from blowing away an
+    // existing thread's messages collection with a fresh empty one
+    // (collections.create() is an unconditional overwrite, not a
+    // create-if-absent - see CollectionService.create()).
+    if (!existing && this.syncFetch) {
+      await this.syncFetch(threadMetaPath(spaceId, threadId)).catch(() => {});
+      existing = await this.getConfig(spaceId, threadId);
+    }
     if (existing) return existing;
 
     const normalized = { writers: '*', readers: '*', replyMode: 'flat', formatting: [], ...config };
@@ -226,18 +240,37 @@ export class ThreadService {
   /**
    * Lists every message in a thread, newest-last, decrypting each if the
    * thread is private and this identity is one of its readers.
+   *
+   * Backfills via `syncFetch` (if provided) on a local miss, both for the
+   * messages-collection document itself AND for any individual message it
+   * references that hasn't synced yet - the same "subscribe() only covers
+   * writes from here on, fetch() covers history" gap as
+   * DirectoryService.listVisible(): a room opened for the first time after
+   * messages were already exchanged (e.g. the other side messages first,
+   * or this identity never subscribed to the thread's space before now)
+   * would otherwise show up silently empty.
    * @param {string|number} spaceId
    * @param {string} threadId
    * @returns {Promise<Array<object>>}
    */
   async listMessages(spaceId, threadId) {
-    const { adapter, rel } = this.qu.resolveMount(collectionPath(spaceId, threadMessagesCollectionId(threadId)));
-    const raw = await adapter.get(rel);
+    const collPath = collectionPath(spaceId, threadMessagesCollectionId(threadId));
+    const { adapter, rel } = this.qu.resolveMount(collPath);
+    let raw = await adapter.get(rel);
+    if (!raw && this.syncFetch) {
+      await this.syncFetch(collPath).catch(() => {});
+      raw = await adapter.get(rel);
+    }
     const paths = raw?.val?.$list ?? [];
 
+    let quBits = await Promise.all(paths.map((path) => this.qu.get(path)));
+    if (this.syncFetch && quBits.some((b) => !b)) {
+      await Promise.all(paths.map((path, i) => (quBits[i] ? null : this.syncFetch(path).catch(() => {}))));
+      quBits = await Promise.all(paths.map((path) => this.qu.get(path)));
+    }
+
     const messages = [];
-    for (const path of paths) {
-      const quBit = await this.qu.get(path);
+    for (const quBit of quBits) {
       if (!quBit) continue;
       const val = await this.#decryptMessage(quBit);
       if (val) messages.push({ id: val._id, ts: quBit.ts, ...val });

@@ -12,10 +12,16 @@ export class AssetService {
   /**
    * @param {import('@qu/core').QuCore} qu
    * @param {import('@qu/engines').AssetEngine} assetEngine
+   * @param {(path: string) => Promise<object|null>} [syncFetch] - Optional:
+   *   forwarded to `assetEngine.getAsset()` to backfill a meta document or
+   *   chunk this session hasn't synced yet - see @qu/engines' AssetEngine
+   *   doc comment on `getAsset()` for why this is needed even when the
+   *   `/blob/<space>` prefix is already subscribed.
    */
-  constructor(qu, assetEngine) {
+  constructor(qu, assetEngine, syncFetch = null) {
     this.qu = qu;
     this.assetEngine = assetEngine;
+    this.syncFetch = syncFetch;
   }
 
   /**
@@ -36,6 +42,6 @@ export class AssetService {
    * @returns {Promise<{meta: object, data: Uint8Array}|null>}
    */
   async download(spaceId, assetId) {
-    return this.assetEngine.getAsset(assetPath(spaceId, assetId));
+    return this.assetEngine.getAsset(assetPath(spaceId, assetId), this.syncFetch);
   }
 }

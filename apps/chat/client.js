@@ -64,7 +64,7 @@ const STYLE = `
   .qu-chat-message { padding: 0.5rem 0.7rem; border: 1px solid #8884; border-radius: 0.5rem; }
   .qu-chat-author { display: block; font-family: ui-monospace, monospace; font-size: 0.75em; opacity: 0.6; margin-bottom: 0.2rem; }
   .qu-chat-reply-quote, .qu-chat-forward-note { font-size: 0.8em; opacity: 0.65; border-left: 2px solid #8884; padding-left: 0.4rem; margin-bottom: 0.3rem; }
-  .qu-chat-attachment img { max-width: 100%; max-height: 16rem; border-radius: 0.4rem; margin-top: 0.3rem; display: block; }
+  .qu-chat-attachment img, .qu-chat-attachment video { max-width: 100%; max-height: 16rem; border-radius: 0.4rem; margin-top: 0.3rem; display: block; }
   .qu-chat-attachment a { display: inline-block; margin-top: 0.3rem; }
   .qu-chat-message-actions { display: flex; gap: 0.4rem; margin-top: 0.4rem; align-items: center; flex-wrap: wrap; }
   .qu-chat-message-actions button { background: none; border: none; cursor: pointer; opacity: 0.6; font-size: 0.9em; }
@@ -349,6 +349,14 @@ export function mount(container, { qu, services, segments, subscribe }) {
             img.src = URL.createObjectURL(new Blob([asset.data], { type: asset.meta.mime }));
           });
           attEl.appendChild(img);
+        } else if (message.attachment.mime?.startsWith('video/')) {
+          const video = document.createElement('video');
+          video.controls = true;
+          services.assets.download(spaceId, message.attachment.assetId).then((asset) => {
+            if (stopped || !asset) return;
+            video.src = URL.createObjectURL(new Blob([asset.data], { type: asset.meta.mime }));
+          });
+          attEl.appendChild(video);
         } else {
           const link = document.createElement('a');
           link.textContent = `📎 ${message.attachment.name} (${fmtSize(message.attachment.size)})`;

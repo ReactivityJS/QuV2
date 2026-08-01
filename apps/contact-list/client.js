@@ -8,8 +8,8 @@
 import { createI18n } from '@qu/i18n';
 
 const DICT = {
-  en: { title: 'Contacts', empty: 'No contacts yet — add some from the User List.', remove: 'Remove' },
-  de: { title: 'Kontakte', empty: 'Noch keine Kontakte — in der Nutzerliste hinzufügen.', remove: 'Entfernen' },
+  en: { title: 'Contacts', empty: 'No contacts yet — add some from the User List.', remove: 'Remove', message: '💬' },
+  de: { title: 'Kontakte', empty: 'Noch keine Kontakte — in der Nutzerliste hinzufügen.', remove: 'Entfernen', message: '💬' },
 };
 const { t } = createI18n(DICT);
 
@@ -20,6 +20,7 @@ const STYLE = `
   .qu-contact-list .qu-contact-name { flex: 1; font-family: ui-monospace, monospace; text-decoration: none; color: inherit; }
   .qu-contact-list .qu-contact-name:hover { text-decoration: underline; }
   .qu-contact-list button { background: none; border: 1px solid #8884; border-radius: 0.3rem; cursor: pointer; padding: 0.2rem 0.5rem; }
+  .qu-contact-list .qu-contact-message { text-decoration: none; font-size: 1.1em; }
 `;
 
 function ensureStyle() {
@@ -74,6 +75,12 @@ function row({ actorPub, profile }, services, refresh) {
   name.href = `#/~${actorPub}`;
   name.textContent = profile?.alias ?? `~${actorPub.slice(0, 16)}…`;
 
+  const messageLink = document.createElement('a');
+  messageLink.className = 'qu-contact-message';
+  messageLink.href = `#/chat/${actorPub}`;
+  messageLink.title = t('message');
+  messageLink.textContent = t('message');
+
   const removeBtn = document.createElement('button');
   removeBtn.type = 'button';
   removeBtn.textContent = t('remove');
@@ -82,6 +89,6 @@ function row({ actorPub, profile }, services, refresh) {
     await refresh();
   });
 
-  li.append(name, removeBtn);
+  li.append(name, messageLink, removeBtn);
   return li;
 }

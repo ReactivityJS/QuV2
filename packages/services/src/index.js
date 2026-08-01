@@ -60,7 +60,7 @@ export function createServices(qu, { assetEngine, identityEngine, syncFetch }) {
   return {
     documents,
     collections,
-    assets: new AssetService(qu, assetEngine),
+    assets: new AssetService(qu, assetEngine, syncFetch),
     actors: new ActorService(identityEngine),
     starred,
     threads: new ThreadService(qu, identityEngine, collections, syncFetch),

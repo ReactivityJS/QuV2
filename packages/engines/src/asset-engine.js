@@ -90,18 +90,40 @@ export class AssetEngine {
 
   /**
    * Reassembles a stored asset from its chunks.
+   *
+   * Backfills via `syncFetch` (if given) on a local miss, both for the meta
+   * document AND for any individual chunk still missing - the same
+   * "subscribe() only covers writes from here on" gap every other
+   * Service's syncFetch backfill closes (see DirectoryService.listVisible()
+   * for the canonical shape). An asset uploaded by someone else, opened for
+   * the first time in a session that only just subscribed to this space,
+   * would otherwise resolve to null forever even though `/blob/<space>` IS
+   * subscribed - subscribing only delivers writes from the moment of the
+   * call onward, not history.
    * @param {string} storePath - The original path passed to `put()`, e.g. `/store/gallery/assets/photo1`.
+   * @param {(path: string) => Promise<object|null>} [syncFetch]
    * @returns {Promise<{meta: object, data: Uint8Array}|null>}
    */
-  async getAsset(storePath) {
-    const metaQuBit = await this.qu.get(`${storePath}/meta`);
-    const meta = metaQuBit?.val;
+  async getAsset(storePath, syncFetch = null) {
+    let metaQuBit = await this.qu.get(`${storePath}/meta`);
+    let meta = metaQuBit?.val;
+    if (!meta && syncFetch) {
+      await syncFetch(`${storePath}/meta`).catch(() => {});
+      metaQuBit = await this.qu.get(`${storePath}/meta`);
+      meta = metaQuBit?.val;
+    }
     if (!meta) return null;
 
-    const chunks = await Promise.all(
+    let chunks = await Promise.all(
       Array.from({ length: meta.chunkCount }, (_, i) => this.qu.get(`${meta.blobPath}/chunk_${i}`))
     );
-    if (chunks.some((c) => !c)) return null; // a chunk is missing - incomplete/corrupt upload
+    if (syncFetch && chunks.some((c) => !c)) {
+      await Promise.all(chunks.map((c, i) => (c ? null : syncFetch(`${meta.blobPath}/chunk_${i}`).catch(() => {}))));
+      chunks = await Promise.all(
+        Array.from({ length: meta.chunkCount }, (_, i) => this.qu.get(`${meta.blobPath}/chunk_${i}`))
+      );
+    }
+    if (chunks.some((c) => !c)) return null; // a chunk is missing - incomplete/corrupt upload, or unreachable peer
 
     const chunkBytes = chunks.map((c) => QuCrypto.fromBase64(c.val));
     const totalLength = chunkBytes.reduce((sum, b) => sum + b.length, 0);

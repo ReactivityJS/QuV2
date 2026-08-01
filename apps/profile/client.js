@@ -54,6 +54,7 @@ const DICT = {
     notificationSettings: 'Notification settings →',
     addContact: 'Add contact',
     removeContact: 'Remove contact',
+    message: '💬 Message',
   },
   de: {
     titleOwn: 'Mein Profil',
@@ -78,6 +79,7 @@ const DICT = {
     notificationSettings: 'Benachrichtigungseinstellungen →',
     addContact: 'Kontakt hinzufügen',
     removeContact: 'Kontakt entfernen',
+    message: '💬 Nachricht',
   },
 };
 const { t } = createI18n(DICT);
@@ -101,6 +103,7 @@ const STYLE = `
   .qu-profile-settings { display: flex; flex-direction: column; gap: 0.6rem; max-width: 32rem; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #8884; }
   .qu-profile-settings label { display: flex; align-items: center; gap: 0.4rem; }
   .qu-profile-settings a { color: inherit; }
+  .qu-profile-actions { display: flex; gap: 0.8rem; align-items: center; margin-top: 0.5rem; }
   .qu-profile-empty { opacity: 0.7; }
 `;
 
@@ -299,6 +302,17 @@ async function renderPublicProfile(container, services, targetPub, isStopped) {
     }
   }
 
+  const actions = document.createElement('div');
+  actions.className = 'qu-profile-actions';
+
+  // Chat rooms are derived from both pubs and self-created on first visit
+  // (see apps/chat/client.js's renderRoom()) - no contact relationship is
+  // required, so this link works for any identity, contact or not.
+  const messageLink = document.createElement('a');
+  messageLink.href = `#/chat/${targetPub}`;
+  messageLink.textContent = t('message');
+  actions.appendChild(messageLink);
+
   const contactBtn = document.createElement('button');
   contactBtn.type = 'button';
   let nowContact = isContact;
@@ -310,7 +324,8 @@ async function renderPublicProfile(container, services, targetPub, isStopped) {
     nowContact = !nowContact;
     renderContactBtn();
   });
-  container.appendChild(contactBtn);
+  actions.appendChild(contactBtn);
+  container.appendChild(actions);
 }
 
 function keysSection(pub, epub) {
