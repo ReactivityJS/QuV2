@@ -53,11 +53,22 @@ async function findPackages(groupDir) {
 // builtins stay external instead of esbuild trying (and failing) to
 // resolve them as regular packages.
 const NODE_ONLY_PACKAGES = new Set(['@qu/loader', '@qu/relay', '@qu/push']);
+// Packages whose dependencies are plain CommonJS with no "neutral"-platform-
+// compatible exports field (e.g. `qrcode`/`jsqr` - see @qu/qr's own
+// package.json) - esbuild's default 'neutral' platform refuses to guess at
+// a bare `main` field for a dependency ("main fields must be configured
+// explicitly"), so these packages need the SAME explicit main-field
+// resolution 'browser' platform gives every app bundle (see
+// buildBrowserApp() below) instead of 'neutral'. Still browser-only code
+// either way (see the package's own doc comment) - this is a build-target
+// fix, not a behavior change.
+const BROWSER_ONLY_PACKAGES = new Set(['@qu/qr']);
 
 async function buildPackage({ name, dir, pkg }) {
   const entry = join(dir, pkg.main ?? 'src/index.js');
   const outfile = join(dir, 'dist', 'index.min.js');
   const isNode = NODE_ONLY_PACKAGES.has(name);
+  const isBrowserOnly = BROWSER_ONLY_PACKAGES.has(name);
 
   await esbuild.build({
     entryPoints: [entry],
@@ -66,7 +77,7 @@ async function buildPackage({ name, dir, pkg }) {
     minify: true,
     sourcemap: true,
     format: 'esm',
-    platform: isNode ? 'node' : 'neutral',
+    platform: isNode ? 'node' : isBrowserOnly ? 'browser' : 'neutral',
     target: isNode ? 'node20' : 'es2022',
     external: isNode ? ['ws'] : [],
     logLevel: 'warning',

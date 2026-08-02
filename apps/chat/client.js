@@ -50,6 +50,23 @@ import { createI18n } from '@qu/i18n';
 
 const SPACE = 'chat';
 const REACTION_CHOICES = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '✅'];
+// A broad curated set, not the full Unicode emoji table (thousands of
+// codepoints, no reasonable way to hand-maintain that list here and no
+// emoji-picker dependency in this vanilla-JS codebase) - shown when the
+// reaction popup's own "+" is clicked, for anything beyond the 8 quick
+// picks above.
+const EXTENDED_EMOJI_SET = [
+  '😀', '😃', '😄', '😁', '😆', '😅', '🤣', '😂', '🙂', '🙃', '😉', '😊', '😇', '🥰', '😍', '🤩',
+  '😘', '😗', '😚', '😙', '😋', '😛', '😜', '🤪', '😝', '🤑', '🤗', '🤭', '🤫', '🤔', '🫡', '🤐',
+  '🤨', '😐', '😑', '😶', '😏', '😒', '🙄', '😬', '🤥', '😌', '😔', '😪', '🤤', '😴', '😷', '🤒',
+  '🤕', '🤢', '🤮', '🤧', '🥵', '🥶', '🥴', '😵', '🤯', '🤠', '🥳', '🥸', '😎', '🤓', '🧐', '😕',
+  '😟', '🙁', '☹️', '😮', '😯', '😲', '😳', '🥺', '😦', '😧', '😨', '😰', '😥', '😢', '😭', '😱',
+  '😖', '😣', '😞', '😓', '😩', '😫', '🥱', '😤', '😡', '😠', '🤬', '😈', '👿', '💀', '👻', '👽',
+  '🤖', '💩', '😺', '😸', '😹', '😻', '😼', '😽', '🙀', '😿', '😾', '👍', '👎', '👏', '🙌', '🤝',
+  '🙏', '💪', '👋', '✌️', '🤞', '🫶', '❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '🤍', '🤎', '💔',
+  '❣️', '💕', '💞', '💓', '💗', '💖', '💘', '💝', '💯', '✅', '❌', '⭐', '🌟', '✨', '🔥', '🎉',
+  '🎊', '🎈', '🎁', '🏆', '⚡', '☀️', '🌈', '☕', '🍕', '🍔', '🍎', '🍺', '🎂', '📌', '🔗', '📎',
+];
 const AVATAR_PALETTE = ['#e17076', '#faa774', '#a695e7', '#7bc862', '#6ec9cb', '#65aadd', '#ee7aae', '#f2c94c'];
 const PRESENCE_STALE_MS = 15_000;
 const PRESENCE_HEARTBEAT_MS = 5_000;
@@ -81,6 +98,9 @@ const DICT = {
     noResults: 'No results', searchThisChat: 'Search this chat', searchEverywhere: 'Search all chats',
     synced: 'Delivered to server', pendingSync: 'Not yet delivered to server', readBy: 'Read',
     permalink: 'Click to copy a link to this message',
+    resetScroll: 'Jump to newest message', moreEmoji: 'More emoji',
+    clearChat: 'Clear chat', clearChatConfirm: 'Delete all messages in this chat? This cannot be undone, and clears the chat for everyone in it, not just you.',
+    messageRenderError: '⚠️ This message could not be displayed.',
   },
   de: {
     title: 'Chats', empty: 'Noch keine Chats — Kontakt aus der Nutzerliste hinzufügen oder eine Gruppe starten.', back: '←',
@@ -107,6 +127,9 @@ const DICT = {
     noResults: 'Keine Treffer', searchThisChat: 'Diesen Chat durchsuchen', searchEverywhere: 'Alle Chats durchsuchen',
     synced: 'Auf dem Server gespeichert', pendingSync: 'Noch nicht auf dem Server gespeichert', readBy: 'Gelesen',
     permalink: 'Klicken, um einen Link zu dieser Nachricht zu kopieren',
+    resetScroll: 'Zur neuesten Nachricht springen', moreEmoji: 'Weitere Emojis',
+    clearChat: 'Chat leeren', clearChatConfirm: 'Alle Nachrichten in diesem Chat löschen? Das kann nicht rückgängig gemacht werden und leert den Chat für alle Beteiligten, nicht nur für dich.',
+    messageRenderError: '⚠️ Diese Nachricht konnte nicht angezeigt werden.',
   },
 };
 const { t } = createI18n(DICT);
@@ -170,6 +193,7 @@ const STYLE = `
   .qu-chat-msg-row { display: flex; flex-direction: column; max-width: min(32rem, 82%); }
   .qu-chat-msg-row[data-mine="true"] { align-self: flex-end; }
   .qu-chat-msg-row[data-mine="false"] { align-self: flex-start; }
+  .qu-chat-msg-row-error { padding: 0.4rem 0.7rem; border-radius: 0.9rem; background: #c003; opacity: 0.8; font-size: 0.85em; align-self: center; }
 
   /* OUTER "bubble" - a subtle card holding the chrome (optional alias
      header, footer with reactions/time/read-tick/menu). Deliberately much
@@ -215,6 +239,8 @@ const STYLE = `
   @keyframes qu-chat-spin { to { transform: rotate(360deg); } }
   .qu-chat-msg-actions-btn { all: unset; cursor: pointer; padding: 0 0.2rem; opacity: 0.7; line-height: 1; }
   .qu-chat-msg-actions-btn:hover { opacity: 1; }
+  .qu-chat-msg-quick-react-btn { all: unset; cursor: pointer; padding: 0 0.2rem; opacity: 0.8; line-height: 1; font-size: 1.6em; }
+  .qu-chat-msg-quick-react-btn:hover { opacity: 1; }
   .qu-chat-msg-row[data-anchored="true"] .qu-chat-msg-outer { animation: qu-chat-anchor-flash 1.6s ease; }
   @keyframes qu-chat-anchor-flash { 0%, 100% { background: #8881; } 30% { background: color-mix(in srgb, var(--qu-chat-own-color, #3390ec) 35%, transparent); } }
 
@@ -234,6 +260,12 @@ const STYLE = `
   .qu-chat-reaction-popup:not([hidden]) { display: flex; }
   .qu-chat-reaction-popup button { all: unset; cursor: pointer; font-size: 1.3rem; line-height: 1; padding: 0.25rem; border-radius: 50%; }
   .qu-chat-reaction-popup button:hover { background: #8882; }
+  .qu-chat-reaction-more-btn { font-weight: 700; opacity: 0.7; }
+  /* Extended (the "+" was clicked): the full curated emoji grid doesn't
+     fit a single-row pill anymore - switch to a wrapping, scrollable
+     panel instead of the compact one-line strip. */
+  .qu-chat-reaction-popup-extended { flex-wrap: wrap; border-radius: 0.8rem; width: min(18rem, 90vw); max-height: min(16rem, 60vh); overflow-y: auto; }
+  .qu-chat-reaction-popup-extended button { font-size: 1.15rem; }
   .qu-chat-pin-list-popup { position: fixed; z-index: 60; width: min(20rem, 90vw); max-height: min(24rem, 70vh); overflow-y: auto; background: canvas; border: 1px solid #8884; border-radius: 0.6rem; box-shadow: 0 4px 16px #00000050; padding: 0.3rem; }
   .qu-chat-pin-list-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.5rem; border-radius: 0.4rem; }
   .qu-chat-pin-list-row:hover { background: #8882; }
@@ -1077,6 +1109,25 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     searchToggleBtn.title = t('searchThisChat');
     header.appendChild(searchToggleBtn);
 
+    // Manual escape hatch for the auto-scroll/anchor bookkeeping above -
+    // whatever state it's in, this always jumps to the newest message,
+    // clears any active permalink anchor, and resumes auto-scroll.
+    const resetScrollBtn = document.createElement('button');
+    resetScrollBtn.type = 'button';
+    resetScrollBtn.className = 'qu-chat-icon-btn';
+    resetScrollBtn.textContent = '⬇️';
+    resetScrollBtn.title = t('resetScroll');
+    resetScrollBtn.addEventListener('click', () => scrollToVeryBottom());
+    header.appendChild(resetScrollBtn);
+
+    const roomMenuBtn = document.createElement('button');
+    roomMenuBtn.type = 'button';
+    roomMenuBtn.className = 'qu-chat-icon-btn';
+    roomMenuBtn.textContent = '⋮';
+    roomMenuBtn.title = t('more');
+    roomMenuBtn.addEventListener('click', (e) => { e.stopPropagation(); openRoomMenu(roomMenuBtn); });
+    header.appendChild(roomMenuBtn);
+
     const encHint = document.createElement('div');
     encHint.className = 'qu-chat-encrypted-hint';
     encHint.textContent = '🔒';
@@ -1132,18 +1183,43 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     const reactionPopupEl = document.createElement('div');
     reactionPopupEl.className = 'qu-chat-reaction-popup';
     reactionPopupEl.hidden = true;
-    for (const emoji of REACTION_CHOICES) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.textContent = emoji;
-      btn.addEventListener('click', async () => {
+    // Rebuilt on every open (not built once) - starts back at the quick
+    // 8-choice view each time rather than remembering "was left expanded"
+    // from a previous message's reaction pick.
+    function renderReactionPopup(extended = false) {
+      reactionPopupEl.textContent = '';
+      reactionPopupEl.classList.toggle('qu-chat-reaction-popup-extended', extended);
+      const emojiClickHandler = async (emoji) => {
         const message = reactionPopupContext;
         closePopups();
         if (!message) return;
         await services.threads.setReaction(spaceId, threadId, message.id, emoji);
         await reload();
-      });
-      reactionPopupEl.appendChild(btn);
+      };
+      for (const emoji of REACTION_CHOICES) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = emoji;
+        btn.addEventListener('click', () => emojiClickHandler(emoji));
+        reactionPopupEl.appendChild(btn);
+      }
+      if (!extended) {
+        const more = document.createElement('button');
+        more.type = 'button';
+        more.className = 'qu-chat-reaction-more-btn';
+        more.textContent = '+';
+        more.title = t('moreEmoji');
+        more.addEventListener('click', (e) => { e.stopPropagation(); renderReactionPopup(true); });
+        reactionPopupEl.appendChild(more);
+      } else {
+        for (const emoji of EXTENDED_EMOJI_SET) {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.textContent = emoji;
+          btn.addEventListener('click', () => emojiClickHandler(emoji));
+          reactionPopupEl.appendChild(btn);
+        }
+      }
     }
     const pinListPopupEl = document.createElement('div');
     pinListPopupEl.className = 'qu-chat-pin-list-popup';
@@ -1196,6 +1272,38 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     };
     document.addEventListener('click', onDocClick);
 
+    // Per-room cleanup (this function's own popups/timers), layered under
+    // the mount-level cleanup below which handles cross-room state (watch,
+    // heartbeat, presence timer already assigned to the outer closure).
+    // Registered HERE - right after the popups/lightbox exist - rather
+    // than at the end of renderRoom(), which still has a good amount of
+    // further async work ahead of it (the initial reload(), presence
+    // setup, etc.). That further work can genuinely still be in flight
+    // when the user navigates away again quickly (an automated test
+    // clicking through several routes back-to-back reproduces it
+    // reliably, but a fast real user can trigger it too) - the shell
+    // unmounts the CURRENT app on every navigation (see
+    // apps/shell/src/main.js's _renderRoute(), which calls
+    // stopMountedApp() unconditionally before mounting the next route),
+    // and that runs THIS mount()'s own cleanup - the `return () => {...}`
+    // below - which drains `roomCleanups` at that exact moment. If this
+    // registration hadn't happened yet (still stuck behind an in-flight
+    // await), the drain finds nothing to clean up, `lightboxEl`/the
+    // popups are appended to document.body but never removed, and stay
+    // there orphaned for the lifetime of the page - exactly the "two
+    // lightboxes" duplicate-popup bug this was reordered to fix.
+    const cleanupRoom = () => {
+      document.removeEventListener('click', onDocClick);
+      document.removeEventListener('keydown', onLightboxKeydown);
+      actionsMenuEl.remove();
+      reactionPopupEl.remove();
+      pinListPopupEl.remove();
+      lightboxEl.remove();
+      if (readReceiptTimer) clearInterval(readReceiptTimer);
+      releaseMic(); // navigating away mid-recording (without discarding first) must not leave the mic indicator on
+    };
+    roomCleanups.push(cleanupRoom);
+
     function openActionsMenu(message, allMessages, isPinned, anchorEl) {
       actionsMenuContext = message;
       reactionPopupEl.hidden = true;
@@ -1227,8 +1335,42 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     function closeActionsKeepMessage() { actionsMenuEl.hidden = true; }
     function openReactionPopup(message, anchorEl) {
       reactionPopupContext = message;
+      renderReactionPopup();
       reactionPopupEl.hidden = false;
       positionPopup(reactionPopupEl, anchorEl.getBoundingClientRect());
+    }
+
+    // Room-level menu (currently just "clear chat") - reuses the SAME
+    // shared popup element as the per-message ⋮ menu (openActionsMenu()
+    // above), same "one instance, repositioned/repopulated" reasoning.
+    function openRoomMenu(anchorEl) {
+      actionsMenuContext = null;
+      reactionPopupEl.hidden = true;
+      actionsMenuEl.textContent = '';
+      const items = [
+        { label: `🗑 ${t('clearChat')}`, onClick: async () => {
+          closePopups();
+          // A real confirm() dialog, not a custom one - this is a
+          // destructive, hard-to-reverse action (there's no delete
+          // primitive in Qu's storage layer, so "clearing" really does
+          // wipe every member's view of the history the moment it syncs
+          // - see ThreadService.clearMessages()'s own doc comment) and
+          // the native dialog is the simplest reliable way to gate it.
+          if (!confirm(t('clearChatConfirm'))) return;
+          await services.threads.clearMessages(spaceId, threadId);
+          await reload({ forceScrollBottom: true });
+        } },
+      ];
+      for (const item of items) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'qu-chat-popup-item';
+        btn.textContent = item.label;
+        btn.addEventListener('click', (e) => { e.stopPropagation(); item.onClick(); });
+        actionsMenuEl.appendChild(btn);
+      }
+      actionsMenuEl.hidden = false;
+      positionPopup(actionsMenuEl, anchorEl.getBoundingClientRect());
     }
 
     async function openForwardModal(message) {
@@ -1740,7 +1882,26 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
         listEl.appendChild(li);
       } else {
         for (const message of messages) {
-          const row = await messageRow(message, messages, pinnedIds.includes(message.id));
+          let row;
+          try {
+            row = await messageRow(message, messages, pinnedIds.includes(message.id));
+          } catch (err) {
+            // One malformed/legacy message (e.g. from an older schema,
+            // or an attachment that no longer resolves) must not silently
+            // wedge the ENTIRE room: every future reload() - and
+            // reload() fires constantly, for reasons having nothing to
+            // do with this message (any reaction, presence, or read
+            // receipt elsewhere) - would hit the exact same exception on
+            // the exact same message and never get past it, leaving the
+            // list permanently stuck showing only whatever came before
+            // it. Render a visible placeholder for just this one message
+            // and keep going instead of losing the rest of the room.
+            console.error('[chat] messageRow() failed for message', message.id, err);
+            row = document.createElement('li');
+            row.className = 'qu-chat-msg-row qu-chat-msg-row-error';
+            row.dataset.messageId = message.id;
+            row.textContent = t('messageRenderError');
+          }
           if (myToken !== renderToken) return; // a newer reload() started mid-loop - abandon this stale one
           listEl.appendChild(row);
         }
@@ -1938,16 +2099,36 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       // watchReactions() above) would call scrollToVeryBottom() and yank
       // the view straight back down, undoing the very navigation the user
       // just asked for - this was the reported "jumps back and forth,
-      // can't stay on the message I clicked" bug. Suppressing tracking for
-      // the scroll animation's own duration additionally stops its OWN
-      // in-flight 'scroll' events (a target near the bottom can pass
-      // isNearBottom() mid-animation) from re-flipping it back true and
-      // clearing the anchor before the jump even finishes.
+      // can't stay on the message I clicked" bug.
       stickingToBottom = false;
-      suppressScrollTracking = true;
       row.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      setTimeout(() => { suppressScrollTracking = false; }, 700);
+      // `flash` is only true for a genuinely NEW navigation (a fresh
+      // click/permalink visit - see its callers) - reload() re-invokes
+      // this on every incidental re-render while the SAME anchor is still
+      // active (the fix for the bug above), which for an already-in-view
+      // row is a no-op scroll, not a real animation. Suppressing tracking
+      // ONLY for the real, first jump - not for every one of those
+      // incidental repeats too - matters because each call re-arms the
+      // window from now: if reload() keeps firing in that window (which
+      // it does routinely - read receipts, presence, someone else's
+      // reactions), the window can get pushed out indefinitely and a
+      // REAL "user scrolled to the bottom" event happening to land during
+      // it would be silently ignored, leaving the anchor stuck in the URL
+      // forever despite the view genuinely being at the bottom.
       if (flash) {
+        suppressScrollTracking = true;
+        setTimeout(() => {
+          suppressScrollTracking = false;
+          // The smooth-scroll animation this suppression window exists
+          // for can easily SETTLE (fire its last 'scroll' event) before
+          // the window itself closes - if so, there is no LATER scroll
+          // event left to ever notice "actually, we ended up near the
+          // bottom" once suppression lifts, and the anchor would stay
+          // stuck in the URL forever despite the view genuinely being at
+          // the bottom already. Checking once, right here, closes that
+          // gap without needing another real scroll event to happen.
+          if (isNearBottom()) { stickingToBottom = true; clearAnchor(); }
+        }, 700);
         row.dataset.anchored = 'true';
         setTimeout(() => { row.dataset.anchored = 'false'; }, 1600);
       }
@@ -2125,6 +2306,20 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
 
       const meta = document.createElement('div');
       meta.className = 'qu-chat-msg-meta';
+      // Always-visible "add a reaction" affordance, separate from the ⋮
+      // menu's own "React" item - a dedicated one-tap icon instead of
+      // menu → React being the only way in, matching the common
+      // messenger pattern (Matrix, Telegram, Discord, ...) of a
+      // leftmost, clearly-visible quick-react icon ahead of the rest of
+      // the message's own metadata (pin/edited/time/tick) and the "⋮"
+      // menu, which stays last.
+      const quickReactBtn = document.createElement('button');
+      quickReactBtn.type = 'button';
+      quickReactBtn.className = 'qu-chat-msg-quick-react-btn';
+      quickReactBtn.textContent = '😊';
+      quickReactBtn.title = t('react');
+      quickReactBtn.addEventListener('click', (e) => { e.stopPropagation(); openReactionPopup(message, quickReactBtn); });
+      meta.appendChild(quickReactBtn);
       if (isPinned) {
         const pinBadge = document.createElement('span');
         pinBadge.className = 'qu-chat-msg-pin-badge';
@@ -2154,6 +2349,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
         renderTickState(tick, tickStateFor(message.id, false));
         meta.appendChild(tick);
       }
+
       const actionsBtn = document.createElement('button');
       actionsBtn.type = 'button';
       actionsBtn.className = 'qu-chat-msg-actions-btn';
@@ -2245,23 +2441,6 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     }
     await refreshPresence();
     presenceTimer = setInterval(refreshPresence, 5000);
-
-    // Per-room cleanup (this function's own popups/timers), layered under
-    // the mount-level cleanup below which handles cross-room state (watch,
-    // heartbeat, presence timer already assigned to the outer closure).
-    // `onDocClick` itself was already registered right after it was defined,
-    // above.
-    const cleanupRoom = () => {
-      document.removeEventListener('click', onDocClick);
-      document.removeEventListener('keydown', onLightboxKeydown);
-      actionsMenuEl.remove();
-      reactionPopupEl.remove();
-      pinListPopupEl.remove();
-      lightboxEl.remove();
-      if (readReceiptTimer) clearInterval(readReceiptTimer);
-      releaseMic(); // navigating away mid-recording (without discarding first) must not leave the mic indicator on
-    };
-    roomCleanups.push(cleanupRoom);
   }
 
   return () => {

@@ -22,7 +22,8 @@
  */
 import { createI18n, getStoredLocale, setLocale } from '@qu/i18n';
 import { watch } from '@qu/reactive';
-import { actorPath } from '@qu/identity';
+import { actorPath, QuIdentityEngine } from '@qu/identity';
+import { renderQrCode, startCamera, scanQrFromVideo } from '@qu/qr';
 
 /** Locales every app's dictionary in this codebase actually ships - see @qu/i18n's own doc comment for why this is a device preference, not per-identity. */
 const AVAILABLE_LOCALES = [
@@ -55,6 +56,29 @@ const DICT = {
     addContact: 'Add contact',
     removeContact: 'Remove contact',
     message: '💬 Message',
+    backupTitle: 'Identity backup & devices',
+    backupIntro: 'Use this to set up the SAME identity on another device, back it up, or remove it from this one.',
+    exportBtn: '🔗 Export identity',
+    importBtn: '📥 Use a different identity',
+    deleteBtn: '🗑 Delete identity & all local data',
+    exportWarning: 'This code IS your private key - anyone with it fully controls this identity. Only show it to your own other device (e.g. via its camera), never share it anywhere else.',
+    exportCopy: '📋 Copy code',
+    exportCopied: 'Copied',
+    exportDownload: '⬇ Download as file',
+    exportClose: 'Close',
+    importWarning: 'This REPLACES the identity on this device with a different one. Export your current identity first if you want to keep access to it.',
+    importPasteLabel: 'Backup code',
+    pasteCodePlaceholder: 'Paste backup code…',
+    scanQr: '📷 Scan QR code',
+    cancelScan: 'Cancel scan',
+    importConfirm: 'Replace identity',
+    importFailed: 'Could not import: {message}',
+    cameraFailed: 'Could not access the camera: {message}',
+    deleteWarning: 'This permanently deletes this identity and EVERY piece of data stored in this browser for it (contacts, chats, calendars, everything) - not just from this device\'s view, but from this device entirely. This cannot be undone. Export your identity first if you want to keep using it elsewhere.',
+    deleteConfirmLabel: 'Type DELETE to confirm',
+    deleteConfirmPlaceholder: 'DELETE',
+    deleteConfirmBtn: 'Permanently delete',
+    cancel: 'Cancel',
   },
   de: {
     titleOwn: 'Mein Profil',
@@ -80,6 +104,29 @@ const DICT = {
     addContact: 'Kontakt hinzufügen',
     removeContact: 'Kontakt entfernen',
     message: '💬 Nachricht',
+    backupTitle: 'Identitätssicherung & Geräte',
+    backupIntro: 'Damit richtest du dieselbe Identität auf einem anderen Gerät ein, sicherst sie, oder entfernst sie von diesem Gerät.',
+    exportBtn: '🔗 Identität exportieren',
+    importBtn: '📥 Andere Identität verwenden',
+    deleteBtn: '🗑 Identität & alle lokalen Daten löschen',
+    exportWarning: 'Dieser Code IST dein privater Schlüssel - wer ihn hat, hat volle Kontrolle über diese Identität. Zeige ihn nur deinem eigenen anderen Gerät (z. B. per Kamera), niemals sonst wem.',
+    exportCopy: '📋 Code kopieren',
+    exportCopied: 'Kopiert',
+    exportDownload: '⬇ Als Datei herunterladen',
+    exportClose: 'Schließen',
+    importWarning: 'Dies ERSETZT die Identität auf diesem Gerät durch eine andere. Exportiere zuerst deine aktuelle Identität, wenn du sie weiter nutzen willst.',
+    importPasteLabel: 'Sicherungscode',
+    pasteCodePlaceholder: 'Sicherungscode einfügen…',
+    scanQr: '📷 QR-Code scannen',
+    cancelScan: 'Scan abbrechen',
+    importConfirm: 'Identität ersetzen',
+    importFailed: 'Import fehlgeschlagen: {message}',
+    cameraFailed: 'Kamera nicht zugänglich: {message}',
+    deleteWarning: 'Dies löscht diese Identität und JEDES Datum, das für sie in diesem Browser gespeichert ist, dauerhaft (Kontakte, Chats, Kalender, alles) - nicht nur die Ansicht, sondern von diesem Gerät. Das kann nicht rückgängig gemacht werden. Exportiere die Identität zuerst, wenn du sie woanders weiter nutzen willst.',
+    deleteConfirmLabel: 'Tippe LÖSCHEN zur Bestätigung',
+    deleteConfirmPlaceholder: 'LÖSCHEN',
+    deleteConfirmBtn: 'Endgültig löschen',
+    cancel: 'Abbrechen',
   },
 };
 const { t } = createI18n(DICT);
@@ -105,6 +152,17 @@ const STYLE = `
   .qu-profile-settings a { color: inherit; }
   .qu-profile-actions { display: flex; gap: 0.8rem; align-items: center; margin-top: 0.5rem; }
   .qu-profile-empty { opacity: 0.7; }
+  .qu-profile-backup { display: flex; flex-direction: column; gap: 0.6rem; max-width: 32rem; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #8884; }
+  .qu-profile-backup-buttons { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+  .qu-profile-backup-panel { border: 1px solid #8884; border-radius: 0.5rem; padding: 0.8rem; display: flex; flex-direction: column; gap: 0.6rem; }
+  .qu-profile-backup-warning { border-left: 3px solid #d0a02a; padding-left: 0.7rem; opacity: 0.9; }
+  .qu-profile-backup-code { font-family: ui-monospace, monospace; font-size: 0.85em; word-break: break-all; background: #8881; border-radius: 0.4rem; padding: 0.6rem 0.7rem; }
+  .qu-profile-backup-qr { display: flex; justify-content: center; padding: 0.5rem 0; }
+  .qu-profile-backup-row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+  .qu-profile-backup textarea { width: 100%; min-height: 4rem; font-family: ui-monospace, monospace; padding: 0.5rem; box-sizing: border-box; }
+  .qu-profile-backup video { width: 100%; max-width: 18rem; border-radius: 0.5rem; }
+  .qu-profile-backup-error { color: #c0392b; }
+  .qu-profile-backup-danger { color: #c0392b; border-color: #c0392b88; }
 `;
 
 function ensureStyle() {
@@ -115,7 +173,7 @@ function ensureStyle() {
   document.head.appendChild(style);
 }
 
-export function mount(container, { qu, services, segments }) {
+export function mount(container, { qu, services, segments, wipeIdentity }) {
   ensureStyle();
   let stopped = false;
   let stopWatch = null;
@@ -143,7 +201,7 @@ export function mount(container, { qu, services, segments }) {
     // pattern the header's alias display uses (see apps/shell/src/main.js).
     stopWatch = watch(qu, actorPath(targetPub, 'profile'), () => {
       if (stopped) return;
-      if (isOwn) renderOwnProfile(container, services, () => stopped);
+      if (isOwn) renderOwnProfile(container, services, () => stopped, qu, wipeIdentity);
       else renderPublicProfile(container, services, targetPub, () => stopped);
     });
   })();
@@ -151,7 +209,7 @@ export function mount(container, { qu, services, segments }) {
   return () => { stopped = true; stopWatch?.(); };
 }
 
-async function renderOwnProfile(container, services, isStopped) {
+async function renderOwnProfile(container, services, isStopped, qu, wipeIdentity) {
   const ownProfile = await services.profile.getOwnProfile();
   const isListed = await services.directory.isVisible(ownProfile.pub);
   if (isStopped()) return;
@@ -256,6 +314,240 @@ async function renderOwnProfile(container, services, isStopped) {
   settings.appendChild(notifLink);
 
   container.appendChild(settings);
+
+  container.appendChild(renderBackupSection(qu, wipeIdentity));
+}
+
+// =============================================================================
+// IDENTITY BACKUP & DEVICES — export (show this identity as a backup code /
+// QR code another of the user's OWN devices can scan or paste), import
+// (replace this device's identity with one exported elsewhere - the other
+// direction of the same transfer), and delete (wipe this identity and
+// every byte of its local data from this device). See @qu/identity's
+// exportSeedCode()/importSeedCode() for what the backup code actually is
+// (the raw master seed, base64url-encoded - NOT the original 24-word
+// mnemonic, which only ever existed at creation time - see that method's
+// own doc comment) and @qu/qr for the QR encode/decode this reuses.
+//
+// Deliberately inline panels toggled within this same page, not dialogs or
+// new routes - same "no overlays" convention every other app in this shell
+// follows (see e.g. apps/todo/client.js's inline forms).
+// =============================================================================
+
+function renderBackupSection(qu, wipeIdentity) {
+  const section = document.createElement('div');
+  section.className = 'qu-profile-backup';
+
+  const heading = document.createElement('h2');
+  heading.textContent = t('backupTitle');
+  const intro = document.createElement('p');
+  intro.textContent = t('backupIntro');
+
+  const panelSlot = document.createElement('div');
+
+  const buttons = document.createElement('div');
+  buttons.className = 'qu-profile-backup-buttons';
+
+  const exportBtn = document.createElement('button');
+  exportBtn.type = 'button';
+  exportBtn.textContent = t('exportBtn');
+  exportBtn.addEventListener('click', () => renderExportPanel(panelSlot, qu));
+
+  const importBtn = document.createElement('button');
+  importBtn.type = 'button';
+  importBtn.textContent = t('importBtn');
+  importBtn.addEventListener('click', () => renderImportPanel(panelSlot, qu));
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.type = 'button';
+  deleteBtn.className = 'qu-profile-backup-danger';
+  deleteBtn.textContent = t('deleteBtn');
+  deleteBtn.addEventListener('click', () => renderDeletePanel(panelSlot, wipeIdentity));
+
+  buttons.append(exportBtn, importBtn, deleteBtn);
+  section.append(heading, intro, buttons, panelSlot);
+  return section;
+}
+
+async function renderExportPanel(slot, qu) {
+  const identity = new QuIdentityEngine(qu);
+  const code = await identity.exportSeedCode();
+
+  slot.textContent = '';
+  const panel = document.createElement('div');
+  panel.className = 'qu-profile-backup-panel';
+
+  const warning = document.createElement('p');
+  warning.className = 'qu-profile-backup-warning';
+  warning.textContent = t('exportWarning');
+
+  const qrEl = document.createElement('div');
+  qrEl.className = 'qu-profile-backup-qr';
+  renderQrCode(qrEl, code);
+
+  const codeBox = document.createElement('div');
+  codeBox.className = 'qu-profile-backup-code';
+  codeBox.textContent = code;
+
+  const row = document.createElement('div');
+  row.className = 'qu-profile-backup-row';
+
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.textContent = t('exportCopy');
+  copyBtn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      copyBtn.textContent = t('exportCopied');
+      setTimeout(() => { copyBtn.textContent = t('exportCopy'); }, 1500);
+    } catch { /* clipboard unavailable - the code box above is still selectable by hand */ }
+  });
+
+  const downloadBtn = document.createElement('button');
+  downloadBtn.type = 'button';
+  downloadBtn.textContent = t('exportDownload');
+  downloadBtn.addEventListener('click', () => {
+    const blob = new Blob([code], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'quniverse-identity-backup.txt';
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.textContent = t('exportClose');
+  closeBtn.addEventListener('click', () => { slot.textContent = ''; });
+
+  row.append(copyBtn, downloadBtn, closeBtn);
+  panel.append(warning, qrEl, codeBox, row);
+  slot.textContent = '';
+  slot.appendChild(panel);
+}
+
+function renderImportPanel(slot, qu) {
+  slot.textContent = '';
+  const panel = document.createElement('div');
+  panel.className = 'qu-profile-backup-panel';
+
+  const warning = document.createElement('p');
+  warning.className = 'qu-profile-backup-warning';
+  warning.textContent = t('importWarning');
+
+  const label = document.createElement('label');
+  label.textContent = t('importPasteLabel');
+  const textarea = document.createElement('textarea');
+  textarea.placeholder = t('pasteCodePlaceholder');
+
+  const qrSlot = document.createElement('div');
+  let stopScan = null;
+
+  const scanBtn = document.createElement('button');
+  scanBtn.type = 'button';
+  scanBtn.textContent = t('scanQr');
+  scanBtn.addEventListener('click', async () => {
+    if (stopScan) { stopScan(); stopScan = null; qrSlot.textContent = ''; scanBtn.textContent = t('scanQr'); return; }
+    qrSlot.textContent = '';
+    const video = document.createElement('video');
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = t('cancelScan');
+    qrSlot.append(video, cancelBtn);
+    try {
+      const stopCamera = await startCamera(video);
+      const stopScanning = scanQrFromVideo(video, {
+        onResult: (text) => {
+          textarea.value = text;
+          stopCamera();
+          qrSlot.textContent = '';
+          stopScan = null;
+          scanBtn.textContent = t('scanQr');
+        },
+      });
+      stopScan = () => { stopScanning(); stopCamera(); };
+      cancelBtn.addEventListener('click', () => { stopScan?.(); stopScan = null; qrSlot.textContent = ''; scanBtn.textContent = t('scanQr'); });
+    } catch (err) {
+      qrSlot.textContent = '';
+      const error = document.createElement('p');
+      error.className = 'qu-profile-backup-error';
+      error.textContent = t('cameraFailed', { message: err.message });
+      qrSlot.appendChild(error);
+    }
+  });
+
+  const error = document.createElement('p');
+  error.className = 'qu-profile-backup-error';
+
+  const confirmBtn = document.createElement('button');
+  confirmBtn.type = 'button';
+  confirmBtn.className = 'qu-profile-backup-danger';
+  confirmBtn.textContent = t('importConfirm');
+  confirmBtn.addEventListener('click', async () => {
+    error.textContent = '';
+    const identity = new QuIdentityEngine(qu);
+    try {
+      await identity.importSeedCode(textarea.value, { overwrite: true });
+      stopScan?.();
+      location.reload();
+    } catch (err) {
+      error.textContent = t('importFailed', { message: err.message });
+    }
+  });
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.textContent = t('cancel');
+  cancelBtn.addEventListener('click', () => { stopScan?.(); slot.textContent = ''; });
+
+  const row = document.createElement('div');
+  row.className = 'qu-profile-backup-row';
+  row.append(scanBtn, confirmBtn, cancelBtn);
+
+  panel.append(warning, label, textarea, qrSlot, row, error);
+  slot.appendChild(panel);
+}
+
+function renderDeletePanel(slot, wipeIdentity) {
+  slot.textContent = '';
+  const panel = document.createElement('div');
+  panel.className = 'qu-profile-backup-panel';
+
+  const warning = document.createElement('p');
+  warning.className = 'qu-profile-backup-warning';
+  warning.textContent = t('deleteWarning');
+
+  const label = document.createElement('label');
+  label.textContent = t('deleteConfirmLabel');
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = t('deleteConfirmPlaceholder');
+
+  const confirmBtn = document.createElement('button');
+  confirmBtn.type = 'button';
+  confirmBtn.className = 'qu-profile-backup-danger';
+  confirmBtn.textContent = t('deleteConfirmBtn');
+  confirmBtn.disabled = true;
+  input.addEventListener('input', () => {
+    confirmBtn.disabled = input.value.trim().toUpperCase() !== t('deleteConfirmPlaceholder');
+  });
+  confirmBtn.addEventListener('click', async () => {
+    confirmBtn.disabled = true;
+    await wipeIdentity();
+  });
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.textContent = t('cancel');
+  cancelBtn.addEventListener('click', () => { slot.textContent = ''; });
+
+  const row = document.createElement('div');
+  row.className = 'qu-profile-backup-row';
+  row.append(confirmBtn, cancelBtn);
+
+  panel.append(warning, label, input, row);
+  slot.appendChild(panel);
 }
 
 async function renderPublicProfile(container, services, targetPub, isStopped) {

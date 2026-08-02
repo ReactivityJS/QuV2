@@ -94,8 +94,28 @@ export class ProfileService {
    */
   async getOwnProfile() {
     const actorPub = await this.#myActorPub();
+
+    // Backfill/background-refresh BOTH pieces (same sync-freshness.js
+    // pattern getPublicProfile() already used for a THIRD PARTY's profile -
+    // this method never had it for "my own", because before cross-device
+    // identity import existed, "my own profile" was always written on
+    // THIS SAME device and so was always already local. A freshly imported
+    // identity (see @qu/identity's importSeedCode()) starts with an empty
+    // local store, so without this its alias/avatar/epub and any private
+    // fields would silently stay blank forever, even though the real data
+    // is sitting on the relay under this exact actorPub.
+    const profilePath = actorPath(actorPub, 'profile');
+    const localProfile = await this.qu.get(profilePath);
+    if (localProfile) this.#backgroundRefresh(profilePath);
+    else if (this.syncFetch) await this.syncFetch(profilePath).catch(() => {});
+
+    const extraPath = privateExtraPath(actorPub);
+    const localExtra = await this.qu.get(extraPath);
+    if (localExtra) this.#backgroundRefresh(extraPath);
+    else if (this.syncFetch) await this.syncFetch(extraPath).catch(() => {});
+
     const { alias = '', avatar = '', xPublicKey = '', ...publicExtra } = (await this.identity.getProfile(actorPub)) ?? {};
-    const privateExtra = (await getPrivate(this.qu, this.identity, privateExtraPath(actorPub))) ?? {};
+    const privateExtra = (await getPrivate(this.qu, this.identity, extraPath)) ?? {};
 
     const fields = [
       ...Object.entries(publicExtra).map(([key, value]) => ({ key, value, visibility: 'public' })),
