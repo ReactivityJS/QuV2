@@ -50,6 +50,14 @@ export class QuMount {
   resolve(path) {
     const segments = path.split('/').filter(Boolean);
     if (segments.length === 0) throw new Error('QuMount.resolve: path is empty');
+    for (const segment of segments) {
+      // Every adapter downstream of this single chokepoint (FsAdapter, IndexedDBAdapter, ...)
+      // turns `rel` into a storage key/file path - a '.', '..' or NUL segment must never reach
+      // that far, or a caller could escape the adapter's own storage root (path traversal).
+      if (segment === '.' || segment === '..' || segment.includes('\0')) {
+        throw new Error(`QuMount.resolve: unsafe path segment "${segment}"`);
+      }
+    }
     const [mountName, ...rest] = segments;
     const adapter = this.#adapters.get(mountName);
     if (!adapter) throw new Error(`QuMount.resolve: mount "${mountName}" not found`);

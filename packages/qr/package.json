@@ -1,0 +1,15 @@
+{
+  "name": "@qu/qr",
+  "version": "2.0.0",
+  "description": "Browser-only QR code encode (render a string as a QR code into a container) and decode (read a QR code from a live camera stream) helpers - the device-to-device identity transfer mechanism apps/profile's backup section and apps/shell's onboarding screen both use. Thin wrappers around audited third-party libraries (qrcode/jsqr) rather than a hand-rolled encoder/decoder, same reasoning @qu/identity's bip39.js gives for not hand-rolling BIP-39: QR's Reed-Solomon error correction and format/mask-pattern bit-packing is exactly the kind of thing that's easy to get subtly wrong.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "jsqr": "^1.4.0"
+  },
+  "license": "MIT"
+}
