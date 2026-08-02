@@ -95,6 +95,8 @@ export class SyncEngine {
   #mySubscriptions = new Map(); // path/prefix -> targetPeerId (subscriptions WE made, see subscribe() below)
   #pendingRequests = new Map(); // requestId -> {resolve, reject, timeout}
   #pendingPrefixRequests = new Map(); // requestId -> {resolve, reject, timeout} - see fetchPrefix()
+  #lastAckedTs = new Map(); // path -> highest sync-ack ts seen - see waitForAck()
+  #ackWaiters = new Map(); // path -> Array<{ts, resolve, timeout}> - see waitForAck()
   #requestCounter = 0;
   #unsubscribeLocalWrites;
   #generation = 0;
@@ -270,9 +272,19 @@ export class SyncEngine {
    * A no-op registration (never fires) on a transport that doesn't support
    * reconnecting at all (see the constructor's own duck-typed check).
    * @param {() => void} callback
+   * @returns {() => void} Unsubscribe function - important for a caller
+   *   that registers one of these per short-lived operation (e.g.
+   *   apps/chat/client.js's `confirmSync()` retrying an unacked write on
+   *   the next reconnect) rather than once for the app's whole lifetime;
+   *   without a way to remove it, every such registration would leak for
+   *   as long as this SyncEngine exists, even after its own job is done.
    */
   onReconnect(callback) {
     this.#reconnectCallbacks.push(callback);
+    return () => {
+      const idx = this.#reconnectCallbacks.indexOf(callback);
+      if (idx !== -1) this.#reconnectCallbacks.splice(idx, 1);
+    };
   }
 
   /**
@@ -350,6 +362,55 @@ export class SyncEngine {
       const message = { type: 'request', requestId, path, requester: this.#transport.getPeerId() };
       if (targetPeerId) this.#transport.sendTo(targetPeerId, message);
       else this.#transport.send(message);
+    });
+  }
+
+  /**
+   * Resolves once a peer's `sync-ack` for `path` covers AT LEAST `ts` -
+   * i.e. the peer this write was sent to (see `publishAllTo`) has durably
+   * PERSISTED it, not merely received bytes over the wire. Every write
+   * `#handleSync` accepts triggers an ack automatically (see that method) -
+   * this is simply a way for application code to listen for one on a
+   * specific path, instead of `fetch()`-polling the same path back and
+   * hoping the round-trip proves the same thing (which is what
+   * apps/chat/client.js's own `confirmSync()` used to do: a SINGLE
+   * `fetch()` attempt with no retry, so one slow/failed round-trip left a
+   * message's "syncing…" tick stuck forever - see that function's own doc
+   * comment history).
+   *
+   * If an ack covering `ts` already arrived BEFORE this call (a real race:
+   * a fast relay can ack before the caller gets around to awaiting this),
+   * resolves immediately from `#lastAckedTs` rather than registering a
+   * waiter that would never see a message that already came and went.
+   *
+   * @param {string} path
+   * @param {number} ts - The QuBit's own `ts` (as returned by the write
+   *   that produced it) - resolves on an ack for this exact write OR a
+   *   newer one at the same path (matches `#handleSyncAck`'s own
+   *   never-regress comparison).
+   * @param {number} [timeoutMs=10000]
+   * @returns {Promise<void>} Rejects on timeout - callers should treat that
+   *   as "still unknown, not necessarily failed" (the write itself is safe
+   *   in the outbox, if configured - see outbox.js - and will re-ack on
+   *   the next reconnect regardless of whether anything is still waiting).
+   */
+  async waitForAck(path, ts, timeoutMs = 10000) {
+    const already = this.#lastAckedTs.get(path);
+    if (already !== undefined && already >= ts) return;
+    return new Promise((resolve, reject) => {
+      const entry = { ts, resolve, timeout: null };
+      entry.timeout = setTimeout(() => {
+        const waiters = this.#ackWaiters.get(path);
+        if (waiters) {
+          const idx = waiters.indexOf(entry);
+          if (idx !== -1) waiters.splice(idx, 1);
+          if (waiters.length === 0) this.#ackWaiters.delete(path);
+        }
+        reject(new Error(`SyncEngine.waitForAck: timed out waiting for ack of "${path}" (ts=${ts})`));
+      }, timeoutMs);
+      const list = this.#ackWaiters.get(path) ?? [];
+      list.push(entry);
+      this.#ackWaiters.set(path, list);
     });
   }
 
@@ -538,6 +599,30 @@ export class SyncEngine {
    *   `#handleSync`'s unconditional ack send.
    */
   async #handleSyncAck({ path, ts }) {
+    // Record it regardless of outbox/waitForAck usage - see waitForAck()'s
+    // own doc comment for why a caller registering AFTER the ack already
+    // arrived must still see it as covered, not time out waiting for a
+    // message that already came and went.
+    const currentBest = this.#lastAckedTs.get(path);
+    if (currentBest === undefined || ts > currentBest) {
+      this.#lastAckedTs.set(path, ts);
+      capCache(this.#lastAckedTs);
+    }
+    const waiters = this.#ackWaiters.get(path);
+    if (waiters) {
+      const stillWaiting = [];
+      for (const waiter of waiters) {
+        if (waiter.ts <= ts) {
+          clearTimeout(waiter.timeout);
+          waiter.resolve();
+        } else {
+          stillWaiting.push(waiter);
+        }
+      }
+      if (stillWaiting.length) this.#ackWaiters.set(path, stillWaiting);
+      else this.#ackWaiters.delete(path);
+    }
+
     if (!this.#outbox) return; // this SyncEngine doesn't track an outbox - nothing to clear
     try {
       const pending = await this.#outbox.get(path);
@@ -594,4 +679,11 @@ function isPlainObject(value) {
 
 function isValidQuBit(quBit) {
   return isPlainObject(quBit) && typeof quBit.path === 'string' && typeof quBit.ts === 'number';
+}
+
+const MAX_ACK_CACHE_ENTRIES = 2000; // see #lastAckedTs - session-scoped, but cheap to cap defensively (same approach as @qu/identity's key/attestation caches)
+function capCache(map, maxEntries = MAX_ACK_CACHE_ENTRIES) {
+  while (map.size > maxEntries) {
+    map.delete(map.keys().next().value);
+  }
 }

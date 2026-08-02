@@ -1,5 +1,5 @@
 import { QuCrypto } from '@qu/core';
-import { threadMetaPath, threadMessagePath, threadMessagesCollectionId, threadReactionsCollectionId, threadPinsCollectionId, collectionPath } from './paths.js';
+import { threadMetaPath, threadMessagePath, threadMessagesCollectionId, threadReactionsCollectionId, threadPinsCollectionId, threadReadMarkerPath, collectionPath } from './paths.js';
 import { applyFormatting } from './thread-formatting.js';
 import { putPrivate, getPrivate } from './private-storage.js';
 import { isEncryptedEnvelope, resolveReaderXKeys, decryptEnvelope } from './crypto-envelope.js';
@@ -215,12 +215,14 @@ export class ThreadService {
    * per-identity, private read-marker usable by any thread (Chat unread
    * counts, and the header's notification badge - see
    * apps/notifications/client.js and apps/shell/src/main.js). Private
-   * because how far you've read is nobody else's business.
+   * because how far you've read is nobody else's business, but still a
+   * SYNCED path (not LOCAL_ONLY_PREFIX) - the whole point is that marking
+   * something read on one device should be reflected on another.
    * @param {string|number} spaceId @param {string} threadId
    */
   async markRead(spaceId, threadId) {
     const actorPub = await this.#myActorPub();
-    await putPrivate(this.qu, this.identity, `/store/actors/~${actorPub}/private/thread-read/${spaceId}/${threadId}`, { readAt: Date.now() });
+    await putPrivate(this.qu, this.identity, threadReadMarkerPath(spaceId, threadId, actorPub), { readAt: Date.now() });
   }
 
   /**
@@ -229,7 +231,20 @@ export class ThreadService {
    */
   async getLastReadAt(spaceId, threadId) {
     const actorPub = await this.#myActorPub();
-    const marker = await getPrivate(this.qu, this.identity, `/store/actors/~${actorPub}/private/thread-read/${spaceId}/${threadId}`);
+    const path = threadReadMarkerPath(spaceId, threadId, actorPub);
+    // Same miss/hit freshness pattern as CollectionService.list() - without
+    // it, a read-marker published on another device only shows up here
+    // once something UNRELATED happens to re-trigger a read of this exact
+    // path (found via real multi-device testing: the marker only appeared
+    // to "sync" after adding a reaction, which just happened to force a
+    // reload of nearby data - it never synced reliably on its own).
+    const existing = await this.qu.get(path);
+    if (existing) {
+      this.#backgroundRefresh(path);
+    } else if (this.syncFetch) {
+      await this.syncFetch(path).catch(() => {});
+    }
+    const marker = await getPrivate(this.qu, this.identity, path);
     return marker?.readAt ?? 0;
   }
 
@@ -274,9 +289,13 @@ export class ThreadService {
     }
 
     const path = threadMessagePath(spaceId, threadId, messageId);
-    await this.qu.put(path, message, putOptions);
+    const quBit = await this.qu.put(path, message, putOptions);
     await this.collections.addItem(spaceId, threadMessagesCollectionId(threadId), path);
-    return { id: messageId, ...message };
+    // `ts` (the sealed QuBit's own timestamp, not part of `message` itself)
+    // is what a caller needs to confirm THIS exact write via
+    // SyncEngine.waitForAck(path, ts) - see apps/chat/client.js's
+    // confirmSync().
+    return { id: messageId, ...message, ts: quBit.ts };
   }
 
   /**
@@ -510,12 +529,28 @@ export class ThreadService {
     // nothing left to converge on. Trust listRawPaths()'s own backfill.
     const paths = await this.collections.listRawPaths(spaceId, collectionId);
     const byEmoji = {};
-    for (const path of paths) {
-      const quBit = await this.qu.get(path);
+    await Promise.all(paths.map(async (path) => {
+      let quBit = await this.qu.get(path);
+      if (quBit) {
+        // Same-path background refresh - a reactor CHANGING their reaction
+        // (setReaction() always writes to this same fixed per-actor path,
+        // see above) never adds a new collection entry, so the
+        // "collection was empty" backfill above never re-fires for an
+        // updated value - this per-document refresh is what actually
+        // catches that case.
+        this.#backgroundRefresh(path);
+      } else if (this.syncFetch) {
+        // A collection entry can arrive (via the backfill above, or a live
+        // subscribe() push) before this session has ever fetched the
+        // REACTION DOCUMENT itself at that path - without this, such a
+        // reaction showed up as a path with nothing behind it, forever.
+        await this.syncFetch(path).catch(() => {});
+        quBit = await this.qu.get(path);
+      }
       const reactorPub = this.#actorPubOf(quBit);
-      if (!reactorPub || !quBit.val) continue;
+      if (!reactorPub || !quBit.val) return;
       (byEmoji[quBit.val] ??= []).push(reactorPub);
-    }
+    }));
     return byEmoji;
   }
 
@@ -635,7 +670,18 @@ export class ThreadService {
   async getReadReceipts(spaceId, threadId, memberPubs) {
     const result = {};
     await Promise.all(memberPubs.map(async (pub) => {
-      const quBit = await this.qu.get(`/store/${spaceId}/threads/${threadId}/reads/${pub}`);
+      const path = `/store/${spaceId}/threads/${threadId}/reads/${pub}`;
+      let quBit = await this.qu.get(path);
+      // Same miss/hit freshness pattern used throughout this file - this
+      // method previously had NONE at all, so a read receipt published on
+      // another device (or while this session was offline) only ever
+      // appeared once something unrelated happened to re-trigger a read.
+      if (quBit) {
+        this.#backgroundRefresh(path);
+      } else if (this.syncFetch) {
+        await this.syncFetch(path).catch(() => {});
+        quBit = await this.qu.get(path);
+      }
       if (typeof quBit?.val?.upto === 'number') result[pub] = quBit.val.upto;
     }));
     return result;
