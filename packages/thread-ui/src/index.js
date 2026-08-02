@@ -19,17 +19,18 @@
  */
 import { watch } from '@qu/reactive';
 import { paths } from '@qu/services';
+import { renderAvatar } from '@qu/ui';
 
 const STYLE_ID = 'qu-thread-view-style';
 const STYLE = `
   .qu-thread-view { display: flex; flex-direction: column; gap: 0.6rem; }
   .qu-thread-messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; max-height: 60vh; overflow-y: auto; }
   .qu-thread-message { padding: 0.5rem 0.7rem; border: 1px solid #8884; border-radius: 0.5rem; }
-  .qu-thread-author { display: block; font-family: ui-monospace, monospace; font-size: 0.75em; opacity: 0.6; margin-bottom: 0.2rem; }
+  .qu-thread-author { display: block; font-size: 0.8em; font-weight: 600; opacity: 0.75; margin-bottom: 0.2rem; }
   .qu-thread-empty { opacity: 0.6; font-size: 0.9em; }
   .qu-thread-composer { display: flex; gap: 0.4rem; }
   .qu-thread-composer textarea { flex: 1; resize: vertical; min-height: 2.4rem; font: inherit; padding: 0.4rem; }
-  .qu-thread-message-row { display: flex; align-items: flex-start; gap: 0.4rem; }
+  .qu-thread-message-row { display: flex; align-items: flex-start; gap: 0.5rem; }
   .qu-thread-message-row .qu-thread-body-col { flex: 1; min-width: 0; }
   .qu-thread-edit-btn { background: none; border: none; cursor: pointer; opacity: 0.5; font-size: 0.85em; flex-shrink: 0; }
   .qu-thread-edit-btn:hover { opacity: 1; }
@@ -102,16 +103,28 @@ export function mountThreadView(container, {
       listEl.appendChild(li);
       return;
     }
-    for (const message of messages) listEl.appendChild(messageRow(message));
+    // One profile lookup per unique author, not per message - a thread
+    // with many messages from the same few people shouldn't re-resolve
+    // the same profile over and over.
+    const profiles = new Map();
+    await Promise.all([...new Set(messages.map((m) => m.author))].map(async (authorPub) => {
+      const profile = await services.profile.getPublicProfile(authorPub).catch(() => null);
+      if (profile) profiles.set(authorPub, profile);
+    }));
+    if (stopped) return;
+    for (const message of messages) listEl.appendChild(messageRow(message, profiles.get(message.author) ?? null));
     listEl.scrollTop = listEl.scrollHeight;
   }
 
-  function messageRow(message) {
+  function messageRow(message, profile) {
     const li = document.createElement('li');
     li.className = 'qu-thread-message';
+    const fallbackName = `~${message.author.slice(0, 10)}…`;
+    const authorName = profile?.alias || fallbackName;
+
     const author = document.createElement('span');
     author.className = 'qu-thread-author';
-    author.textContent = `~${message.author.slice(0, 10)}…`;
+    author.textContent = authorName;
     if (message.editedAt) {
       const edited = document.createElement('span');
       edited.className = 'qu-thread-edited-mark';
@@ -125,6 +138,7 @@ export function mountThreadView(container, {
 
     const row = document.createElement('div');
     row.className = 'qu-thread-message-row';
+    row.appendChild(renderAvatar(message.author, authorName, profile?.avatar ?? null, { size: '1.8rem' }));
     const bodyCol = document.createElement('div');
     bodyCol.className = 'qu-thread-body-col';
     bodyCol.append(author, body);

@@ -31,6 +31,7 @@ import { QuIdentityEngine, actorPath } from '@qu/identity';
 import { SyncEngine, WebSocketClientTransport } from '@qu/sync';
 import { createServices, paths } from '@qu/services';
 import { watch } from '@qu/reactive';
+import { renderAvatar } from '@qu/ui';
 import { parseHash, buildHash } from './router.js';
 import { resolveFavoriteApps } from './nav.js';
 import { loadClientModule } from './load-client-module.js';
@@ -231,7 +232,10 @@ class Shell {
     const idLink = document.createElement('a');
     idLink.className = 'qu-shell-id';
     idLink.href = buildHash(`~${this.actorPub}`);
-    idLink.textContent = `~${this.actorPub.slice(0, 10)}…`;
+    let idAvatarEl = renderAvatar(this.actorPub, '', null, { size: '1.6rem' });
+    const idText = document.createElement('span');
+    idText.textContent = `~${this.actorPub.slice(0, 10)}…`;
+    idLink.append(idAvatarEl, idText);
     // watch() as TRIGGER, re-fetch via ProfileService - not the raw notify
     // value, which for a profile is a signed envelope (`{profile,
     // signature}`, see @qu/identity's `#publishProfileWithKeys()`), not the
@@ -240,7 +244,10 @@ class Shell {
     // data (see @qu/reactive's own doc comment).
     watch(this.qu, actorPath(this.actorPub, 'profile'), async () => {
       const profile = await this.Qu.profile.getOwnProfile();
-      idLink.textContent = profile.alias || `~${this.actorPub.slice(0, 10)}…`;
+      idText.textContent = profile.alias || `~${this.actorPub.slice(0, 10)}…`;
+      const nextAvatar = renderAvatar(this.actorPub, profile.alias, profile.avatar, { size: '1.6rem' });
+      idAvatarEl.replaceWith(nextAvatar);
+      idAvatarEl = nextAvatar;
     });
 
     header.append(brand, backBtn, forwardBtn, spacer, this.headerMenu.el, bellBtn, idLink);
@@ -288,21 +295,32 @@ class Shell {
    * Live unread-count badge on the header bell - reuses the exact
    * notifications space/thread convention `apps/notifications/client.js`
    * writes to and reads from (space `notifications-<myPub>`, thread id
-   * `notifications`, see THREAD_PRESETS.notifications). Recomputed on two
+   * `notifications`, see THREAD_PRESETS.notifications). Recomputed on THREE
    * independent triggers:
    *   - `watch()` on the thread's message-list path - a brand new
    *     notification arriving (locally or via sync).
+   *   - `watch()` on this identity's OWN read-marker path, PLUS a `syncFetch`
+   *     on both watches (see @qu/reactive's `watch()` own doc comment) - a
+   *     read marker published from ANOTHER DEVICE lands on a path nothing
+   *     else here would otherwise re-check until some unrelated write
+   *     happened to touch the message list too (found via real multi-device
+   *     testing: without this, a notification marked read elsewhere kept
+   *     showing as unread here for one to several reload cycles, until pure
+   *     luck lined up a background refresh with a re-render).
    *   - the `qu:notifications-read` window event, dispatched by
    *     apps/notifications/client.js's feed view right after it calls
-   *     `markRead()` - that write lands on a SEPARATE, private path (see
-   *     ThreadService), which the watch() above has no way to see, so the
-   *     badge would otherwise only catch up on the NEXT new notification
-   *     instead of clearing the moment the feed is opened. Same cross-app
-   *     window-event convention `qu:favorites-changed` already uses.
+   *     `markRead()` FROM THIS device - that write lands on the same
+   *     read-marker path the second `watch()` above covers, but a LOCAL
+   *     write's own notify fires before this method's watch() has had a
+   *     chance to register in some mount orderings, so the explicit event
+   *     stays as a belt-and-braces trigger. Same cross-app window-event
+   *     convention `qu:favorites-changed` already uses.
    */
   _watchNotifBadge() {
     const spaceId = `notifications-${this.actorPub}`;
     const listPath = paths.collectionPath(spaceId, paths.threadMessagesCollectionId('notifications'));
+    const readMarkerPath = paths.threadReadMarkerPath(spaceId, 'notifications', this.actorPub);
+    const syncFetch = (path) => this.sync.fetch(path);
     const update = async () => {
       const [messages, lastReadAt] = await Promise.all([
         this.Qu.threads.listMessages(spaceId, 'notifications'),
@@ -312,7 +330,8 @@ class Shell {
       this.notifBadgeEl.textContent = unread > 9 ? '9+' : String(unread);
       this.notifBadgeEl.hidden = unread === 0;
     };
-    watch(this.qu, listPath, update);
+    watch(this.qu, listPath, update, { syncFetch });
+    watch(this.qu, readMarkerPath, update, { initial: false, syncFetch });
     window.addEventListener('qu:notifications-read', update);
   }
 
@@ -525,6 +544,13 @@ class Shell {
       // exactly what that means. Used by apps/profile/client.js's backup
       // section; any app COULD call it, but only Profile currently does.
       wipeIdentity: this.wipeIdentity,
+      // Lets a mounted app know when the RELAY has durably persisted a
+      // specific write, not just that it was sent - see SyncEngine's own
+      // `waitForAck()` doc comment. apps/chat/client.js's `confirmSync()`
+      // is the first consumer (replacing a single fetch()-and-hope attempt
+      // that could strand a message's tick in "syncing…" forever).
+      waitForAck: (path, ts, timeoutMs) => this.sync.waitForAck(path, ts, timeoutMs),
+      onReconnect: (cb) => this.sync.onReconnect(cb),
     });
     this.stopMountedApp = typeof stop === 'function' ? stop : null;
   }

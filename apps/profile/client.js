@@ -23,6 +23,7 @@
 import { createI18n, getStoredLocale, setLocale } from '@qu/i18n';
 import { watch } from '@qu/reactive';
 import { actorPath, QuIdentityEngine } from '@qu/identity';
+import { renderAvatar } from '@qu/ui';
 import { renderQrCode, startCamera, scanQrFromVideo } from '@qu/qr';
 
 /** Locales every app's dictionary in this codebase actually ships - see @qu/i18n's own doc comment for why this is a device preference, not per-identity. */
@@ -152,6 +153,7 @@ const STYLE = `
   .qu-profile-settings a { color: inherit; }
   .qu-profile-actions { display: flex; gap: 0.8rem; align-items: center; margin-top: 0.5rem; }
   .qu-profile-empty { opacity: 0.7; }
+  .qu-profile-avatar { margin: 0.3rem 0 0.9rem; }
   .qu-profile-backup { display: flex; flex-direction: column; gap: 0.6rem; max-width: 32rem; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #8884; }
   .qu-profile-backup-buttons { display: flex; flex-wrap: wrap; gap: 0.6rem; }
   .qu-profile-backup-panel { border: 1px solid #8884; border-radius: 0.5rem; padding: 0.8rem; display: flex; flex-direction: column; gap: 0.6rem; }
@@ -219,6 +221,9 @@ async function renderOwnProfile(container, services, isStopped, qu, wipeIdentity
   heading.textContent = t('titleOwn');
   container.appendChild(heading);
 
+  const ownAvatar = renderAvatar(ownProfile.pub, ownProfile.alias, ownProfile.avatar, { size: '4.5rem' });
+  ownAvatar.classList.add('qu-profile-avatar');
+  container.appendChild(ownAvatar);
   container.appendChild(keysSection(ownProfile.pub, ownProfile.epub));
 
   const form = document.createElement('form');
@@ -562,11 +567,9 @@ async function renderPublicProfile(container, services, targetPub, isStopped) {
   heading.textContent = profile?.alias ? `${profile.alias}` : t('titleOther');
   container.appendChild(heading);
 
-  if (profile?.avatar) {
-    const avatar = document.createElement('p');
-    avatar.textContent = profile.avatar;
-    container.appendChild(avatar);
-  }
+  const publicAvatar = renderAvatar(targetPub, profile?.alias ?? '', profile?.avatar, { size: '4.5rem' });
+  publicAvatar.classList.add('qu-profile-avatar');
+  container.appendChild(publicAvatar);
 
   container.appendChild(keysSection(targetPub, profile?.epub ?? ''));
 
