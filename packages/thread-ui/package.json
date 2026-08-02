@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "@qu/reactive": "^2.0.0",
-    "@qu/services": "^2.0.0"
+    "@qu/services": "^2.0.0",
+    "@qu/ui": "^2.0.0"
   },
   "license": "MIT"
 }
