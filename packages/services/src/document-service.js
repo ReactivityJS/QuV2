@@ -1,5 +1,6 @@
 import { documentPath } from './paths.js';
 import { unwrap } from './unwrap.js';
+import { createFreshnessTracker } from './sync-freshness.js';
 
 /**
  * DOCUMENT SERVICE — the Entity API for documents.
@@ -11,6 +12,8 @@ import { unwrap } from './unwrap.js';
  * doesn't duplicate that, it just gives it a friendly front door.
  */
 export class DocumentService {
+  #backgroundRefresh;
+
   /**
    * @param {import('@qu/core').QuCore} qu
    * @param {(path: string) => Promise<object|null>} [syncFetch] - Optional:
@@ -18,10 +21,14 @@ export class DocumentService {
    *   `get()` itself for why this matters. Without it (e.g. a server-side
    *   QuCore with no single upstream peer), a local miss is just returned
    *   as `null`, same as before.
+   * @param {() => number} [getGeneration] - Optional: `SyncEngine.getGeneration()`
+   *   (see @qu/sync) - enables `get()`'s background staleness check for a
+   *   document that already exists locally (see @qu/services/sync-freshness.js).
    */
-  constructor(qu, syncFetch = null) {
+  constructor(qu, syncFetch = null, getGeneration = null) {
     this.qu = qu;
     this.syncFetch = syncFetch;
+    this.#backgroundRefresh = createFreshnessTracker(syncFetch, getGeneration);
   }
 
   /**
@@ -45,18 +52,29 @@ export class DocumentService {
    * document (e.g. a Todo list) created by someone else, before this
    * session ever subscribed, saw a permanent "not found" instead of the
    * real content once it synced.
+   *
+   * A LOCAL HIT also gets a background staleness check (see
+   * sync-freshness.js) - without it, a document this session already knew
+   * about before going offline/closing would never notice it changed while
+   * away, since the miss-only backfill above never runs again once
+   * something is cached. Fire-and-forget: never delays this call, any
+   * correction arrives via `qu.onStorageChange` -> `watch()` like any other
+   * live sync write.
    * @param {string|number} spaceId
    * @param {string} docId
    * @returns {Promise<object|null>}
    */
   async get(spaceId, docId) {
     const path = documentPath(spaceId, docId);
-    let quBit = await this.qu.get(path);
-    if (!quBit && this.syncFetch) {
-      await this.syncFetch(path).catch(() => {});
-      quBit = await this.qu.get(path);
+    const quBit = await this.qu.get(path);
+    if (quBit) {
+      this.#backgroundRefresh(path);
+      return unwrap(quBit);
     }
-    return quBit ? unwrap(quBit) : null;
+    if (!this.syncFetch) return null;
+    await this.syncFetch(path).catch(() => {});
+    const retried = await this.qu.get(path);
+    return retried ? unwrap(retried) : null;
   }
 
   /**

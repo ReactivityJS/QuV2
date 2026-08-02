@@ -1,5 +1,6 @@
 import { collectionPath } from './paths.js';
 import { unwrap, unwrapAll } from './unwrap.js';
+import { createFreshnessTracker } from './sync-freshness.js';
 
 const MAX_MUTATE_RETRIES = 5;
 
@@ -34,10 +35,26 @@ const MAX_MUTATE_RETRIES = 5;
  */
 export class CollectionService {
   #locks = new Map(); // "spaceId:collectionId" -> tail of the promise chain serializing addItem()/removeItem() for that collection
+  #backgroundRefresh;
 
-  /** @param {import('@qu/core').QuCore} qu */
-  constructor(qu) {
+  /**
+   * @param {import('@qu/core').QuCore} qu
+   * @param {(path: string) => Promise<object|null>} [syncFetch] - Optional:
+   *   `SyncEngine.fetch()` (see @qu/sync) - backfills `list()`/`listRawPaths()`
+   *   on a local miss (a collection this session has never seen before,
+   *   e.g. a shared link opened for the first time) AND background-refreshes
+   *   one that already exists locally but might be stale (this session was
+   *   offline while a peer added/removed an item - see sync-freshness.js).
+   *   Previously this Service had NO syncFetch of its own at all - every
+   *   caller that needed backfill (Forum, Calendar, Geo Chase) had to
+   *   remember to fetch the collection path itself before calling list();
+   *   an app that forgot got a silent false-empty/stale result forever.
+   * @param {() => number} [getGeneration] - `SyncEngine.getGeneration()`, see sync-freshness.js.
+   */
+  constructor(qu, syncFetch = null, getGeneration = null) {
     this.qu = qu;
+    this.syncFetch = syncFetch;
+    this.#backgroundRefresh = createFreshnessTracker(syncFetch, getGeneration);
   }
 
   /**
@@ -54,12 +71,22 @@ export class CollectionService {
   /**
    * @param {string|number} spaceId
    * @param {string} collectionId
-   * @returns {Promise<Array<*>|null>} The resolved, unwrapped items, or null if the collection doesn't exist.
+   * @returns {Promise<Array<*>|null>} The resolved, unwrapped items, or null
+   *   if the collection doesn't exist ANYWHERE (locally or, once backfilled,
+   *   on the network either) - see the constructor's own doc comment for
+   *   the backfill/background-refresh this now does.
    */
   async list(spaceId, collectionId) {
-    const quBit = await this.qu.get(collectionPath(spaceId, collectionId));
-    if (!quBit) return null;
-    return unwrapAll(quBit.val);
+    const path = collectionPath(spaceId, collectionId);
+    const quBit = await this.qu.get(path);
+    if (quBit) {
+      this.#backgroundRefresh(path);
+      return unwrapAll(quBit.val);
+    }
+    if (!this.syncFetch) return null;
+    await this.syncFetch(path).catch(() => {});
+    const retried = await this.qu.get(path);
+    return retried ? unwrapAll(retried.val) : null;
   }
 
   /**
@@ -137,8 +164,15 @@ export class CollectionService {
    * @returns {Promise<string[]>}
    */
   async listRawPaths(spaceId, collectionId) {
-    const { adapter, rel } = this.qu.resolveMount(collectionPath(spaceId, collectionId));
-    const raw = await adapter.get(rel);
+    const path = collectionPath(spaceId, collectionId);
+    const { adapter, rel } = this.qu.resolveMount(path);
+    let raw = await adapter.get(rel);
+    if (raw) {
+      this.#backgroundRefresh(path);
+    } else if (this.syncFetch) {
+      await this.syncFetch(path).catch(() => {});
+      raw = await adapter.get(rel);
+    }
     return raw?.val?.$list ?? [];
   }
 }

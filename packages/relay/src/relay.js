@@ -392,12 +392,30 @@ export class QuRelay {
       // (`spaceId`), not encrypted content, so the notification can
       // deep-link straight to the specific calendar/game instead of just
       // the app root.
+      // Chat deep-links to the SPECIFIC room, not just `#/chat` (the room
+      // list) - see apps/chat/client.js's own doc comment for its route
+      // scheme (`#/chat/<peerActorPub>` for 1:1, `#/chat/g/<groupId>` for a
+      // group). A group room's `threadId` IS its groupId (see
+      // THREAD_PRESETS.group), so that's directly usable; a 1:1 room's
+      // `threadId` is a one-way hash of both members' pubkeys (see
+      // apps/chat/client.js's `roomId()`) and can't be reversed back into a
+      // pubkey - but it doesn't need to be: a 1:1 room has EXACTLY two
+      // readers, so from THIS candidate's point of view the "other side" of
+      // the conversation is simply whoever authored this message (`authorPub`
+      // is already excluded from `candidates` above, so it's never the
+      // recipient themselves).
+      const chatUrl = appId === 'chat'
+        ? (config.kind === 'group' ? `#/chat/g/${threadId}` : `#/chat/${authorPub}`)
+        : null;
+
       const payload = calendarFunctionName === 'invite'
         ? { title: 'Calendar invitation', body: 'You were invited to a shared calendar.', appId, url: `#/calendar/${calendarMatch[1]}` }
         : calendarFunctionName === 'eventChange'
         ? { title: 'Calendar updated', body: 'A shared calendar you belong to has new activity.', appId, url: `#/calendar/${calendarMatch[1]}` }
         : geochaseFunctionName === 'invite'
         ? { title: 'Geo Chase invitation', body: 'You were invited to a Geo Chase game.', appId, url: `#/geochase/${geochaseMatch[1]}` }
+        : chatUrl
+        ? { title: mention ? 'Mentioned in Chat' : 'New message in Chat', body: `~${(authorPub ?? 'someone').slice(0, 10)}… sent a message`, appId, url: chatUrl }
         : {
             title: mention ? `Mentioned in ${appId}` : `New message in ${appId}`,
             body: `~${(authorPub ?? 'someone').slice(0, 10)}… sent a message`,
