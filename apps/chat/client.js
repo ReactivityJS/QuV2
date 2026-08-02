@@ -239,7 +239,7 @@ const STYLE = `
   @keyframes qu-chat-spin { to { transform: rotate(360deg); } }
   .qu-chat-msg-actions-btn { all: unset; cursor: pointer; padding: 0 0.2rem; opacity: 0.7; line-height: 1; }
   .qu-chat-msg-actions-btn:hover { opacity: 1; }
-  .qu-chat-msg-quick-react-btn { all: unset; cursor: pointer; padding: 0 0.2rem; opacity: 0.55; line-height: 1; font-size: 0.95em; }
+  .qu-chat-msg-quick-react-btn { all: unset; cursor: pointer; padding: 0 0.2rem; opacity: 0.8; line-height: 1; font-size: 1.6em; }
   .qu-chat-msg-quick-react-btn:hover { opacity: 1; }
   .qu-chat-msg-row[data-anchored="true"] .qu-chat-msg-outer { animation: qu-chat-anchor-flash 1.6s ease; }
   @keyframes qu-chat-anchor-flash { 0%, 100% { background: #8881; } 30% { background: color-mix(in srgb, var(--qu-chat-own-color, #3390ec) 35%, transparent); } }
@@ -2306,6 +2306,20 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
 
       const meta = document.createElement('div');
       meta.className = 'qu-chat-msg-meta';
+      // Always-visible "add a reaction" affordance, separate from the ⋮
+      // menu's own "React" item - a dedicated one-tap icon instead of
+      // menu → React being the only way in, matching the common
+      // messenger pattern (Matrix, Telegram, Discord, ...) of a
+      // leftmost, clearly-visible quick-react icon ahead of the rest of
+      // the message's own metadata (pin/edited/time/tick) and the "⋮"
+      // menu, which stays last.
+      const quickReactBtn = document.createElement('button');
+      quickReactBtn.type = 'button';
+      quickReactBtn.className = 'qu-chat-msg-quick-react-btn';
+      quickReactBtn.textContent = '😊';
+      quickReactBtn.title = t('react');
+      quickReactBtn.addEventListener('click', (e) => { e.stopPropagation(); openReactionPopup(message, quickReactBtn); });
+      meta.appendChild(quickReactBtn);
       if (isPinned) {
         const pinBadge = document.createElement('span');
         pinBadge.className = 'qu-chat-msg-pin-badge';
@@ -2335,18 +2349,6 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
         renderTickState(tick, tickStateFor(message.id, false));
         meta.appendChild(tick);
       }
-      // Always-visible "add a reaction" affordance, separate from the ⋮
-      // menu's own "React" item - a dedicated one-tap icon instead of
-      // menu → React being the only way in, matching the common
-      // messenger pattern of a quick-react button living right next to
-      // the existing reactions themselves.
-      const quickReactBtn = document.createElement('button');
-      quickReactBtn.type = 'button';
-      quickReactBtn.className = 'qu-chat-msg-quick-react-btn';
-      quickReactBtn.textContent = '🙂';
-      quickReactBtn.title = t('react');
-      quickReactBtn.addEventListener('click', (e) => { e.stopPropagation(); openReactionPopup(message, quickReactBtn); });
-      meta.appendChild(quickReactBtn);
 
       const actionsBtn = document.createElement('button');
       actionsBtn.type = 'button';
