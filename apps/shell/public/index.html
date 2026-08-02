@@ -11,8 +11,21 @@
   <title>QUniverse</title>
   <style>
     :root { color-scheme: light dark; }
-    body { font-family: system-ui, sans-serif; margin: 0; }
-    .qu-shell-header { display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1rem; border-bottom: 1px solid #8884; }
+    /* A bounded height chain from html all the way to .qu-shell-screen -
+       without it, "height: 100%" (used by apps/chat's own root, so its
+       message list can be an internally-scrolling region with a
+       sticky-pinned composer) resolves against an unconstrained ancestor
+       and collapses to the content's natural height instead, silently
+       turning "scroll inside the message list" into "scroll the whole
+       page" (no error, just the wrong element moves). screenEl itself
+       becomes the actual scroll container (overflow-y: auto) rather than
+       the body, which every OTHER app keeps working with unchanged - a
+       page whose content is taller than the available space still
+       scrolls exactly as before, just with the header staying pinned
+       instead of scrolling away with it. */
+    html, body { height: 100%; }
+    body { font-family: system-ui, sans-serif; margin: 0; display: flex; flex-direction: column; }
+    .qu-shell-header { display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1rem; border-bottom: 1px solid #8884; flex-shrink: 0; }
     .qu-shell-history-btn { background: none; border: 1px solid #8884; border-radius: 0.3rem; cursor: pointer; font: inherit; line-height: 1; padding: 0.3rem 0.5rem; color: inherit; }
     .qu-shell-brand { display: inline-flex; text-decoration: none; color: inherit; }
     .qu-shell-spacer { flex: 1; }
@@ -20,8 +33,8 @@
     .qu-shell-id:hover { text-decoration: underline; }
     .qu-shell-bell { position: relative; display: inline-flex; text-decoration: none; color: inherit; font-size: 1.1em; padding: 0.2rem; }
     .qu-shell-bell-badge { position: absolute; top: -0.3rem; right: -0.4rem; background: #c00; color: #fff; border-radius: 1rem; font-size: 0.6rem; line-height: 1; padding: 0.2rem 0.35rem; font-family: system-ui, sans-serif; }
-    .qu-shell-screen { padding: 1rem; }
-    .qu-shell-toolbar { display: flex; justify-content: flex-end; padding: 0.3rem 1rem 0; }
+    .qu-shell-screen { padding: 1rem; box-sizing: border-box; flex: 1; min-height: 0; overflow-y: auto; }
+    .qu-shell-toolbar { display: flex; justify-content: flex-end; padding: 0.3rem 1rem 0; flex-shrink: 0; }
     .qu-shell-error { color: #c00; }
 
     /* Disclosure menu (header dropdown + per-app context menu, see menu.js) */

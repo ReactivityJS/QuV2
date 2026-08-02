@@ -75,6 +75,12 @@ const DICT = {
     voiceNotSupported: 'Voice messages aren\'t supported in this browser.', voiceStart: 'Start recording',
     voicePause: 'Pause', voiceResume: 'Resume', voiceStop: 'Stop', voiceSend: 'Send', voiceDiscard: 'Discard',
     locationNotSupported: 'Location sharing isn\'t supported in this browser.', locationFailed: 'Couldn\'t get your location.',
+    settings: 'Chat settings', settingsBtn: 'Chat settings', showAliasIn1to1: 'Show sender name in 1:1 chats',
+    ownColor: 'Your message color', save: 'Save', saved: 'Saved',
+    search: 'Search', searchPlaceholder: 'Search messages…', searchAll: 'All', searchLinks: '🔗 Links', searchFiles: '📎 Files',
+    noResults: 'No results', searchThisChat: 'Search this chat', searchEverywhere: 'Search all chats',
+    synced: 'Delivered to server', pendingSync: 'Not yet delivered to server', readBy: 'Read',
+    permalink: 'Click to copy a link to this message',
   },
   de: {
     title: 'Chats', empty: 'Noch keine Chats — Kontakt aus der Nutzerliste hinzufügen oder eine Gruppe starten.', back: '←',
@@ -94,17 +100,35 @@ const DICT = {
     voiceNotSupported: 'Sprachnachrichten werden von diesem Browser nicht unterstützt.', voiceStart: 'Aufnahme starten',
     voicePause: 'Pause', voiceResume: 'Fortsetzen', voiceStop: 'Stopp', voiceSend: 'Senden', voiceDiscard: 'Verwerfen',
     locationNotSupported: 'Standortfreigabe wird von diesem Browser nicht unterstützt.', locationFailed: 'Standort konnte nicht ermittelt werden.',
+    settings: 'Chat-Einstellungen', settingsBtn: 'Chat-Einstellungen', showAliasIn1to1: 'Absendername in 1:1-Chats anzeigen',
+    ownColor: 'Farbe deiner Nachrichten', save: 'Speichern', saved: 'Gespeichert',
+    search: 'Suche', searchPlaceholder: 'Nachrichten durchsuchen…', searchAll: 'Alle', searchLinks: '🔗 Links', searchFiles: '📎 Dateien',
+    noResults: 'Keine Treffer', searchThisChat: 'Diesen Chat durchsuchen', searchEverywhere: 'Alle Chats durchsuchen',
+    synced: 'Auf dem Server gespeichert', pendingSync: 'Noch nicht auf dem Server gespeichert', readBy: 'Gelesen',
+    permalink: 'Klicken, um einen Link zu dieser Nachricht zu kopieren',
   },
 };
 const { t } = createI18n(DICT);
 
 const STYLE_ID = 'qu-chat-style';
 const STYLE = `
-  .qu-chat-app { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  /* This class is added directly onto the shell's own screenEl (see
+     mount() below - Chat is the one app that manages its own internal
+     scroll region rather than letting the whole screen scroll), which
+     already carries the shell's own qu-shell-screen rule (padding +
+     "this element itself scrolls" - see apps/shell/public/index.html).
+     Both rules apply to the SAME element, cascading per-property, not
+     per-selector - overflow/padding here are declared specifically to
+     cancel those out, or the shell's own scrolling and Chat's internal
+     qu-chat-messages scrolling fight over the same box (nested
+     auto-scroll containers with a stale outer scrollHeight), and the
+     1rem padding eats into the height budget on top of that. */
+  .qu-chat-app { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; padding: 0; box-sizing: border-box; }
   .qu-chat-list-header { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; margin-bottom: 0.6rem; }
   .qu-chat-list-header h1 { margin: 0; }
-  .qu-chat-new-group-btn { border: none; background: #3390ec; color: #fff; border-radius: 50%; width: 2.4rem; height: 2.4rem; font-size: 1.2rem; cursor: pointer; flex-shrink: 0; }
-  .qu-chat-new-group-btn:hover { background: #2b7cd3; }
+  .qu-chat-header-actions { display: flex; gap: 0.4rem; }
+  .qu-chat-header-actions > * { border: none; background: #3390ec; color: #fff; border-radius: 50%; width: 2.4rem; height: 2.4rem; font-size: 1.2rem; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; text-decoration: none; box-sizing: border-box; }
+  .qu-chat-header-actions > *:hover { background: #2b7cd3; }
   .qu-chat-rooms { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
   .qu-chat-room-link { display: flex; align-items: center; gap: 0.7rem; padding: 0.5rem 0.4rem; text-decoration: none; color: inherit; border-radius: 0.5rem; }
   .qu-chat-room-link:hover { background: #8881; }
@@ -141,41 +165,71 @@ const STYLE = `
   .qu-chat-pinned-jump-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.85em; }
   .qu-chat-pinned-count { all: unset; cursor: pointer; flex-shrink: 0; font-size: 0.78em; opacity: 0.7; padding: 0.1rem 0.4rem; border: 1px solid #8886; border-radius: 999px; }
 
-  .qu-chat-messages { list-style: none; margin: 0; padding: 0.3rem 0; display: flex; flex-direction: column; gap: 0.4rem; flex: 1; min-height: 0; overflow-y: auto; }
+  .qu-chat-messages { list-style: none; margin: 0; padding: 0.3rem 0; display: flex; flex-direction: column; gap: 0.5rem; flex: 1; min-height: 0; overflow-y: auto; scroll-behavior: smooth; }
   .qu-chat-msg-row { display: flex; flex-direction: column; max-width: min(32rem, 82%); }
   .qu-chat-msg-row[data-mine="true"] { align-self: flex-end; }
   .qu-chat-msg-row[data-mine="false"] { align-self: flex-start; }
-  .qu-chat-msg-header { display: flex; align-items: center; gap: 0.4rem; font-size: 0.74em; opacity: 0.65; padding: 0 0.2rem 0.15rem; }
+
+  /* OUTER "bubble" - a subtle card holding the chrome (optional alias
+     header, footer with reactions/time/read-tick/menu). Deliberately much
+     less visually prominent than the INNER message bubble below, so the
+     actual content stays what draws the eye - the outer card just gives
+     header/footer somewhere to live without floating in empty space. */
+  .qu-chat-msg-outer { display: flex; flex-direction: column; gap: 0.15rem; background: #8881; border-radius: 1.1rem; padding: 0.3rem 0.5rem; }
+  .qu-chat-msg-header { display: flex; align-items: center; gap: 0.4rem; font-size: 0.74em; opacity: 0.65; padding: 0.1rem 0.3rem 0; }
   .qu-chat-msg-author { font-weight: 600; color: #3390ec; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .qu-chat-msg-pin-badge { flex-shrink: 0; }
-  .qu-chat-msg-actions-btn { all: unset; margin-left: auto; cursor: pointer; padding: 0 0.3rem; opacity: 0.7; }
-  .qu-chat-msg-actions-btn:hover { opacity: 1; }
-  .qu-chat-message { padding: 0.4rem 0.65rem; border-radius: 1rem; background: #8882; }
-  .qu-chat-msg-row[data-mine="true"] .qu-chat-message { background: #3390ec; color: #fff; border-bottom-right-radius: 0.25rem; }
-  .qu-chat-msg-row[data-mine="false"] .qu-chat-message { border-bottom-left-radius: 0.25rem; }
+
+  /* INNER bubble - the actual message, visually offset from the outer card by its own stronger background/color. */
+  .qu-chat-message { padding: 0.45rem 0.7rem; border-radius: 0.9rem; background: canvas; }
+  .qu-chat-msg-row[data-mine="true"] .qu-chat-message { background: var(--qu-chat-own-color, #3390ec); color: #fff; }
   .qu-chat-reply-quote, .qu-chat-forward-note { font-size: 0.8em; opacity: 0.8; border-left: 2px solid currentColor; padding-left: 0.4rem; margin-bottom: 0.3rem; cursor: pointer; }
   .qu-chat-forward-note { cursor: default; opacity: 0.65; }
   .qu-chat-quote-author { font-weight: 600; }
   .qu-chat-body { white-space: pre-wrap; overflow-wrap: break-word; }
-  .qu-chat-attachment img, .qu-chat-attachment video { max-width: 100%; max-height: 18rem; border-radius: 0.6rem; margin-top: 0.3rem; display: block; }
+  .qu-chat-body a { color: inherit; text-decoration: underline; }
+  .qu-chat-link-preview { display: block; margin-top: 0.4rem; padding: 0.4rem 0.6rem; border-radius: 0.6rem; background: #0002; text-decoration: none; color: inherit; }
+  .qu-chat-msg-row[data-mine="true"] .qu-chat-link-preview { background: #fff2; }
+  .qu-chat-link-preview-host { font-size: 0.72em; opacity: 0.75; text-transform: uppercase; letter-spacing: 0.02em; }
+  .qu-chat-link-preview-title { font-size: 0.88em; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qu-chat-attachment img, .qu-chat-attachment video { max-width: 100%; max-height: 18rem; border-radius: 0.6rem; margin-top: 0.3rem; display: block; cursor: pointer; }
   .qu-chat-attachment audio { margin-top: 0.3rem; max-width: 16rem; }
   .qu-chat-attachment a { display: inline-flex; align-items: center; gap: 0.3rem; margin-top: 0.3rem; color: inherit; }
   .qu-chat-voice-label { font-size: 0.8em; opacity: 0.8; margin-top: 0.2rem; }
   .qu-chat-location { display: flex; align-items: center; gap: 0.6rem; text-decoration: none; color: inherit; }
   .qu-chat-location img { width: 4.5rem; height: 4.5rem; border-radius: 0.5rem; object-fit: cover; flex-shrink: 0; background: #8882; }
   .qu-chat-location-coords { font-size: 0.72em; opacity: 0.7; }
-  .qu-chat-reactions { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.3rem; }
-  .qu-chat-msg-row[data-mine="true"] .qu-chat-reactions { justify-content: flex-end; }
+
+  /* FOOTER: reactions bottom-left, time/read-tick/pin/menu bottom-right - matches how most messengers place these, and gives the "⋮" menu company instead of floating alone at the top when there's no alias header shown. */
+  .qu-chat-msg-footer { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0 0.2rem; min-height: 1.3rem; }
+  .qu-chat-reactions { display: flex; flex-wrap: wrap; gap: 0.25rem; }
   .qu-chat-reaction-chip { border: 1px solid #8886; border-radius: 999px; padding: 0.05rem 0.45rem; font-size: 0.82em; cursor: pointer; background: #8881; }
-  .qu-chat-reaction-chip[data-mine="true"] { border-color: #3390ec; background: #3390ec33; }
-  .qu-chat-msg-meta { display: flex; justify-content: flex-end; align-items: center; gap: 0.3rem; margin-top: 0.15rem; font-size: 0.68em; opacity: 0.65; }
-  .qu-chat-tick[data-read="true"] { opacity: 1; color: #3390ec; }
-  .qu-chat-msg-row[data-mine="true"] .qu-chat-tick[data-read="true"] { color: #cdeaff; }
+  .qu-chat-reaction-chip[data-mine="true"] { border-color: var(--qu-chat-own-color, #3390ec); background: color-mix(in srgb, var(--qu-chat-own-color, #3390ec) 20%, transparent); }
+  .qu-chat-msg-meta { display: flex; align-items: center; gap: 0.35rem; font-size: 0.68em; opacity: 0.65; margin-left: auto; }
+  .qu-chat-msg-pin-badge { flex-shrink: 0; }
+  .qu-chat-msg-time { all: unset; cursor: pointer; font: inherit; opacity: 1; }
+  .qu-chat-msg-time:hover { text-decoration: underline; }
+  .qu-chat-tick { display: inline-flex; align-items: center; gap: 0.1rem; }
+  .qu-chat-tick[data-state="read"] { opacity: 1; color: var(--qu-chat-own-color, #3390ec); }
+  .qu-chat-tick-spinner { display: inline-block; animation: qu-chat-spin 1s linear infinite; font-size: 0.9em; }
+  @keyframes qu-chat-spin { to { transform: rotate(360deg); } }
+  .qu-chat-msg-actions-btn { all: unset; cursor: pointer; padding: 0 0.2rem; opacity: 0.7; line-height: 1; }
+  .qu-chat-msg-actions-btn:hover { opacity: 1; }
+  .qu-chat-msg-row[data-anchored="true"] .qu-chat-msg-outer { animation: qu-chat-anchor-flash 1.6s ease; }
+  @keyframes qu-chat-anchor-flash { 0%, 100% { background: #8881; } 30% { background: color-mix(in srgb, var(--qu-chat-own-color, #3390ec) 35%, transparent); } }
 
   .qu-chat-popup { position: fixed; z-index: 60; background: canvas; color: canvastext; border: 1px solid #8884; border-radius: 0.7rem; padding: 0.3rem; min-width: 11rem; box-shadow: 0 4px 16px #00000050; }
   .qu-chat-popup-item { all: unset; display: block; width: 100%; box-sizing: border-box; padding: 0.5rem 0.6rem; border-radius: 0.5rem; cursor: pointer; font-size: 0.9em; }
   .qu-chat-popup-item:hover { background: #8882; }
   .qu-chat-reaction-popup { position: fixed; z-index: 60; background: canvas; border: 1px solid #8884; border-radius: 999px; padding: 0.3rem; gap: 0.15rem; box-shadow: 0 4px 16px #00000050; }
+  /* display split out into its own :not([hidden]) rule (not folded into
+     the base rule above) - this popup, like the lightbox further down, is
+     appended to document.body, OUTSIDE .qu-chat-app's own subtree, so the
+     blanket ".qu-chat-app [hidden]" rule below never reaches it; an
+     unconditional "display" here would otherwise always beat the
+     browser's built-in "[hidden] { display: none }" purely by appearing
+     later in this stylesheet, regardless of the element's actual .hidden
+     state - see that rule's own doc comment for the full explanation of
+     this bug class. */
   .qu-chat-reaction-popup:not([hidden]) { display: flex; }
   .qu-chat-reaction-popup button { all: unset; cursor: pointer; font-size: 1.3rem; line-height: 1; padding: 0.25rem; border-radius: 50%; }
   .qu-chat-reaction-popup button:hover { background: #8882; }
@@ -206,7 +260,7 @@ const STYLE = `
   .qu-chat-send-btn:hover { background: #2b7cd3; }
   .qu-chat-pending-attachment { font-size: 0.8em; opacity: 0.8; display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.3rem; flex-shrink: 0; }
 
-  .qu-chat-voice-bar { display: flex; align-items: center; gap: 0.6rem; padding-top: 0.4rem; flex-shrink: 0; }
+  .qu-chat-voice-bar { display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0; flex-shrink: 0; position: sticky; bottom: 0; background: canvas; }
   .qu-chat-voice-status { display: flex; align-items: center; gap: 0.4rem; flex: 1; font-variant-numeric: tabular-nums; }
   .qu-chat-voice-dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; background: #8886; }
   .qu-chat-voice-status[data-recording="true"] .qu-chat-voice-dot { background: #e5484d; animation: qu-chat-voice-pulse 1.2s ease-in-out infinite; }
@@ -218,6 +272,48 @@ const STYLE = `
   .qu-chat-member-picker { display: flex; flex-direction: column; gap: 0.3rem; max-height: 12rem; overflow-y: auto; }
   .qu-chat-member-picker label { display: flex; align-items: center; gap: 0.5rem; }
   .qu-chat-new-group-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
+
+  .qu-chat-settings-form { display: flex; flex-direction: column; gap: 0.9rem; max-width: 24rem; margin-top: 0.6rem; }
+  .qu-chat-settings-row { display: flex; align-items: center; gap: 0.6rem; justify-content: space-between; }
+  .qu-chat-settings-row input[type="color"] { width: 2.6rem; height: 1.8rem; padding: 0; border: 1px solid #8884; border-radius: 0.3rem; background: none; cursor: pointer; }
+  .qu-chat-settings-status { font-size: 0.85em; opacity: 0.7; }
+
+  .qu-chat-search { display: flex; flex-direction: column; gap: 0.5rem; height: 100%; min-height: 0; }
+  .qu-chat-search-input { padding: 0.5rem 0.8rem; border-radius: 1.2rem; border: 1px solid #8884; background: transparent; color: inherit; font: inherit; }
+  .qu-chat-search-filters { display: flex; gap: 0.4rem; }
+  .qu-chat-search-filter-btn { border: 1px solid #8884; background: none; color: inherit; border-radius: 999px; padding: 0.25rem 0.7rem; font-size: 0.85em; cursor: pointer; }
+  .qu-chat-search-filter-btn[data-active="true"] { background: #3390ec; border-color: #3390ec; color: #fff; }
+  .qu-chat-search-results { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; overflow-y: auto; flex: 1; min-height: 0; }
+  .qu-chat-search-result a { display: block; text-decoration: none; color: inherit; padding: 0.5rem 0.6rem; border-radius: 0.5rem; border: 1px solid #8884; }
+  .qu-chat-search-result a:hover { background: #8881; }
+  .qu-chat-search-result-room { font-weight: 600; font-size: 0.85em; opacity: 0.8; }
+  .qu-chat-search-result-time { font-size: 0.72em; opacity: 0.6; margin-top: 0.2rem; }
+  .qu-chat-search-empty { opacity: 0.6; padding: 0.5rem; }
+
+  .qu-chat-lightbox { position: fixed; inset: 0; background: #000000e6; z-index: 100; align-items: center; justify-content: center; touch-action: none; overflow: hidden; }
+  .qu-chat-lightbox:not([hidden]) { display: flex; }
+  .qu-chat-lightbox img { max-width: 100vw; max-height: 100vh; cursor: zoom-in; user-select: none; transition: transform 0.15s ease; }
+  .qu-chat-lightbox img.qu-chat-lightbox-zoomed { cursor: zoom-out; transform: scale(2.2); }
+  .qu-chat-lightbox-close { position: absolute; top: max(0.8rem, env(safe-area-inset-top)); right: 0.8rem; background: #ffffff20; border: none; color: #fff; width: 2.4rem; height: 2.4rem; border-radius: 50%; font-size: 1.3rem; cursor: pointer; }
+
+  /* MUST be last (or otherwise win on specificity/source-order) and !important:
+     several selectors above set an unconditional "display" (flex/block) on
+     elements this file ALSO toggles via the DOM \`hidden\` property/attribute
+     - the browser's own built-in "[hidden] { display: none }" rule has the
+     SAME specificity as a plain class selector, so whichever was defined
+     LATER in the cascade wins; every one of those "display: flex" rules
+     above was quietly overriding "[hidden]" and leaving the element visibly
+     on screen (with real layout space) even while \`el.hidden = true\` was
+     set - the reply banner, pending-attachment preview, voice recorder bar,
+     member list, and even the composer itself were all affected. Real,
+     confirmed bugs this fixes: the pending-attachment preview staying stuck
+     on screen after a message was sent, and the voice recorder appearing
+     ALONGSIDE the (never actually hidden) composer instead of replacing it,
+     pushing the layout down and requiring a scroll to reach it. One
+     high-specificity, always-last rule closes the whole class of bug at
+     once, for every current AND future element in this file - simpler and
+     more robust than hunting down and patching each selector individually. */
+  .qu-chat-app [hidden] { display: none !important; }
 `;
 
 function ensureStyle() {
@@ -342,7 +438,98 @@ function positionPopup(popupEl, anchorRect) {
   popupEl.style.left = `${Math.max(4, left)}px`;
 }
 
-export function mount(container, { qu, services, segments, subscribe }) {
+// ============================================================================
+// CHAT SETTINGS — device-level UI preferences (which alias to show, own
+// bubble color), same "not shared/synced data" reasoning as @qu/i18n's own
+// getStoredLocale()/setLocale(): these are about how THIS session renders
+// chat, not data other members need to see, so plain localStorage is
+// enough - no identity/encryption plumbing needed. Alias visibility
+// defaults OFF for 1:1 (the room header already names the other person;
+// WhatsApp/Signal/Telegram don't repeat it per-bubble either) and is
+// always ON for groups regardless of this setting (there IS no other way
+// to tell senders apart there) - see messageRow()'s own header-visibility
+// check.
+// ============================================================================
+const SETTINGS_KEY = 'qu-chat-settings';
+const DEFAULT_OWN_COLOR = '#3390ec';
+
+function getChatSettings() {
+  try {
+    return { showAliasIn1to1: false, ownColor: DEFAULT_OWN_COLOR, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}') };
+  } catch {
+    return { showAliasIn1to1: false, ownColor: DEFAULT_OWN_COLOR };
+  }
+}
+
+function setChatSettings(patch) {
+  const next = { ...getChatSettings(), ...patch };
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+  return next;
+}
+
+// ============================================================================
+// LINKS — detection matches ReactivityJS/Qu's own chat-lib.mjs: a plain
+// regex scan, no fetched preview (no OpenGraph/oEmbed) beyond the
+// location special-case above, which already fetches a raw OSTM tile
+// image directly (a plain <img src>, no CORS/CSP concern since images
+// don't need CORS to display) - deliberately NOT doing a cross-origin
+// fetch() of arbitrary third-party HTML for metadata, which would need
+// either relay-side proxying or fighting CSP for no real benefit here.
+// ============================================================================
+const URL_RE = /(https?:\/\/[^\s<>"]+)/gi;
+
+/** @param {string} text @returns {Array<{type:'text'|'link', value:string, hostname?:string}>} */
+function linkifySegments(text) {
+  const segments = [];
+  let lastIndex = 0;
+  for (const match of text.matchAll(URL_RE)) {
+    const url = match[0];
+    const index = match.index;
+    if (index > lastIndex) segments.push({ type: 'text', value: text.slice(lastIndex, index) });
+    let hostname = url;
+    try { hostname = new URL(url).hostname; } catch { /* not a real URL - fall back to showing it verbatim */ }
+    segments.push({ type: 'link', value: url, hostname });
+    lastIndex = index + url.length;
+  }
+  if (lastIndex < text.length) segments.push({ type: 'text', value: text.slice(lastIndex) });
+  return segments;
+}
+
+/** Renders `text` as a text node with any http(s) URLs turned into real, clickable, new-tab anchors - used instead of a plain textContent assignment wherever message bodies are shown. */
+function renderLinkedText(container, text) {
+  for (const seg of linkifySegments(text)) {
+    if (seg.type === 'text') { container.appendChild(document.createTextNode(seg.value)); continue; }
+    const a = document.createElement('a');
+    a.href = seg.value;
+    a.textContent = seg.value;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.addEventListener('click', (e) => e.stopPropagation());
+    container.appendChild(a);
+  }
+}
+
+/** @returns {HTMLElement|null} A compact hostname+URL preview card for the FIRST link in `text` (skipped if it's a location URL, which already gets its own richer map-tile preview - see locationBlock()). */
+function buildLinkPreview(text) {
+  const link = linkifySegments(text).find((seg) => seg.type === 'link');
+  if (!link || parseLocationFromUrl(link.value)) return null;
+  const a = document.createElement('a');
+  a.className = 'qu-chat-link-preview';
+  a.href = link.value;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  a.addEventListener('click', (e) => e.stopPropagation());
+  const host = document.createElement('div');
+  host.className = 'qu-chat-link-preview-host';
+  host.textContent = `🔗 ${link.hostname}`;
+  const title = document.createElement('div');
+  title.className = 'qu-chat-link-preview-title';
+  title.textContent = link.value;
+  a.append(host, title);
+  return a;
+}
+
+export function mount(container, { qu, services, segments, subscribe, fetch: syncFetch }) {
   ensureStyle();
   let stopped = false;
   let unwatch = null;
@@ -364,9 +551,11 @@ export function mount(container, { qu, services, segments, subscribe }) {
   subscribe(`/store/${SPACE}`);
   subscribe(`/blob/${SPACE}`);
 
+  // Routes: #/chat, #/chat/settings, #/chat/search, #/chat/g/<id>[/m/<msgId>], #/chat/<pub>[/m/<msgId>].
   const isGroupRoute = segments[1] === 'g';
   const groupId = isGroupRoute ? (segments[2] ?? null) : null;
-  const peerActorPub = !isGroupRoute ? (segments[1] ?? null) : null;
+  const peerActorPub = !isGroupRoute && segments[1] !== 'settings' && segments[1] !== 'search' ? (segments[1] ?? null) : null;
+  const anchorMessageId = isGroupRoute ? (segments[3] === 'm' ? segments[4] ?? null : null) : (segments[2] === 'm' ? segments[3] ?? null : null);
 
   (async () => {
     const myActorPub = await services.actors.whoAmI();
@@ -380,8 +569,10 @@ export function mount(container, { qu, services, segments, subscribe }) {
     if (stopped) return;
     subscribe(`/store/${inviteSpace}`);
 
-    if (groupId) await renderRoom(myActorPub, { type: 'group', groupId });
-    else if (peerActorPub) await renderRoom(myActorPub, { type: 'direct', peerActorPub });
+    if (segments[1] === 'settings') await renderSettings();
+    else if (segments[1] === 'search') await renderGlobalSearch(myActorPub);
+    else if (groupId) await renderRoom(myActorPub, { type: 'group', groupId, anchorMessageId });
+    else if (peerActorPub) await renderRoom(myActorPub, { type: 'direct', peerActorPub, anchorMessageId });
     else await renderRoomList(myActorPub);
   })();
 
@@ -393,12 +584,25 @@ export function mount(container, { qu, services, segments, subscribe }) {
     header.className = 'qu-chat-list-header';
     const heading = document.createElement('h1');
     heading.textContent = t('title');
+    const headerActions = document.createElement('div');
+    headerActions.className = 'qu-chat-header-actions';
+    const searchBtn = document.createElement('a');
+    searchBtn.className = 'qu-chat-search-header-btn';
+    searchBtn.href = '#/chat/search';
+    searchBtn.title = t('search');
+    searchBtn.textContent = '🔍';
+    const settingsBtn = document.createElement('a');
+    settingsBtn.className = 'qu-chat-settings-header-btn';
+    settingsBtn.href = '#/chat/settings';
+    settingsBtn.title = t('settingsBtn');
+    settingsBtn.textContent = '⚙️';
     const newGroupBtn = document.createElement('button');
     newGroupBtn.type = 'button';
     newGroupBtn.className = 'qu-chat-new-group-btn';
     newGroupBtn.textContent = '+';
     newGroupBtn.title = t('newGroup');
-    header.append(heading, newGroupBtn);
+    headerActions.append(searchBtn, settingsBtn, newGroupBtn);
+    header.append(heading, headerActions);
     container.appendChild(header);
 
     const formSlot = document.createElement('div');
@@ -546,8 +750,194 @@ export function mount(container, { qu, services, segments, subscribe }) {
     slot.appendChild(form);
   }
 
+  async function renderSettings() {
+    if (stopped) return;
+    container.textContent = '';
+    const back = document.createElement('a');
+    back.className = 'qu-chat-back';
+    back.href = '#/chat';
+    back.textContent = t('back');
+    const heading = document.createElement('h1');
+    heading.textContent = t('settings');
+    container.append(back, heading);
+
+    const settings = getChatSettings();
+    const form = document.createElement('form');
+    form.className = 'qu-chat-settings-form';
+
+    const aliasRow = document.createElement('label');
+    aliasRow.className = 'qu-chat-settings-row';
+    const aliasCheckbox = document.createElement('input');
+    aliasCheckbox.type = 'checkbox';
+    aliasCheckbox.checked = settings.showAliasIn1to1;
+    aliasRow.append(aliasCheckbox, document.createTextNode(` ${t('showAliasIn1to1')}`));
+
+    const colorRow = document.createElement('label');
+    colorRow.className = 'qu-chat-settings-row';
+    const colorLabel = document.createElement('span');
+    colorLabel.textContent = t('ownColor');
+    const colorInput = document.createElement('input');
+    colorInput.type = 'color';
+    colorInput.value = settings.ownColor;
+    colorRow.append(colorLabel, colorInput);
+
+    const status = document.createElement('span');
+    status.className = 'qu-chat-settings-status';
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'submit';
+    saveBtn.textContent = t('save');
+
+    form.append(aliasRow, colorRow, saveBtn, status);
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      setChatSettings({ showAliasIn1to1: aliasCheckbox.checked, ownColor: colorInput.value });
+      status.textContent = t('saved');
+      setTimeout(() => { status.textContent = ''; }, 2000);
+    });
+    container.appendChild(form);
+  }
+
+  /** Global search: scans every room's already-listMessages()-fetched content, same local-only-scan approach as the room-scoped search below - see buildSearchResults() (shared) for the matching logic. */
+  async function renderGlobalSearch(myActorPub) {
+    if (stopped) return;
+    container.textContent = '';
+    const [contacts, groupIds] = await Promise.all([services.contacts.listContacts(), services.chat.listMyGroups()]);
+    if (stopped) return;
+
+    const rooms = [];
+    for (const { actorPub, profile } of contacts) {
+      const id = await roomId([myActorPub, actorPub]);
+      rooms.push({ href: `#/chat/${actorPub}`, name: profile?.alias || `~${actorPub.slice(0, 10)}…`, spaceId: SPACE, threadId: id, isGroup: false });
+    }
+    for (const id of groupIds) {
+      const config = await services.threads.getConfig(SPACE, id);
+      if (!config) continue;
+      rooms.push({ href: `#/chat/g/${id}`, name: config.name || id, spaceId: SPACE, threadId: id, isGroup: true });
+    }
+    if (stopped) return;
+
+    renderSearchUI(container, rooms, myActorPub, null);
+  }
+
+  /**
+   * Shared by both global search (every room) and the in-room search
+   * toggle (a single room passed via `onlyRoom`) - a plain local substring
+   * scan over already-`listMessages()`-fetched content, no network query,
+   * matching ReactivityJS/Qu's own search (it never queries the relay
+   * either - search only ever covers what's already synced locally).
+   * @param {HTMLElement} mountEl
+   * @param {Array<{href:string, name:string, spaceId, threadId, isGroup:boolean}>} rooms
+   * @param {string} myActorPub
+   * @param {{spaceId, threadId}|null} onlyRoom - if set, renders inline (no header/back link) scoped to just this room.
+   */
+  function renderSearchUI(mountEl, rooms, myActorPub, onlyRoom) {
+    const wrap = document.createElement('div');
+    wrap.className = 'qu-chat-search';
+
+    if (!onlyRoom) {
+      const back = document.createElement('a');
+      back.className = 'qu-chat-back';
+      back.href = '#/chat';
+      back.textContent = t('back');
+      wrap.appendChild(back);
+    }
+
+    const input = document.createElement('input');
+    input.type = 'search';
+    input.className = 'qu-chat-search-input';
+    input.placeholder = t('searchPlaceholder');
+
+    const filters = document.createElement('div');
+    filters.className = 'qu-chat-search-filters';
+    let activeFilter = 'all';
+    const filterBtns = [];
+    for (const [key, label] of [['all', t('searchAll')], ['links', t('searchLinks')], ['files', t('searchFiles')]]) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'qu-chat-search-filter-btn';
+      btn.dataset.active = String(key === 'all');
+      btn.textContent = label;
+      btn.addEventListener('click', () => {
+        activeFilter = key;
+        for (const b of filterBtns) b.dataset.active = String(b === btn);
+        runSearch();
+      });
+      filterBtns.push(btn);
+      filters.appendChild(btn);
+    }
+
+    const resultsEl = document.createElement('ul');
+    resultsEl.className = 'qu-chat-search-results';
+
+    wrap.append(input, filters, resultsEl);
+    mountEl.appendChild(wrap);
+    input.focus();
+
+    async function runSearch() {
+      const query = input.value.trim().toLowerCase();
+      resultsEl.textContent = '';
+      const matches = [];
+      for (const room of (onlyRoom ? [{ ...onlyRoom, href: '', name: '' }] : rooms)) {
+        const messages = await services.threads.listMessages(room.spaceId, room.threadId);
+        for (const message of messages) {
+          const hasLink = !!message.body && linkifySegments(message.body).some((s) => s.type === 'link');
+          const hasFile = !!message.attachment;
+          if (activeFilter === 'links' && !hasLink) continue;
+          if (activeFilter === 'files' && !hasFile) continue;
+          if (query && !(message.body ?? '').toLowerCase().includes(query)) continue;
+          matches.push({ room, message });
+        }
+      }
+      matches.sort((a, b) => (b.message.ts ?? 0) - (a.message.ts ?? 0));
+      if (matches.length === 0) {
+        const empty = document.createElement('li');
+        empty.className = 'qu-chat-search-empty';
+        empty.textContent = t('noResults');
+        resultsEl.appendChild(empty);
+        return;
+      }
+      for (const { room, message } of matches.slice(0, 100)) {
+        const li = document.createElement('li');
+        li.className = 'qu-chat-search-result';
+        const a = document.createElement('a');
+        a.href = onlyRoom ? `${roomPermalink(onlyRoom, message.id)}` : `${room.href}/m/${message.id}`;
+        if (!onlyRoom) {
+          const roomLabel = document.createElement('div');
+          roomLabel.className = 'qu-chat-search-result-room';
+          roomLabel.textContent = room.name;
+          a.appendChild(roomLabel);
+        }
+        const snippet = document.createElement('div');
+        snippet.textContent = message.body?.trim() || attachmentPreviewLabel(message.attachment);
+        a.appendChild(snippet);
+        const time = document.createElement('div');
+        time.className = 'qu-chat-search-result-time';
+        time.textContent = fmtTime(message.ts);
+        a.appendChild(time);
+        li.appendChild(a);
+        resultsEl.appendChild(li);
+      }
+    }
+
+    input.addEventListener('input', runSearch);
+    runSearch();
+  }
+
+  /** @param {{spaceId, threadId}} room - matched by identity against the CURRENT room being viewed, to build the SAME kind of permalink messageRow()'s own time-click handler builds. */
+  function roomPermalink(room, messageId) {
+    // Reconstructs whichever of #/chat/g/<id> or #/chat/<pub> this room's
+    // threadId corresponds to - callers with the ORIGINAL target (group vs
+    // direct + peerPub) should prefer building it directly; this fallback
+    // is only reached from in-room search, which always has `onlyRoom`
+    // scoped to the room already open, so the CURRENT location's own
+    // path (minus any existing /m/<id> suffix) is simplest and correct.
+    const base = location.hash.split('/m/')[0];
+    return `${base}/m/${messageId}`;
+  }
+
   async function renderRoom(myActorPub, target) {
     container.textContent = '';
+    container.style.setProperty('--qu-chat-own-color', getChatSettings().ownColor);
 
     let spaceId, threadId, config, headerName, headerAvatar, headerSeed;
     if (target.type === 'group') {
@@ -609,12 +999,28 @@ export function mount(container, { qu, services, segments, subscribe }) {
     else headerInfo.appendChild(presenceEl);
     header.appendChild(headerInfo);
 
+    const searchToggleBtn = document.createElement('button');
+    searchToggleBtn.type = 'button';
+    searchToggleBtn.className = 'qu-chat-icon-btn';
+    searchToggleBtn.textContent = '🔍';
+    searchToggleBtn.title = t('searchThisChat');
+    header.appendChild(searchToggleBtn);
+
     const encHint = document.createElement('div');
     encHint.className = 'qu-chat-encrypted-hint';
     encHint.textContent = '🔒';
     encHint.title = t('encrypted');
     header.appendChild(encHint);
     container.appendChild(header);
+
+    const searchSlot = document.createElement('div');
+    searchSlot.hidden = true;
+    container.appendChild(searchSlot);
+    searchToggleBtn.addEventListener('click', () => {
+      searchSlot.hidden = !searchSlot.hidden;
+      searchSlot.textContent = '';
+      if (!searchSlot.hidden) renderSearchUI(searchSlot, null, myActorPub, { spaceId, threadId });
+    });
 
     const membersEl = document.createElement('div');
     membersEl.className = 'qu-chat-members';
@@ -681,6 +1087,35 @@ export function mount(container, { qu, services, segments, subscribe }) {
     pinListPopupEl.className = 'qu-chat-pin-list-popup';
     pinListPopupEl.hidden = true;
     document.body.append(actionsMenuEl, reactionPopupEl, pinListPopupEl);
+
+    // A single shared lightbox for every image attachment in this room -
+    // same "one instance, repositioned/repopulated" reasoning as the
+    // popups above, matching ReactivityJS/Qu's own single #lightbox element.
+    const lightboxEl = document.createElement('div');
+    lightboxEl.className = 'qu-chat-lightbox';
+    lightboxEl.hidden = true;
+    const lightboxImg = document.createElement('img');
+    const lightboxClose = document.createElement('button');
+    lightboxClose.type = 'button';
+    lightboxClose.className = 'qu-chat-lightbox-close';
+    lightboxClose.textContent = '✕';
+    lightboxEl.append(lightboxClose, lightboxImg);
+    document.body.appendChild(lightboxEl);
+
+    function openLightbox(url) {
+      lightboxImg.src = url;
+      lightboxImg.classList.remove('qu-chat-lightbox-zoomed');
+      lightboxEl.hidden = false;
+    }
+    function closeLightbox() {
+      lightboxEl.hidden = true;
+      lightboxImg.src = '';
+    }
+    lightboxClose.addEventListener('click', closeLightbox);
+    lightboxEl.addEventListener('click', (e) => { if (e.target === lightboxEl) closeLightbox(); });
+    lightboxImg.addEventListener('click', () => lightboxImg.classList.toggle('qu-chat-lightbox-zoomed'));
+    const onLightboxKeydown = (e) => { if (e.key === 'Escape' && !lightboxEl.hidden) closeLightbox(); };
+    document.addEventListener('keydown', onLightboxKeydown);
 
     let actionsMenuContext = null; // the message the actions menu is currently open for
     let reactionPopupContext = null;
@@ -933,8 +1368,10 @@ export function mount(container, { qu, services, segments, subscribe }) {
         async (pos) => {
           locationBtn.disabled = false;
           const { latitude, longitude } = pos.coords;
-          await services.threads.postMessage(spaceId, threadId, { body: buildLocationUrl(latitude.toFixed(5), longitude.toFixed(5)) });
-          await reload();
+          const posted = await services.threads.postMessage(spaceId, threadId, { body: buildLocationUrl(latitude.toFixed(5), longitude.toFixed(5)) });
+          pendingSyncIds.add(posted.id);
+          await reload({ forceScrollBottom: true });
+          confirmSync(posted.id, paths.threadMessagePath(spaceId, threadId, posted.id));
         },
         () => { locationBtn.disabled = false; pendingAttachmentEl.hidden = false; pendingAttachmentEl.textContent = t('locationFailed'); },
         { enableHighAccuracy: false, timeout: 10_000 }
@@ -945,10 +1382,29 @@ export function mount(container, { qu, services, segments, subscribe }) {
     // explicit Start tap (so the first moment isn't lost while the mic
     // permission prompt is still up), then preview-before-send. ----
     let mediaRecorder = null;
+    let activeStream = null; // the getUserMedia() MediaStream - tracked OUTSIDE mediaRecorder so it can always be released (see releaseMic() below), regardless of whether recording ever actually started
     let recordedChunks = [];
     let recordingStartedAt = 0;
     let voiceTimerInterval = null;
     let discardRecording = false;
+
+    /**
+     * Stops every track of the current getUserMedia() stream, if any -
+     * releasing the OS/browser mic indicator. MUST be called on every exit
+     * path (send, discard from ANY state, or the room unmounting entirely),
+     * not just after a real recording: a `MediaRecorder` that was only
+     * ARMED (constructed, never `.start()`-ed) has `state === 'inactive'`
+     * from the moment it's created - the SAME value it has after a real
+     * stop() - so branching discard behavior on `mediaRecorder.state`
+     * (the previous approach) could never tell "never started" apart from
+     * "already stopped", and silently left the mic stream open when
+     * discarding before ever pressing record.
+     */
+    function releaseMic() {
+      if (!activeStream) return;
+      for (const track of activeStream.getTracks()) track.stop();
+      activeStream = null;
+    }
 
     voiceBtn.addEventListener('click', async () => {
       if (typeof MediaRecorder === 'undefined') { pendingAttachmentEl.hidden = false; pendingAttachmentEl.textContent = t('voiceNotSupported'); return; }
@@ -959,13 +1415,14 @@ export function mount(container, { qu, services, segments, subscribe }) {
         pendingAttachmentEl.hidden = false; pendingAttachmentEl.textContent = t('voiceNotSupported');
         return;
       }
+      activeStream = stream;
       recordedChunks = [];
       discardRecording = false;
       const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
       mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       mediaRecorder.addEventListener('dataavailable', (e) => { if (e.data.size) recordedChunks.push(e.data); });
       mediaRecorder.addEventListener('stop', () => {
-        for (const track of stream.getTracks()) track.stop();
+        releaseMic();
         if (discardRecording) { resetVoiceBar(); return; }
         renderVoicePreview(new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' }));
       });
@@ -974,6 +1431,7 @@ export function mount(container, { qu, services, segments, subscribe }) {
     });
 
     function resetVoiceBar() {
+      releaseMic();
       if (voiceTimerInterval) clearInterval(voiceTimerInterval);
       voiceTimerInterval = null;
       voiceBar.hidden = true;
@@ -1022,7 +1480,7 @@ export function mount(container, { qu, services, segments, subscribe }) {
             toggleBtn.title = t('voicePause');
             toggleBtn.addEventListener('click', () => { mediaRecorder.pause(); renderVoiceBar('paused'); });
           } else {
-            toggleBtn.textContent = '⏺';
+            toggleBtn.textContent = '▶';
             toggleBtn.title = t('voiceResume');
             toggleBtn.addEventListener('click', () => { mediaRecorder.resume(); renderVoiceBar('recording'); });
           }
@@ -1042,8 +1500,16 @@ export function mount(container, { qu, services, segments, subscribe }) {
       discardBtn.textContent = '🗑';
       discardBtn.title = t('voiceDiscard');
       discardBtn.addEventListener('click', () => {
-        if (mediaRecorder?.state !== 'inactive') { discardRecording = true; if (voiceTimerInterval) clearInterval(voiceTimerInterval); mediaRecorder.stop(); }
-        else resetVoiceBar();
+        if (state === 'armed') {
+          // Never actually started recording (no 'stop' event will ever
+          // fire to release it) - the mic stream opened the moment this
+          // bar was armed and must be released here directly.
+          resetVoiceBar();
+        } else {
+          discardRecording = true;
+          if (voiceTimerInterval) clearInterval(voiceTimerInterval);
+          mediaRecorder.stop(); // 'stop' listener releases the mic and resets the bar
+        }
       });
       voiceBar.appendChild(discardBtn);
     }
@@ -1065,8 +1531,10 @@ export function mount(container, { qu, services, segments, subscribe }) {
         const assetId = crypto.randomUUID();
         const file = { name: voiceMessageFilename(ts), mime: blob.type || 'audio/webm', data: blob };
         const meta = await services.assets.upload(spaceId, assetId, file, { readerPubs: readerPubsForEncryption });
-        await services.threads.postMessage(spaceId, threadId, { body: '', extra: { attachment: { assetId, name: meta.name, mime: meta.mime, size: meta.size } } });
-        await reload();
+        const posted = await services.threads.postMessage(spaceId, threadId, { body: '', extra: { attachment: { assetId, name: meta.name, mime: meta.mime, size: meta.size } } });
+        pendingSyncIds.add(posted.id);
+        await reload({ forceScrollBottom: true });
+        confirmSync(posted.id, paths.threadMessagePath(spaceId, threadId, posted.id));
       });
       voiceBar.appendChild(sendVoiceBtn);
       const discardBtn = document.createElement('button');
@@ -1089,7 +1557,72 @@ export function mount(container, { qu, services, segments, subscribe }) {
     // or stale rows behind. Each reload() checks it's still the LATEST
     // one before every DOM mutation and bails out otherwise.
     let renderToken = 0;
-    async function reload() {
+
+    // Auto-scroll: only jump to the newest message if the user was already
+    // near the bottom (or this is the first render) - otherwise someone
+    // reading scrollback would get yanked away by an unrelated new message.
+    // Tracked via a scroll listener (not recomputed inline in reload()),
+    // since a synchronous check during/right after a DOM rebuild can see a
+    // stale scrollHeight before layout settles.
+    let stickingToBottom = true;
+    let firstReload = true;
+    let currentAnchorMessageId = target.anchorMessageId ?? null;
+
+    function isNearBottom() {
+      return listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight <= 60;
+    }
+    function scrollToVeryBottom() {
+      // Set it synchronously first (correct immediately for the common
+      // all-text case, and critically means a NEXT reload() starting right
+      // after - a fast send burst can trigger several in close succession,
+      // see the render-token comment above - reads an already-caught-up
+      // scrollTop instead of a stale one). The rAF pass afterward corrects
+      // for a freshly-appended image/attachment that may not have its
+      // final height until after the next paint (one rAF alone can still
+      // read a pre-layout scrollHeight, so two).
+      listEl.scrollTop = listEl.scrollHeight;
+      requestAnimationFrame(() => requestAnimationFrame(() => { listEl.scrollTop = listEl.scrollHeight; }));
+    }
+    function clearAnchor() {
+      if (!currentAnchorMessageId) return;
+      currentAnchorMessageId = null;
+      history.replaceState(null, '', location.hash.split('/m/')[0]);
+    }
+    function setAnchor(messageId) {
+      currentAnchorMessageId = messageId;
+      history.replaceState(null, '', roomPermalink({ spaceId, threadId }, messageId));
+    }
+    // The native 'scroll' event fires identically for a real user gesture
+    // and for our OWN programmatic scrollToVeryBottom() calls above, with
+    // no reliable way to tell them apart from the event alone - and during
+    // a fast send burst several reload()s (each doing its own
+    // scrollToVeryBottom()) can be in flight together, so a naive
+    // "trust every scroll event" listener can catch one mid-flight, at a
+    // transiently-short scrollHeight, and wrongly conclude the user
+    // scrolled away - permanently losing stickiness for the rest of the
+    // session (nothing else would ever flip it back true). Splitting the
+    // two directions onto different, unambiguous signals sidesteps that
+    // entirely: only a genuine user gesture (wheel/touch) can ever move
+    // you AWAY from the bottom, while arriving AT the bottom - by any
+    // means, including our own auto-scroll - is always safe to trust,
+    // since "further down" is where the reader intends to end up either way.
+    for (const evt of ['wheel', 'touchmove']) {
+      listEl.addEventListener(evt, () => { if (!isNearBottom()) stickingToBottom = false; }, { passive: true });
+    }
+    listEl.addEventListener('scroll', () => {
+      if (!isNearBottom()) return;
+      stickingToBottom = true;
+      clearAnchor();
+    });
+
+    /**
+     * @param {object} [options]
+     * @param {boolean} [options.forceScrollBottom] - THIS device just sent
+     *   a message - jump to the bottom unconditionally, same as any real
+     *   messenger (you're clearly at the composer, not reading scrollback),
+     *   regardless of what `stickingToBottom` currently says.
+     */
+    async function reload({ forceScrollBottom = false } = {}) {
       if (stopped) return;
       const myToken = ++renderToken;
       const messages = await services.threads.listMessages(spaceId, threadId);
@@ -1098,6 +1631,24 @@ export function mount(container, { qu, services, segments, subscribe }) {
 
       watchReactions(messages);
       renderPinnedBar(messages, pinnedIds);
+
+      if (forceScrollBottom) stickingToBottom = true;
+      const wasStickingToBottom = stickingToBottom;
+
+      // Preserve scroll position across a reload while reading scrollback:
+      // remember which row is currently topmost-visible so it can be
+      // restored after the list is rebuilt, rather than always snapping
+      // somewhere else.
+      let anchorRow = null, anchorOffset = 0;
+      if (!wasStickingToBottom) {
+        for (const li of listEl.children) {
+          if (li.getBoundingClientRect().bottom > listEl.getBoundingClientRect().top) {
+            anchorRow = li.dataset?.messageId;
+            anchorOffset = li.getBoundingClientRect().top - listEl.getBoundingClientRect().top;
+            break;
+          }
+        }
+      }
 
       listEl.textContent = '';
       if (messages.length === 0) {
@@ -1110,7 +1661,16 @@ export function mount(container, { qu, services, segments, subscribe }) {
           if (myToken !== renderToken) return; // a newer reload() started mid-loop - abandon this stale one
           listEl.appendChild(row);
         }
-        listEl.scrollTop = listEl.scrollHeight;
+        if (firstReload && currentAnchorMessageId) {
+          firstReload = false;
+          scrollToMessage(currentAnchorMessageId, true);
+        } else if (firstReload || wasStickingToBottom) {
+          firstReload = false;
+          scrollToVeryBottom();
+        } else if (anchorRow) {
+          const restored = listEl.querySelector(`[data-message-id="${CSS.escape(anchorRow)}"]`);
+          if (restored) listEl.scrollTop = restored.getBoundingClientRect().top - listEl.getBoundingClientRect().top - anchorOffset + listEl.scrollTop;
+        }
       }
       services.threads.markRead(spaceId, threadId).catch(() => {});
       const lastTs = messages[messages.length - 1]?.ts;
@@ -1140,6 +1700,58 @@ export function mount(container, { qu, services, segments, subscribe }) {
     // someone else marking a message read doesn't reset scroll position or
     // interrupt an in-progress reaction-picker interaction.
     const tickEls = new Map(); // messageId -> tick <span>
+
+    // Three-state sync/read indicator, per the user's own spec: locally
+    // saved but not yet confirmed on the relay (1 tick + spinner) -> the
+    // relay has it (2 ticks) -> a recipient's read receipt covers it (2
+    // BLUE ticks). `pendingSyncIds` holds ids THIS device posted this
+    // session that haven't been confirmed on the relay yet - see
+    // confirmSync()'s own doc comment for why only just-posted messages
+    // (not the whole history) get checked.
+    const pendingSyncIds = new Set();
+
+    function renderTickState(el, state) {
+      el.dataset.state = state;
+      el.title = state === 'pending' ? t('pendingSync') : state === 'read' ? t('readBy') : t('synced');
+      el.textContent = '';
+      const check = document.createElement('span');
+      check.textContent = state === 'pending' ? '✓' : '✓✓';
+      el.appendChild(check);
+      if (state === 'pending') {
+        const spinner = document.createElement('span');
+        spinner.className = 'qu-chat-tick-spinner';
+        spinner.textContent = '⟳';
+        el.appendChild(spinner);
+      }
+    }
+
+    function tickStateFor(messageId, isRead) {
+      return isRead ? 'read' : pendingSyncIds.has(messageId) ? 'pending' : 'synced';
+    }
+
+    /**
+     * There's no server ACK for "the relay received your broadcast" in this
+     * sync protocol (writes are fire-and-forget broadcast - see
+     * SyncEngine's own doc comment). fetch()ing the same path back FROM the
+     * relay is the closest available proxy: a non-null response proves the
+     * relay's copy exists, upgrading the tick from pending to synced. Only
+     * called right after THIS device posts a message - re-checking the
+     * whole history on every reload() would mean an unbounded burst of
+     * fetch() calls on every mount, for no user-facing benefit (an old
+     * message's sync state isn't something anyone is watching).
+     */
+    async function confirmSync(messageId, path) {
+      if (!syncFetch) { pendingSyncIds.delete(messageId); const el = tickEls.get(messageId); if (el) renderTickState(el, tickStateFor(messageId, el.dataset.read === 'true')); return; }
+      try {
+        const quBit = await syncFetch(path);
+        if (quBit) pendingSyncIds.delete(messageId);
+      } catch {
+        // timed out / relay unreachable - leave marked pending, matches reality
+      }
+      const el = tickEls.get(messageId);
+      if (el) renderTickState(el, tickStateFor(messageId, el.dataset.read === 'true'));
+    }
+
     async function refreshTicks(messages) {
       if (stopped || tickEls.size === 0) return;
       const receipts = await services.threads.getReadReceipts(spaceId, threadId, memberPubs.filter((p) => p !== myActorPub));
@@ -1149,8 +1761,8 @@ export function mount(container, { qu, services, segments, subscribe }) {
         const el = tickEls.get(message.id);
         if (!el || message.author !== myActorPub) continue;
         const isRead = readUpTo >= message.ts;
-        el.textContent = isRead ? '✓✓' : '✓';
         el.dataset.read = String(isRead);
+        renderTickState(el, tickStateFor(message.id, isRead));
       }
     }
 
@@ -1205,11 +1817,23 @@ export function mount(container, { qu, services, segments, subscribe }) {
       positionPopup(pinListPopupEl, anchorEl.getBoundingClientRect());
     }
 
-    function scrollToMessage(messageId) {
+    /**
+     * @param {string} messageId
+     * @param {boolean} [isRetryable] - a permalink may target a message that
+     *   hasn't synced to this device yet at the moment reload() first ran
+     *   (see the `currentAnchorMessageId` branch above) - retry once after
+     *   the backfill/sync has had a chance to land, instead of silently
+     *   giving up.
+     */
+    function scrollToMessage(messageId, isRetryable) {
       const row = listEl.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
-      if (!row) return;
+      if (!row) {
+        if (isRetryable) setTimeout(() => scrollToMessage(messageId, false), 800);
+        return;
+      }
       row.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      row.animate([{ backgroundColor: '#3390ec33' }, { backgroundColor: 'transparent' }], { duration: 900 });
+      row.dataset.anchored = 'true';
+      setTimeout(() => { row.dataset.anchored = 'false'; }, 1600);
     }
 
     /** @returns {HTMLElement|null} A location-preview block if `body` is a recognized map URL, else null. */
@@ -1244,28 +1868,24 @@ export function mount(container, { qu, services, segments, subscribe }) {
       row.dataset.mine = String(mine);
       row.dataset.messageId = message.id;
 
-      const headerRow = document.createElement('div');
-      headerRow.className = 'qu-chat-msg-header';
-      if (isGroup) {
+      // Two-tier bubble: `outer` is the loosely-tinted wrapper holding an
+      // OPTIONAL header (alias - only needed to tell participants apart in
+      // a group, or in 1:1 if the user opts in via Chat settings) and the
+      // footer (reactions/time/read-tick/menu - everything that would
+      // otherwise look lonely floating without a header); `bubble` is the
+      // visually distinct inner message content itself.
+      const outer = document.createElement('div');
+      outer.className = 'qu-chat-msg-outer';
+
+      if (isGroup || getChatSettings().showAliasIn1to1) {
+        const headerRow = document.createElement('div');
+        headerRow.className = 'qu-chat-msg-header';
         const authorEl = document.createElement('span');
         authorEl.className = 'qu-chat-msg-author';
-        authorEl.textContent = await nameFor(message.author);
+        authorEl.textContent = mine ? t('you') : await nameFor(message.author);
         headerRow.appendChild(authorEl);
+        outer.appendChild(headerRow);
       }
-      if (isPinned) {
-        const pinBadge = document.createElement('span');
-        pinBadge.className = 'qu-chat-msg-pin-badge';
-        pinBadge.textContent = '📌';
-        headerRow.appendChild(pinBadge);
-      }
-      const actionsBtn = document.createElement('button');
-      actionsBtn.type = 'button';
-      actionsBtn.className = 'qu-chat-msg-actions-btn';
-      actionsBtn.textContent = '⋮';
-      actionsBtn.title = t('more');
-      actionsBtn.addEventListener('click', (e) => { e.stopPropagation(); openActionsMenu(message, allMessages, isPinned, actionsBtn); });
-      headerRow.appendChild(actionsBtn);
-      row.appendChild(headerRow);
 
       const bubble = document.createElement('div');
       bubble.className = 'qu-chat-message';
@@ -1301,8 +1921,10 @@ export function mount(container, { qu, services, segments, subscribe }) {
       } else if (message.body) {
         const body = document.createElement('div');
         body.className = 'qu-chat-body';
-        body.textContent = message.body;
+        renderLinkedText(body, message.body);
         bubble.appendChild(body);
+        const preview = buildLinkPreview(message.body);
+        if (preview) bubble.appendChild(preview);
       }
 
       if (message.attachment) {
@@ -1322,7 +1944,9 @@ export function mount(container, { qu, services, segments, subscribe }) {
           const img = document.createElement('img');
           services.assets.download(spaceId, message.attachment.assetId).then((asset) => {
             if (stopped || !asset) return;
-            img.src = URL.createObjectURL(new Blob([asset.data], { type: asset.meta.mime }));
+            const url = URL.createObjectURL(new Blob([asset.data], { type: asset.meta.mime }));
+            img.src = url;
+            img.addEventListener('click', () => openLightbox(url));
           });
           attEl.appendChild(img);
         } else if (message.attachment.mime?.startsWith('video/')) {
@@ -1353,47 +1977,77 @@ export function mount(container, { qu, services, segments, subscribe }) {
         bubble.appendChild(attEl);
       }
 
+      outer.appendChild(bubble);
+
+      // Footer: reactions bottom-left, everything else (pin badge, edited
+      // marker, permalink time, read tick, ⋮ menu) bottom-right - kept
+      // OUTSIDE the header so it's always present even when the header
+      // (alias) itself is hidden, per the "menu looks lonely without an
+      // alias above it" feedback.
+      const footer = document.createElement('div');
+      footer.className = 'qu-chat-msg-footer';
+
       const reactions = await services.threads.getReactions(spaceId, threadId, message.id);
       const reactionEntries = Object.entries(reactions).filter(([, pubs]) => pubs.length > 0);
-      if (reactionEntries.length > 0) {
-        const reactionsRow = document.createElement('div');
-        reactionsRow.className = 'qu-chat-reactions';
-        for (const [emoji, reactorPubs] of reactionEntries) {
-          const chip = document.createElement('button');
-          chip.type = 'button';
-          chip.className = 'qu-chat-reaction-chip';
-          const mineReaction = reactorPubs.includes(myActorPub);
-          chip.dataset.mine = String(mineReaction);
-          chip.textContent = `${emoji} ${reactorPubs.length}`;
-          chip.addEventListener('click', async () => {
-            await services.threads.setReaction(spaceId, threadId, message.id, mineReaction ? null : emoji);
-            await reload();
-          });
-          reactionsRow.appendChild(chip);
-        }
-        bubble.appendChild(reactionsRow);
+      const reactionsRow = document.createElement('div');
+      reactionsRow.className = 'qu-chat-reactions';
+      for (const [emoji, reactorPubs] of reactionEntries) {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'qu-chat-reaction-chip';
+        const mineReaction = reactorPubs.includes(myActorPub);
+        chip.dataset.mine = String(mineReaction);
+        chip.textContent = `${emoji} ${reactorPubs.length}`;
+        chip.addEventListener('click', async () => {
+          await services.threads.setReaction(spaceId, threadId, message.id, mineReaction ? null : emoji);
+          await reload();
+        });
+        reactionsRow.appendChild(chip);
       }
+      footer.appendChild(reactionsRow);
 
       const meta = document.createElement('div');
       meta.className = 'qu-chat-msg-meta';
+      if (isPinned) {
+        const pinBadge = document.createElement('span');
+        pinBadge.className = 'qu-chat-msg-pin-badge';
+        pinBadge.textContent = '📌';
+        meta.appendChild(pinBadge);
+      }
       if (message.editedAt) {
         const edited = document.createElement('span');
         edited.textContent = '✏️';
         meta.appendChild(edited);
       }
-      const time = document.createElement('span');
+      const time = document.createElement('button');
+      time.type = 'button';
+      time.className = 'qu-chat-msg-time';
       time.textContent = fmtTime(message.ts);
+      time.title = t('permalink');
+      // "Klick auf die Zeit setzt den entsprechenden Anker" - clicking a
+      // message's own timestamp turns it into this room's shareable
+      // permalink (URL updated via history.replaceState, not
+      // location.hash - see setAnchor()'s own doc comment above for why).
+      time.addEventListener('click', (e) => { e.stopPropagation(); setAnchor(message.id); scrollToMessage(message.id); });
       meta.appendChild(time);
       if (mine) {
         const tick = document.createElement('span');
         tick.className = 'qu-chat-tick';
-        tick.textContent = '✓';
         tickEls.set(message.id, tick);
+        renderTickState(tick, tickStateFor(message.id, false));
         meta.appendChild(tick);
       }
-      bubble.appendChild(meta);
+      const actionsBtn = document.createElement('button');
+      actionsBtn.type = 'button';
+      actionsBtn.className = 'qu-chat-msg-actions-btn';
+      actionsBtn.textContent = '⋮';
+      actionsBtn.title = t('more');
+      actionsBtn.addEventListener('click', (e) => { e.stopPropagation(); openActionsMenu(message, allMessages, isPinned, actionsBtn); });
+      meta.appendChild(actionsBtn);
+      footer.appendChild(meta);
 
-      row.appendChild(bubble);
+      outer.appendChild(footer);
+      row.appendChild(outer);
       return row;
     }
 
@@ -1432,8 +2086,10 @@ export function mount(container, { qu, services, segments, subscribe }) {
       replyTo = null;
       renderComposerBanner();
 
-      await services.threads.postMessage(spaceId, threadId, { body, replyTo: replyToId, extra });
-      await reload();
+      const posted = await services.threads.postMessage(spaceId, threadId, { body, replyTo: replyToId, extra });
+      pendingSyncIds.add(posted.id);
+      await reload({ forceScrollBottom: true });
+      confirmSync(posted.id, paths.threadMessagePath(spaceId, threadId, posted.id));
     });
 
     input.addEventListener('keydown', (event) => {
@@ -1480,10 +2136,13 @@ export function mount(container, { qu, services, segments, subscribe }) {
     // above.
     const cleanupRoom = () => {
       document.removeEventListener('click', onDocClick);
+      document.removeEventListener('keydown', onLightboxKeydown);
       actionsMenuEl.remove();
       reactionPopupEl.remove();
       pinListPopupEl.remove();
+      lightboxEl.remove();
       if (readReceiptTimer) clearInterval(readReceiptTimer);
+      releaseMic(); // navigating away mid-recording (without discarding first) must not leave the mic indicator on
     };
     roomCleanups.push(cleanupRoom);
   }
