@@ -42,13 +42,29 @@
  *      show up even after reconnecting", covering every Service built on
  *      DocumentService/CollectionService/ThreadService (Chat, Calendar, Geo
  *      Chase, Forum, Todo, ...), not just one app.
+ *  11. Identity backup/transfer: QuIdentityEngine.exportSeedCode() ->
+ *      importSeedCode() reconstructs the SAME identity (same derived main
+ *      keypair) in a fresh store, the cross-device mechanism
+ *      apps/profile/client.js's backup section and apps/shell's onboarding
+ *      screen both build their UI around - plus the overwrite guard
+ *      (rejects a conflicting import without { overwrite: true }) and
+ *      malformed-code rejection.
+ *  12. @qu/qr: encodeToImageData() -> decodeFromImageData() round-trips a
+ *      real payload-shaped string (the exact shape exportSeedCode()
+ *      produces) through actual QR encoding/decoding - no browser/DOM
+ *      needed, see that package's own doc comment for why.
  *
  * NOT covered here (verified manually with Playwright during development,
  * not wired into this script to avoid adding a browser-automation
  * dependency to routine test runs): apps/shell actually rendering in a
  * browser - self-generating nav from /apps.json, mounting apps/notes'
- * clientMain, <qu-view>/<qu-bind>/<qu-list> reactivity, favoriting, and
- * identity/data persistence across a reload via IndexedDB.
+ * clientMain, <qu-view>/<qu-bind>/<qu-list> reactivity, favoriting,
+ * identity/data persistence across a reload via IndexedDB, the onboarding
+ * screen (apps/shell/src/onboarding.js), the profile app's backup UI
+ * (camera-based QR scanning in particular - `getUserMedia`/`<video>` have
+ * no meaningful Node equivalent), and IndexedDBAdapter.destroy() (there is
+ * no `indexedDB` global in Node) - the identity/QR *logic* those UIs are
+ * built on is what sections 11-12 above actually verify.
  */
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -498,6 +514,68 @@ try {
     bob.sync.close();
     bob.transport.close();
     console.log('    OK - a message missed while genuinely disconnected self-corrects on reconnect via background refresh');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Identity backup/transfer: exportSeedCode() -> importSeedCode()');
+  // ---------------------------------------------------------------------
+  {
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    const sourceRt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+    const sourceIdentity = new QuIdentityEngine(sourceRt.core);
+    await sourceIdentity.importMnemonic(sourceIdentity.generateMnemonic());
+    const sourceMainPub = QuCrypto.toBase64Url((await sourceIdentity.getMainKey()).publicKey);
+
+    const code = await sourceIdentity.exportSeedCode();
+    assert.equal(typeof code, 'string');
+    assert.ok(code.length > 0);
+
+    // A fresh "device" (its own empty store) importing that code must
+    // derive the EXACT same main keypair - this is the whole point of the
+    // transfer mechanism apps/profile's backup section exposes.
+    const targetRt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+    const targetIdentity = new QuIdentityEngine(targetRt.core);
+    await targetIdentity.importSeedCode(code);
+    const targetMainPub = QuCrypto.toBase64Url((await targetIdentity.getMainKey()).publicKey);
+    assert.equal(targetMainPub, sourceMainPub, 'importing a backup code must reconstruct the exact same identity');
+
+    // The same one-seed-per-store guard importMnemonic() already has -
+    // a second, DIFFERENT identity must not silently clobber an existing one.
+    const otherRt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+    const otherIdentity = new QuIdentityEngine(otherRt.core);
+    await otherIdentity.importMnemonic(otherIdentity.generateMnemonic());
+    await assert.rejects(
+      () => otherIdentity.importSeedCode(code),
+      /already holds a different identity seed/,
+      'importing a different identity without { overwrite: true } must be rejected'
+    );
+    await otherIdentity.importSeedCode(code, { overwrite: true }); // explicit overwrite must succeed
+    assert.equal(QuCrypto.toBase64Url((await otherIdentity.getMainKey()).publicKey), sourceMainPub);
+
+    // Garbage input must fail loudly, not silently derive a bogus identity.
+    const garbageRt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+    await assert.rejects(
+      () => new QuIdentityEngine(garbageRt.core).importSeedCode('not-a-real-backup-code'),
+      /not a valid backup code/
+    );
+
+    console.log('    OK - a backup code reconstructs the exact same identity on a fresh store, with the same conflict guard as importMnemonic()');
+  }
+
+  // ---------------------------------------------------------------------
+  section('@qu/qr: encodeToImageData() -> decodeFromImageData() round-trip');
+  // ---------------------------------------------------------------------
+  {
+    const { encodeToImageData, decodeFromImageData } = await import('@qu/qr');
+    // Same shape/length a real identity backup code has (base64url, ~86
+    // chars for a 64-byte seed) - proving the QR mechanism can actually
+    // carry this payload, not just a short test string.
+    const payload = QuCrypto.toBase64Url(crypto.getRandomValues(new Uint8Array(64)));
+    const { data, width, height } = encodeToImageData(payload);
+    const decoded = decodeFromImageData(data, width, height);
+    assert.equal(decoded, payload, 'a QR-encoded identity backup code must decode back to the exact original string');
+    console.log('    OK - a full-size identity backup code survives a real QR encode/decode round trip');
   }
 
   // ---------------------------------------------------------------------

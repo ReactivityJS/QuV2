@@ -55,4 +55,36 @@ export class IndexedDBAdapter {
       request.onerror = () => reject(request.error);
     });
   }
+
+  /**
+   * Permanently deletes this adapter's ENTIRE underlying IndexedDB database -
+   * every QuBit ever stored under it, gone, unrecoverable. There is no
+   * finer-grained delete anywhere in this stack (QuStore itself has no
+   * delete() at all - every other method here is put/get only), so this is
+   * a deliberate all-or-nothing operation. Used for "forget this identity"
+   * (see apps/shell/src/main.js's `_wipeIdentity()`) - a browser profile's
+   * `quniverse-store`/`quniverse-blob` databases hold exactly one
+   * identity's worth of data (see @qu/identity's own "one seed per store"
+   * doc comment), so wiping them IS wiping the identity.
+   * @returns {Promise<void>}
+   */
+  async destroy() {
+    // Close our own open connection first - deleteDatabase() blocks (fires
+    // onblocked, never onsuccess) while ANY connection to it is still open,
+    // including this adapter's own.
+    if (this.#dbPromise) {
+      const db = await this.#dbPromise;
+      db.close();
+      this.#dbPromise = null;
+    }
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.deleteDatabase(this.dbName);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+      // Some OTHER tab/connection still has it open - the browser completes
+      // the delete once that closes on its own; not worth blocking the
+      // caller (typically about to reload the page) on that.
+      request.onblocked = () => resolve();
+    });
+  }
 }
