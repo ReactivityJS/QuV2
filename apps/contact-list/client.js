@@ -17,6 +17,7 @@
  */
 import { createI18n } from '@qu/i18n';
 import { actionsForMount, resolveActionHref } from '@qu/foundation';
+import { renderAvatar } from '@qu/ui';
 
 const DICT = {
   en: { title: 'Contacts', empty: 'No contacts yet — add some from the User List.', remove: 'Remove' },
@@ -84,10 +85,12 @@ export function mount(container, { services, apps }) {
 
 function row({ actorPub, profile }, services, refresh, rowActions) {
   const li = document.createElement('li');
+  const alias = profile?.alias ?? `~${actorPub.slice(0, 16)}…`;
+  li.appendChild(renderAvatar(actorPub, alias, profile?.avatar, { size: '2.2rem' }));
   const name = document.createElement('a');
   name.className = 'qu-contact-name';
   name.href = `#/~${actorPub}`;
-  name.textContent = profile?.alias ?? `~${actorPub.slice(0, 16)}…`;
+  name.textContent = alias;
   li.appendChild(name);
 
   // Every action any OTHER app declared for the "contact-row" mount (see

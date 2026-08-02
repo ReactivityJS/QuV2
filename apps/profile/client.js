@@ -23,6 +23,7 @@
 import { createI18n, getStoredLocale, setLocale } from '@qu/i18n';
 import { watch } from '@qu/reactive';
 import { actorPath } from '@qu/identity';
+import { renderAvatar } from '@qu/ui';
 
 /** Locales every app's dictionary in this codebase actually ships - see @qu/i18n's own doc comment for why this is a device preference, not per-identity. */
 const AVAILABLE_LOCALES = [
@@ -105,6 +106,7 @@ const STYLE = `
   .qu-profile-settings a { color: inherit; }
   .qu-profile-actions { display: flex; gap: 0.8rem; align-items: center; margin-top: 0.5rem; }
   .qu-profile-empty { opacity: 0.7; }
+  .qu-profile-avatar { margin: 0.3rem 0 0.9rem; }
 `;
 
 function ensureStyle() {
@@ -161,6 +163,9 @@ async function renderOwnProfile(container, services, isStopped) {
   heading.textContent = t('titleOwn');
   container.appendChild(heading);
 
+  const ownAvatar = renderAvatar(ownProfile.pub, ownProfile.alias, ownProfile.avatar, { size: '4.5rem' });
+  ownAvatar.classList.add('qu-profile-avatar');
+  container.appendChild(ownAvatar);
   container.appendChild(keysSection(ownProfile.pub, ownProfile.epub));
 
   const form = document.createElement('form');
@@ -270,11 +275,9 @@ async function renderPublicProfile(container, services, targetPub, isStopped) {
   heading.textContent = profile?.alias ? `${profile.alias}` : t('titleOther');
   container.appendChild(heading);
 
-  if (profile?.avatar) {
-    const avatar = document.createElement('p');
-    avatar.textContent = profile.avatar;
-    container.appendChild(avatar);
-  }
+  const publicAvatar = renderAvatar(targetPub, profile?.alias ?? '', profile?.avatar, { size: '4.5rem' });
+  publicAvatar.classList.add('qu-profile-avatar');
+  container.appendChild(publicAvatar);
 
   container.appendChild(keysSection(targetPub, profile?.epub ?? ''));
 

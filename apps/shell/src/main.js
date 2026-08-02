@@ -31,6 +31,7 @@ import { QuIdentityEngine, actorPath } from '@qu/identity';
 import { SyncEngine, WebSocketClientTransport } from '@qu/sync';
 import { createServices, paths } from '@qu/services';
 import { watch } from '@qu/reactive';
+import { renderAvatar } from '@qu/ui';
 import { parseHash, buildHash } from './router.js';
 import { resolveFavoriteApps } from './nav.js';
 import { loadClientModule } from './load-client-module.js';
@@ -185,7 +186,10 @@ class Shell {
     const idLink = document.createElement('a');
     idLink.className = 'qu-shell-id';
     idLink.href = buildHash(`~${this.actorPub}`);
-    idLink.textContent = `~${this.actorPub.slice(0, 10)}…`;
+    let idAvatarEl = renderAvatar(this.actorPub, '', null, { size: '1.6rem' });
+    const idText = document.createElement('span');
+    idText.textContent = `~${this.actorPub.slice(0, 10)}…`;
+    idLink.append(idAvatarEl, idText);
     // watch() as TRIGGER, re-fetch via ProfileService - not the raw notify
     // value, which for a profile is a signed envelope (`{profile,
     // signature}`, see @qu/identity's `#publishProfileWithKeys()`), not the
@@ -194,7 +198,10 @@ class Shell {
     // data (see @qu/reactive's own doc comment).
     watch(this.qu, actorPath(this.actorPub, 'profile'), async () => {
       const profile = await this.Qu.profile.getOwnProfile();
-      idLink.textContent = profile.alias || `~${this.actorPub.slice(0, 10)}…`;
+      idText.textContent = profile.alias || `~${this.actorPub.slice(0, 10)}…`;
+      const nextAvatar = renderAvatar(this.actorPub, profile.alias, profile.avatar, { size: '1.6rem' });
+      idAvatarEl.replaceWith(nextAvatar);
+      idAvatarEl = nextAvatar;
     });
 
     header.append(brand, backBtn, forwardBtn, spacer, this.headerMenu.el, bellBtn, idLink);
