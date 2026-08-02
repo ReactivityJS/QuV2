@@ -52,3 +52,46 @@ export function createFreshnessTracker(syncFetch, getGeneration) {
     syncFetch(path).catch(() => {});
   };
 }
+
+/**
+ * Sibling to `createFreshnessTracker()` above, for the OTHER half of every
+ * Service's existing "local miss -> blocking syncFetch-once" backfill (see
+ * e.g. CollectionService.listRawPaths()): that blocking fetch is correct
+ * to attempt on a genuine first look (a shared link/thread opened for the
+ * first time, or a per-message reactions collection this device has never
+ * checked - CONFIRMING "nothing there" is itself useful information), but
+ * with no gating at all it re-runs a full network round-trip on EVERY
+ * single call for as long as the path stays locally empty - which, for
+ * something like an unreacted-to chat message, is forever, every reload.
+ * Concretely: a 40-message room with no reactions yet did 40 sequential
+ * blocking fetches on every single re-render - invisible before Chat's
+ * `reload()` rendered progressively (each fetch's wait was masked by the
+ * previous rows already being on screen), but a hard, fully-blocking
+ * multi-second stall once rendering became atomic (build everything, then
+ * show it - see reload()'s own doc comment). `alreadyAttemptedMiss(path)`
+ * gives callers a way to ask ONCE per generation and skip the repeat
+ * round-trips for the rest of it, while still re-checking after every
+ * reconnect - the same "local first, remote delta merged after" shape
+ * `backgroundRefresh` already gives the "data exists but might be stale"
+ * case, applied to the "confirmed absent so far" case instead.
+ * @param {() => number} [getGeneration]
+ * @returns {(path: string) => boolean} True if this exact path was already
+ *   checked (successfully or not) since the last (re)connect - the caller
+ *   should skip the blocking fetch and trust the current local (empty)
+ *   read. Marks the path as attempted as a side effect, so call this
+ *   right before deciding whether to fetch, not speculatively. Always
+ *   false (never skips) when there's no generation concept at all (e.g. a
+ *   relay-side QuCore with no single upstream peer) - matches the
+ *   unconditional-attempt behavior every caller already had before this.
+ */
+export function createMissGate(getGeneration) {
+  const attemptedAt = new Map(); // path -> generation last attempted (and still missing) in
+
+  return function alreadyAttemptedMiss(path) {
+    if (!getGeneration) return false;
+    const currentGeneration = getGeneration();
+    if (attemptedAt.get(path) === currentGeneration) return true;
+    attemptedAt.set(path, currentGeneration);
+    return false;
+  };
+}

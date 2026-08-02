@@ -1,6 +1,6 @@
 import { collectionPath } from './paths.js';
 import { unwrap, unwrapAll } from './unwrap.js';
-import { createFreshnessTracker } from './sync-freshness.js';
+import { createFreshnessTracker, createMissGate } from './sync-freshness.js';
 
 const MAX_MUTATE_RETRIES = 5;
 
@@ -36,6 +36,7 @@ const MAX_MUTATE_RETRIES = 5;
 export class CollectionService {
   #locks = new Map(); // "spaceId:collectionId" -> tail of the promise chain serializing addItem()/removeItem() for that collection
   #backgroundRefresh;
+  #alreadyAttemptedMiss;
 
   /**
    * @param {import('@qu/core').QuCore} qu
@@ -55,6 +56,7 @@ export class CollectionService {
     this.qu = qu;
     this.syncFetch = syncFetch;
     this.#backgroundRefresh = createFreshnessTracker(syncFetch, getGeneration);
+    this.#alreadyAttemptedMiss = createMissGate(getGeneration);
   }
 
   /**
@@ -83,7 +85,7 @@ export class CollectionService {
       this.#backgroundRefresh(path);
       return unwrapAll(quBit.val);
     }
-    if (!this.syncFetch) return null;
+    if (!this.syncFetch || this.#alreadyAttemptedMiss(path)) return null;
     await this.syncFetch(path).catch(() => {});
     const retried = await this.qu.get(path);
     return retried ? unwrapAll(retried.val) : null;
@@ -169,7 +171,7 @@ export class CollectionService {
     let raw = await adapter.get(rel);
     if (raw) {
       this.#backgroundRefresh(path);
-    } else if (this.syncFetch) {
+    } else if (this.syncFetch && !this.#alreadyAttemptedMiss(path)) {
       await this.syncFetch(path).catch(() => {});
       raw = await adapter.get(rel);
     }
