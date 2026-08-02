@@ -41,6 +41,7 @@
 import { watch } from '@qu/reactive';
 import { paths, THREAD_PRESETS } from '@qu/services';
 import { createI18n } from '@qu/i18n';
+import { renderSubpage } from '@qu/ui';
 
 const NAMESPACE = 'calendars';
 const PALETTE = ['#e0483e', '#3e7fe0', '#3ea05e', '#d0a02a', '#9a4fe0', '#e0648a', '#2ab3a6', '#c47a2a'];
@@ -69,6 +70,7 @@ const DICT = {
     invalidLink: 'This calendar link is invalid, or the calendar isn’t reachable right now.',
     inviteFailed: 'Could not invite {name}: {message}',
     unknownPerson: '~{pub}…', youSuffix: '{name} (you)',
+    backToCalendar: '← Calendar', noEditableCalendars: 'No calendar you can add events to — create one first.',
   },
   de: {
     title: 'Kalender', myCalendars: 'Meine Kalender', sharedWithMe: 'Für mich freigegeben', untitled: 'Unbenannter Kalender',
@@ -90,6 +92,7 @@ const DICT = {
     invalidLink: 'Dieser Kalender-Link ist ungültig, oder der Kalender ist gerade nicht erreichbar.',
     inviteFailed: '{name} konnte nicht eingeladen werden: {message}',
     unknownPerson: '~{pub}…', youSuffix: '{name} (Du)',
+    backToCalendar: '← Kalender', noEditableCalendars: 'Kein Kalender, dem du Termine hinzufügen kannst — zuerst einen anlegen.',
   },
 };
 const { t } = createI18n(DICT);
@@ -150,6 +153,9 @@ const STYLE = `
   .qu-cal-form-row > * { flex: 1; }
   .qu-cal-dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.4rem; }
   .qu-cal-dialog-actions .qu-cal-danger { color: #c0392b; }
+  .qu-subpage-back { display: inline-block; margin-bottom: 0.8rem; text-decoration: none; color: inherit; opacity: 0.8; }
+  .qu-subpage-back:hover { opacity: 1; text-decoration: underline; }
+  .qu-subpage-content { max-width: 28rem; }
   .qu-cal-member-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0; }
   .qu-cal-member-row .qu-cal-member-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qu-cal-invite-row { display: flex; gap: 0.4rem; align-items: center; margin-top: 0.4rem; }
@@ -237,6 +243,14 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
   (async () => {
     myActorPub = await services.actors.whoAmI();
     if (stopped) return;
+    // `new` is a reserved sub-route (same "one reserved segment value"
+    // convention as the shell's own `#/~<pub>` sigil) meaning "render the
+    // New Event subpage", checked BEFORE the general calendarId/invite-link
+    // handling below so it never gets mistaken for an actual calendar id.
+    if (calendarId === 'new') {
+      await renderNewEventSubpage();
+      return;
+    }
     if (calendarId) {
       await handleInviteLink(calendarId);
       return;
@@ -513,7 +527,13 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       newBtn.type = 'button';
       newBtn.className = 'qu-cal-primary';
       newBtn.textContent = `+ ${t('newEvent')}`;
-      newBtn.addEventListener('click', () => openEventDialog({ mode: 'create', editableCals, start: new Date(cursor) }));
+      // A real route (`#/calendar/new`, see this file's route dispatch in
+      // mount() and renderNewEventSubpage() below), not a dialog - this
+      // button isn't anchored to anything on screen (unlike the grid-slot
+      // click below, which stays a quick-create dialog on purpose), so
+      // there's no UX cost to a real sub-page here, and it gets working
+      // back/forward for free (see @qu/ui's renderSubpage()).
+      newBtn.addEventListener('click', () => { location.hash = '#/calendar/new'; });
       bar.appendChild(newBtn);
     }
 
@@ -736,104 +756,166 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     return dialog;
   }
 
+  /**
+   * Builds the create/edit event form itself, detached from any particular
+   * host (a `<dialog>` or a subpage's content element - see the two callers
+   * below) - `onCancel`/`onDone` are what let the SAME form logic serve
+   * both without duplicating a single field or the submit handler.
+   * @param {{mode: 'create'|'edit', editableCals: Array, start?: Date, existing?: object, onCancel: () => void, onDone: () => Promise<void>}} params
+   * @returns {HTMLFormElement}
+   */
+  function buildEventForm({ mode, editableCals, start, existing, onCancel, onDone }) {
+    const form = document.createElement('form');
+    form.className = 'qu-cal-form';
+    form.method = 'dialog';
+
+    const h = document.createElement('h2');
+    h.textContent = mode === 'edit' ? t('edit') : t('newEvent');
+    form.appendChild(h);
+
+    const titleInput = document.createElement('input');
+    titleInput.placeholder = t('eventTitle');
+    titleInput.required = true;
+    titleInput.value = existing?.title ?? '';
+    const titleLabel = document.createElement('label');
+    titleLabel.append(t('eventTitle'), titleInput);
+
+    const descInput = document.createElement('textarea');
+    descInput.placeholder = t('eventDescription');
+    descInput.value = existing?.description ?? '';
+    const descLabel = document.createElement('label');
+    descLabel.append(t('eventDescription'), descInput);
+
+    const allDayInput = document.createElement('input');
+    allDayInput.type = 'checkbox';
+    allDayInput.checked = existing?.allDay ?? false;
+    const allDayLabel = document.createElement('label');
+    allDayLabel.style.flexDirection = 'row';
+    allDayLabel.append(allDayInput, t('allDay'));
+
+    const startBase = existing?.start ?? start?.getTime() ?? Date.now();
+    const endBase = existing?.end ?? (startBase + 60 * 60 * 1000);
+    const startInput = document.createElement('input');
+    startInput.type = 'datetime-local';
+    startInput.required = true;
+    startInput.value = toLocalInputValue(mode === 'create' && !existing ? roundToHalfHour(new Date(startBase)).getTime() : startBase);
+    const startLabel = document.createElement('label');
+    startLabel.append(t('start'), startInput);
+
+    const endInput = document.createElement('input');
+    endInput.type = 'datetime-local';
+    endInput.value = toLocalInputValue(mode === 'create' && !existing ? roundToHalfHour(new Date(startBase)).getTime() + 60 * 60 * 1000 : endBase);
+    const endLabel = document.createElement('label');
+    endLabel.append(t('end'), endInput);
+
+    const row = document.createElement('div');
+    row.className = 'qu-cal-form-row';
+    row.append(startLabel, endLabel);
+
+    const calSelect = document.createElement('select');
+    for (const cal of editableCals) {
+      const option = document.createElement('option');
+      option.value = cal.id;
+      option.textContent = cal.meta.title || t('untitled');
+      if (cal.id === existing?.calendarId) option.selected = true;
+      calSelect.appendChild(option);
+    }
+    const calLabel = document.createElement('label');
+    calLabel.append(t('calendarLabel'), calSelect);
+
+    form.append(titleLabel, descLabel, allDayLabel, row, calLabel);
+
+    const actions = document.createElement('div');
+    actions.className = 'qu-cal-dialog-actions';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = t('close');
+    cancelBtn.addEventListener('click', () => onCancel());
+    const submitBtn = document.createElement('button');
+    submitBtn.type = 'submit';
+    submitBtn.className = 'qu-cal-primary';
+    submitBtn.textContent = mode === 'edit' ? t('save') : t('add');
+    actions.append(cancelBtn, submitBtn);
+    form.appendChild(actions);
+
+    form.addEventListener('submit', async () => {
+      const title = titleInput.value.trim();
+      if (!title) return;
+      const calId = calSelect.value;
+      const payload = {
+        id: existing?.id ?? crypto.randomUUID(),
+        title,
+        description: descInput.value.trim(),
+        start: new Date(startInput.value).getTime(),
+        end: new Date(endInput.value || startInput.value).getTime(),
+        allDay: allDayInput.checked,
+      };
+      if (mode === 'edit' && existing.calendarId !== calId) {
+        await removeEvent(existing.calendarId, existing.id);
+        await upsertEvent(calId, payload, { isNew: true });
+      } else {
+        await upsertEvent(calId, payload, { isNew: mode === 'create' });
+      }
+      await onDone();
+    });
+
+    return form;
+  }
+
+  /**
+   * The grid-slot "quick create" and the Edit button inside an event's
+   * detail dialog both stay dialogs on purpose: both are triggered from a
+   * specific spot on screen (a clicked time slot, an already-open detail
+   * view) where a full page navigation would lose that context for no
+   * benefit - see the toolbar's own unanchored "+ New event" button
+   * (renderNewEventSubpage() below) for the case that DOES navigate.
+   */
   function openEventDialog({ mode, editableCals, start, event: existing }) {
     openDialog((dialog) => {
-      const form = document.createElement('form');
-      form.className = 'qu-cal-form';
-      form.method = 'dialog';
-
-      const h = document.createElement('h2');
-      h.textContent = mode === 'edit' ? t('edit') : t('newEvent');
-      form.appendChild(h);
-
-      const titleInput = document.createElement('input');
-      titleInput.placeholder = t('eventTitle');
-      titleInput.required = true;
-      titleInput.value = existing?.title ?? '';
-      const titleLabel = document.createElement('label');
-      titleLabel.append(t('eventTitle'), titleInput);
-
-      const descInput = document.createElement('textarea');
-      descInput.placeholder = t('eventDescription');
-      descInput.value = existing?.description ?? '';
-      const descLabel = document.createElement('label');
-      descLabel.append(t('eventDescription'), descInput);
-
-      const allDayInput = document.createElement('input');
-      allDayInput.type = 'checkbox';
-      allDayInput.checked = existing?.allDay ?? false;
-      const allDayLabel = document.createElement('label');
-      allDayLabel.style.flexDirection = 'row';
-      allDayLabel.append(allDayInput, t('allDay'));
-
-      const startBase = existing?.start ?? start?.getTime() ?? Date.now();
-      const endBase = existing?.end ?? (startBase + 60 * 60 * 1000);
-      const startInput = document.createElement('input');
-      startInput.type = 'datetime-local';
-      startInput.required = true;
-      startInput.value = toLocalInputValue(mode === 'create' && !existing ? roundToHalfHour(new Date(startBase)).getTime() : startBase);
-      const startLabel = document.createElement('label');
-      startLabel.append(t('start'), startInput);
-
-      const endInput = document.createElement('input');
-      endInput.type = 'datetime-local';
-      endInput.value = toLocalInputValue(mode === 'create' && !existing ? roundToHalfHour(new Date(startBase)).getTime() + 60 * 60 * 1000 : endBase);
-      const endLabel = document.createElement('label');
-      endLabel.append(t('end'), endInput);
-
-      const row = document.createElement('div');
-      row.className = 'qu-cal-form-row';
-      row.append(startLabel, endLabel);
-
-      const calSelect = document.createElement('select');
-      for (const cal of editableCals) {
-        const option = document.createElement('option');
-        option.value = cal.id;
-        option.textContent = cal.meta.title || t('untitled');
-        if (cal.id === existing?.calendarId) option.selected = true;
-        calSelect.appendChild(option);
-      }
-      const calLabel = document.createElement('label');
-      calLabel.append(t('calendarLabel'), calSelect);
-
-      form.append(titleLabel, descLabel, allDayLabel, row, calLabel);
-
-      const actions = document.createElement('div');
-      actions.className = 'qu-cal-dialog-actions';
-      const cancelBtn = document.createElement('button');
-      cancelBtn.type = 'button';
-      cancelBtn.textContent = t('close');
-      cancelBtn.addEventListener('click', () => dialog.close());
-      const submitBtn = document.createElement('button');
-      submitBtn.type = 'submit';
-      submitBtn.className = 'qu-cal-primary';
-      submitBtn.textContent = mode === 'edit' ? t('save') : t('add');
-      actions.append(cancelBtn, submitBtn);
-      form.appendChild(actions);
-
-      form.addEventListener('submit', async () => {
-        const title = titleInput.value.trim();
-        if (!title) return;
-        const calId = calSelect.value;
-        const payload = {
-          id: existing?.id ?? crypto.randomUUID(),
-          title,
-          description: descInput.value.trim(),
-          start: new Date(startInput.value).getTime(),
-          end: new Date(endInput.value || startInput.value).getTime(),
-          allDay: allDayInput.checked,
-        };
-        if (mode === 'edit' && existing.calendarId !== calId) {
-          await removeEvent(existing.calendarId, existing.id);
-          await upsertEvent(calId, payload, { isNew: true });
-        } else {
-          await upsertEvent(calId, payload, { isNew: mode === 'create' });
-        }
-        dialog.close();
-        await renderMain();
+      const form = buildEventForm({
+        mode, editableCals, start, existing,
+        onCancel: () => dialog.close(),
+        onDone: async () => { dialog.close(); await renderMain(); },
       });
-
       dialog.appendChild(form);
+    });
+  }
+
+  /**
+   * `#/calendar/new` - the toolbar's "+ New event" button (see `toolbar()`
+   * above) navigates here instead of opening a dialog:
+   * unlike a grid-slot click, this button isn't anchored to anything on
+   * screen, so a real sub-page with working back/forward (see @qu/ui's
+   * `renderSubpage()`) costs nothing and gives the header's back button (or
+   * the browser's own back gesture) somewhere meaningful to go.
+   */
+  async function renderNewEventSubpage() {
+    const mine = await services.starred.list(NAMESPACE);
+    if (stopped) return;
+    const editableCals = [];
+    for (const cal of mine) {
+      const meta = await fetchDoc(cal.id, 'meta', null);
+      if (canEdit(roleOf(meta, myActorPub))) editableCals.push({ id: cal.id, meta });
+    }
+    if (stopped) return;
+
+    renderSubpage(container, {
+      backHref: '#/calendar',
+      backLabel: t('backToCalendar'),
+      render: (content) => {
+        if (editableCals.length === 0) {
+          const p = document.createElement('p');
+          p.textContent = t('noEditableCalendars');
+          content.appendChild(p);
+          return;
+        }
+        const form = buildEventForm({
+          mode: 'create', editableCals, start: new Date(cursor),
+          onCancel: () => history.back(),
+          onDone: async () => { history.back(); },
+        });
+        content.appendChild(form);
+      },
     });
   }
 
@@ -1099,9 +1181,11 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     // encryption key yet (see ThreadService.postMessage's own doc comment).
     // Ordering it first means that failure aborts the whole invite instead
     // of silently granting access nobody was actually notified about.
+    // Uses ThreadService's own `notify()` convenience (see @qu/services) -
+    // the same generic "tell one other actor something happened" primitive
+    // Geo Chase's invite flow now uses too (apps/geochase/client.js).
     try {
-      await services.threads.createThread(spaceId, `invite-${actorPub}`, THREAD_PRESETS.mail(actorPub));
-      await services.threads.postMessage(spaceId, `invite-${actorPub}`, { body: 'invited' });
+      await services.threads.notify(spaceId, actorPub, 'invited');
     } catch {
       throw new Error('their profile hasn’t synced yet - try again shortly');
     }

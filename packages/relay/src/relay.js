@@ -347,8 +347,15 @@ export class QuRelay {
     // calendar collapses into ONE 'calendar' row in notification settings
     // instead of one per calendar id.
     const calendarMatch = String(spaceId).match(/^calendar-(.+)$/);
+    // `geochase-<id>` is Geo Chase's per-game space (see
+    // @qu/services/geochase-service.js's `spaceFor()` and
+    // apps/geochase/client.js's `notifyInvitees()`) - recognized the same
+    // way `calendar-<id>` is above, so every game collapses into ONE
+    // 'geochase' row in notification settings instead of one per game id.
+    const geochaseMatch = String(spaceId).match(/^geochase-(.+)$/);
     const appId = spaceId === 'forum' ? 'forum' : spaceId === 'chat' ? 'chat'
-      : String(spaceId).startsWith('inbox-') ? 'inbox' : calendarMatch ? 'calendar' : String(spaceId);
+      : String(spaceId).startsWith('inbox-') ? 'inbox' : calendarMatch ? 'calendar'
+      : geochaseMatch ? 'geochase' : String(spaceId);
 
     /** @type {Array<{actorPub: string, mention: boolean}>} */
     let candidates;
@@ -367,22 +374,30 @@ export class QuRelay {
     // candidate (see ThreadService's `mail` preset), while `activity`'s
     // candidates are every OTHER current member of the calendar.
     const calendarFunctionName = appId === 'calendar' ? (threadId === 'activity' ? 'eventChange' : 'invite') : null;
+    // Geo Chase only ever posts one kind of notice (an `invite-<pub>`
+    // thread on game creation - see apps/geochase/client.js's
+    // `notifyInvitees()`), so unlike Calendar there's no second threadId to
+    // branch on.
+    const geochaseFunctionName = appId === 'geochase' ? 'invite' : null;
 
     for (const { actorPub, mention } of candidates) {
       const prefs = await this.services.notificationPrefs.getPrefsFor(actorPub);
-      const functionName = calendarFunctionName ?? (mention ? 'mention' : 'newMessage');
+      const functionName = calendarFunctionName ?? geochaseFunctionName ?? (mention ? 'mention' : 'newMessage');
       if (!NotificationPrefsService.shouldNotify(prefs, { appId, mention, functionName })) continue;
 
       // Content-blind by design (see this method's own doc comment) - even
-      // for Calendar, the relay never decrypts the activity/invite body, so
-      // wording stays generic. The one thing it CAN safely add is the
-      // calendar id itself: that's the storage path (`spaceId`), not
-      // encrypted content, so the notification can deep-link straight to
-      // the specific calendar instead of just the app root.
+      // for Calendar/Geo Chase, the relay never decrypts the activity/
+      // invite body, so wording stays generic. The one thing it CAN safely
+      // add is the calendar/game id itself: that's the storage path
+      // (`spaceId`), not encrypted content, so the notification can
+      // deep-link straight to the specific calendar/game instead of just
+      // the app root.
       const payload = calendarFunctionName === 'invite'
         ? { title: 'Calendar invitation', body: 'You were invited to a shared calendar.', appId, url: `#/calendar/${calendarMatch[1]}` }
         : calendarFunctionName === 'eventChange'
         ? { title: 'Calendar updated', body: 'A shared calendar you belong to has new activity.', appId, url: `#/calendar/${calendarMatch[1]}` }
+        : geochaseFunctionName === 'invite'
+        ? { title: 'Geo Chase invitation', body: 'You were invited to a Geo Chase game.', appId, url: `#/geochase/${geochaseMatch[1]}` }
         : {
             title: mention ? `Mentioned in ${appId}` : `New message in ${appId}`,
             body: `~${(authorPub ?? 'someone').slice(0, 10)}… sent a message`,

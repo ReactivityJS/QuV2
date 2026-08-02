@@ -98,6 +98,24 @@ export const MANIFEST_KINDS = Object.freeze(['engine', 'service', 'app']);
  *   settings list from every loaded app's declared `pushActions` instead
  *   of a hard-coded list. An app with no push-worthy events of its own
  *   (most apps) simply omits this field.
+ * @property {Array<{mount: string, id: string, label: string, icon?: string, hrefTemplate: string, order?: number}>} [actions] -
+ *   UI actions THIS app contributes to a named "mount" (an extension point
+ *   some OTHER app renders, e.g. `"contact-row"`) - the concrete,
+ *   declarative half of the "mounts and actions" idea from the
+ *   architecture brainstorming (see @qu/foundation/registry.js's
+ *   `registerCapability` for the older, still-unused runtime-handler half
+ *   of the same idea). A mount-rendering app never imports the
+ *   contributing app; it reads every loaded app's `actions` off the SAME
+ *   manifest catalog it already fetched (`/apps.json`, see
+ *   apps/shell/src/main.js), filters to its own mount id via
+ *   `actionsForMount()`, and builds one link per action with
+ *   `hrefTemplate`'s `{param}` tokens filled in via `resolveActionHref()`
+ *   (see @qu/foundation/actions.js) - e.g. Chat declares `{mount:
+ *   "contact-row", id: "chat", hrefTemplate: "#/chat/{pub}", ...}`, and
+ *   Contact List (which has never heard of Chat) renders it by resolving
+ *   `{pub}` to each contact's actorPub. `order` is a sort hint, lower
+ *   first (defaults to 0). An app with nothing to contribute to any mount
+ *   simply omits this field.
  */
 
 /**
@@ -146,6 +164,15 @@ export function validateManifest(manifest) {
       (a) => a && typeof a === 'object' && typeof a.id === 'string' && typeof a.label === 'string'
     );
     if (!valid) throw new Error('Invalid manifest: "pushActions" must be an array of {id, label} strings');
+  }
+  if (manifest.actions !== undefined) {
+    const valid = Array.isArray(manifest.actions) && manifest.actions.every(
+      (a) => a && typeof a === 'object'
+        && typeof a.mount === 'string' && typeof a.id === 'string' && typeof a.label === 'string' && typeof a.hrefTemplate === 'string'
+        && (a.icon === undefined || typeof a.icon === 'string')
+        && (a.order === undefined || typeof a.order === 'number')
+    );
+    if (!valid) throw new Error('Invalid manifest: "actions" must be an array of {mount, id, label, hrefTemplate, icon?, order?}');
   }
   return manifest;
 }
