@@ -43,7 +43,7 @@
  */
 
 import { QuCrypto } from '@qu/core';
-import { generateMnemonicPhrase, mnemonicToSeedBytes } from './bip39.js';
+import { generateMnemonicPhrase, mnemonicToSeedBytes, isValidMnemonic } from './bip39.js';
 import { deriveNodeFromPath } from './bip32.js';
 import {
   mainSigningPath,
@@ -54,6 +54,21 @@ import {
 } from './paths.js';
 
 const SEED_PATH = '/store/secure/identity/seed';
+
+// Both caches below are naturally bounded for a single identity's OWN keys
+// (one process only ever derives so many space keypairs), but
+// `_attestationCache` is keyed by OTHER actors' pubkeys - a long-running
+// relay or a client resolving many distinct senders' attestations over time
+// would otherwise grow it without bound. A simple insertion-order cap
+// (Map preserves insertion order, so the first key is the oldest) is enough
+// here; this isn't a hot enough path to warrant real LRU bookkeeping.
+const MAX_CACHE_ENTRIES = 2000;
+
+function capCache(map, maxEntries = MAX_CACHE_ENTRIES) {
+  while (map.size > maxEntries) {
+    map.delete(map.keys().next().value);
+  }
+}
 
 /**
  * The one place that knows how an actor's public documents map to storage
@@ -122,6 +137,9 @@ export class QuIdentityEngine {
    * @returns {Promise<void>}
    */
   async importMnemonic(mnemonic, passphrase = '', { overwrite = false } = {}) {
+    if (!isValidMnemonic(mnemonic)) {
+      throw new Error('QuIdentityEngine.importMnemonic: invalid mnemonic (bad word or checksum).');
+    }
     const seed = await mnemonicToSeedBytes(mnemonic, passphrase);
     await this.#storeSeed(seed, overwrite);
   }
@@ -226,6 +244,7 @@ export class QuIdentityEngine {
     const { privateKeyPkcs8, publicKey } = await QuCrypto.keypairFromSeed(curve, node.privateKey);
     const keypair = { privateKeyPkcs8, publicKey };
     this._keyCache.set(cacheKey, keypair);
+    capCache(this._keyCache);
     return keypair;
   }
 
@@ -425,6 +444,7 @@ export class QuIdentityEngine {
 
   #cacheAndReturn(actorPub, value) {
     this._attestationCache.set(actorPub, value);
+    capCache(this._attestationCache);
     return value;
   }
 }

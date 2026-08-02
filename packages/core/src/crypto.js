@@ -220,6 +220,9 @@ export class QuCrypto {
   }
 
   static fromHex(hex) {
+    if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) {
+      throw new Error(`QuCrypto.fromHex: not valid hex: "${hex}"`);
+    }
     const bytes = new Uint8Array(hex.length / 2);
     for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
     return bytes;

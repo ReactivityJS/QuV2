@@ -316,6 +316,9 @@ export class QuStore {
   async #seal(path, val, options) {
     const quBit = createQuBit(path, val);
 
+    if (options.signWith && !options.writerPub) {
+      throw new Error('QuStore.put: writerPub is required when signWith is set (see #seal doc comment above).');
+    }
     if (options.writerPub) {
       quBit.pub = QuCrypto.toBase64(toBytes(options.writerPub, 'writerPub'));
     }
