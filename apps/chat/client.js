@@ -1614,10 +1614,17 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     async function nameFor(actorPub) {
       if (actorPub === myActorPub) return t('you');
       if (!isGroup) return headerName;
+      // Caches the PROMISE, not the resolved value - messageRow() calls
+      // now run concurrently (see reload()'s Promise.all), so several
+      // messages from the SAME group member can call this before the
+      // first lookup has resolved; storing the in-flight promise
+      // synchronously (before awaiting) means every concurrent caller
+      // for that actorPub shares the one request instead of each kicking
+      // off its own redundant profile fetch.
       if (!profileCache.has(actorPub)) {
-        profileCache.set(actorPub, await services.profile.getPublicProfile(actorPub));
+        profileCache.set(actorPub, services.profile.getPublicProfile(actorPub));
       }
-      const profile = profileCache.get(actorPub);
+      const profile = await profileCache.get(actorPub);
       return profile?.alias || `~${actorPub.slice(0, 10)}…`;
     }
 
@@ -2009,10 +2016,20 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
         li.textContent = t('empty');
         frag.appendChild(li);
       } else {
-        for (const message of messages) {
-          let row;
+        // Built CONCURRENTLY (Promise.all), not one message awaited at a
+        // time - messageRow() does per-message network-shaped work
+        // (reaction/name lookups; see getReactions()'s own doc comment on
+        // why an unreacted-to message's reactions collection can mean a
+        // real relay round-trip on this device's first look at it), and
+        // a sequential loop pays that cost N times over, once per
+        // message, in series - a 40-message room did 40 round-trips back
+        // to back before anything could render. Promise.all still
+        // preserves message order in the resolved array regardless of
+        // which one finishes first, so this changes nothing about how
+        // the list looks, only how long it takes to get there.
+        const rows = await Promise.all(messages.map(async (message) => {
           try {
-            row = await messageRow(message, messages, pinnedIds.includes(message.id));
+            return await messageRow(message, messages, pinnedIds.includes(message.id));
           } catch (err) {
             // One malformed/legacy message (e.g. from an older schema,
             // or an attachment that no longer resolves) must not silently
@@ -2025,14 +2042,15 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
             // it. Render a visible placeholder for just this one message
             // and keep going instead of losing the rest of the room.
             console.error('[chat] messageRow() failed for message', message.id, err);
-            row = document.createElement('li');
+            const row = document.createElement('li');
             row.className = 'qu-chat-msg-row qu-chat-msg-row-error';
             row.dataset.messageId = message.id;
             row.textContent = t('messageRenderError');
+            return row;
           }
-          if (myToken !== renderToken) return; // a newer reload() started mid-loop - abandon this stale one, live list still untouched
-          frag.appendChild(row);
-        }
+        }));
+        if (myToken !== renderToken) return; // a newer reload() started while these were in flight - abandon this stale one, live list still untouched
+        for (const row of rows) frag.appendChild(row);
       }
       if (myToken !== renderToken) return;
       listEl.replaceChildren(frag);
