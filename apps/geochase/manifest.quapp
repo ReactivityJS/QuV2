@@ -7,5 +7,8 @@
   "label": "Geo Chase",
   "icon": "🧭",
   "navOrder": 14,
-  "requires": ["document-service", "collection-service"]
+  "requires": ["document-service", "collection-service", "thread-service"],
+  "pushActions": [
+    { "id": "invite", "label": "Game invites" }
+  ]
 }

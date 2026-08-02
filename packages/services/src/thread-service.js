@@ -236,6 +236,42 @@ export class ThreadService {
   }
 
   /**
+   * Convenience for "tell one other actor something happened" - creates
+   * (if needed) a single-reader mail thread for them and posts one message
+   * into it, which is exactly what @qu/relay's `#deliverThreadPush()`
+   * pipeline needs to notify them (in-app notification + push), gated by
+   * THEIR OWN notification prefs for whichever app `spaceId` resolves to.
+   * This is the one-shot equivalent of createThread()+postMessage() that
+   * Calendar's invite flow (see apps/calendar/client.js) originally did by
+   * hand - any app can reach the same generic notification pipeline this
+   * way instead of re-deriving it, as long as it uses ThreadService at all
+   * (an app that never touches Threads still gets nothing "for free" - see
+   * this repo's README for that limitation).
+   *
+   * @param {string|number} spaceId - The calling app's own space (or
+   *   sub-space, e.g. `geochase-<gameId>`) - this is what @qu/relay derives
+   *   the notification's `appId` from, so it should match (or start with)
+   *   the app's manifest `name` for its `pushActions` prefs to apply.
+   * @param {string} recipientPub
+   * @param {string} body - Plain text; content-blind by design downstream
+   *   (the relay never decrypts this to build a push payload - see
+   *   `#deliverThreadPush()`), so keep it human-readable for the in-app
+   *   feed, not machine-parsed.
+   * @param {object} [extra] - Merged into the stored message as-is, same as
+   *   `postMessage()`'s own `extra` - e.g. `{gameId}` for a deep-link.
+   * @returns {Promise<object>} The stored message (plain value).
+   * @throws {Error} If the recipient has no resolvable encryption key yet
+   *   (no published profile that's synced to this session) - same
+   *   fail-closed behavior `postMessage()` already has for any private
+   *   thread, see `#resolveReaderXKeys()`.
+   */
+  async notify(spaceId, recipientPub, body, extra = {}) {
+    const threadId = `invite-${recipientPub}`;
+    await this.createThread(spaceId, threadId, THREAD_PRESETS.mail(recipientPub));
+    return this.postMessage(spaceId, threadId, { body, extra });
+  }
+
+  /**
    * Overwrites an existing message's body in place (same path, same
    * `_id`/`replyTo`), re-applying the thread's formatters and re-encrypting
    * for its readers exactly like `postMessage()` - editing is really just

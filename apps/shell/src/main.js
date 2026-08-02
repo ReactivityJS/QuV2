@@ -464,6 +464,14 @@ class Shell {
     // applies to a not-yet-synced profile.
     const stop = mod.mount(this.screenEl, {
       qu: this.qu, services: this.Qu, appId, segments,
+      // The full manifest catalog (same data `_refreshApps()` fetched from
+      // `/apps.json`) - lets a mounted app discover what OTHER apps have
+      // declared for one of ITS OWN mount points (see
+      // @qu/foundation/actions.js's `actionsForMount()`) without ever
+      // importing them: only one app's `clientMain` is ever loaded at a
+      // time (see this method's own doc comment above), so this static
+      // catalog is the only cross-app discovery a mounted app has.
+      apps: this.apps,
       subscribe: (pathPrefix) => this.sync.subscribe(pathPrefix),
       fetch: (path) => this.sync.fetch(path),
     });

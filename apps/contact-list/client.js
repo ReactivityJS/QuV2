@@ -4,12 +4,23 @@
  * that app ADDS contacts, this one just shows/removes them, each with
  * their CURRENT public profile resolved live from the network (not a
  * snapshot taken at contact-time).
+ *
+ * Each row's action links (Chat today, potentially Call/others later) are
+ * NOT hardcoded here - this app exposes a "contact-row" MOUNT, and renders
+ * whatever OTHER apps declared for it in their own manifest's `actions`
+ * field (see @qu/foundation/actions.js's `actionsForMount()`). Contact
+ * List has never heard of Chat; Chat's manifest just declares `{mount:
+ * "contact-row", id: "chat", hrefTemplate: "#/chat/{pub}"}`, and this file
+ * resolves `{pub}` per contact. A future Call app (or anything else) shows
+ * up here automatically the moment its manifest declares the same mount -
+ * no change needed on this side.
  */
 import { createI18n } from '@qu/i18n';
+import { actionsForMount, resolveActionHref } from '@qu/foundation';
 
 const DICT = {
-  en: { title: 'Contacts', empty: 'No contacts yet — add some from the User List.', remove: 'Remove', message: '💬' },
-  de: { title: 'Kontakte', empty: 'Noch keine Kontakte — in der Nutzerliste hinzufügen.', remove: 'Entfernen', message: '💬' },
+  en: { title: 'Contacts', empty: 'No contacts yet — add some from the User List.', remove: 'Remove' },
+  de: { title: 'Kontakte', empty: 'Noch keine Kontakte — in der Nutzerliste hinzufügen.', remove: 'Entfernen' },
 };
 const { t } = createI18n(DICT);
 
@@ -20,7 +31,7 @@ const STYLE = `
   .qu-contact-list .qu-contact-name { flex: 1; font-family: ui-monospace, monospace; text-decoration: none; color: inherit; }
   .qu-contact-list .qu-contact-name:hover { text-decoration: underline; }
   .qu-contact-list button { background: none; border: 1px solid #8884; border-radius: 0.3rem; cursor: pointer; padding: 0.2rem 0.5rem; }
-  .qu-contact-list .qu-contact-message { text-decoration: none; font-size: 1.1em; }
+  .qu-contact-list .qu-contact-action { text-decoration: none; font-size: 1.1em; }
 `;
 
 function ensureStyle() {
@@ -31,9 +42,12 @@ function ensureStyle() {
   document.head.appendChild(style);
 }
 
-export function mount(container, { services }) {
+const CONTACT_ROW_MOUNT = 'contact-row';
+
+export function mount(container, { services, apps }) {
   ensureStyle();
   let stopped = false;
+  const rowActions = actionsForMount(apps, CONTACT_ROW_MOUNT);
 
   // A named, reusable render function (rather than mount() calling itself)
   // so a Remove click's refresh reuses this ONE closure's `stopped` flag -
@@ -58,7 +72,7 @@ export function mount(container, { services }) {
 
     const list = document.createElement('ul');
     list.className = 'qu-contact-list';
-    for (const contact of contacts) list.appendChild(row(contact, services, render));
+    for (const contact of contacts) list.appendChild(row(contact, services, render, rowActions));
 
     container.append(heading, list);
   }
@@ -68,18 +82,25 @@ export function mount(container, { services }) {
   return () => { stopped = true; };
 }
 
-function row({ actorPub, profile }, services, refresh) {
+function row({ actorPub, profile }, services, refresh, rowActions) {
   const li = document.createElement('li');
   const name = document.createElement('a');
   name.className = 'qu-contact-name';
   name.href = `#/~${actorPub}`;
   name.textContent = profile?.alias ?? `~${actorPub.slice(0, 16)}…`;
+  li.appendChild(name);
 
-  const messageLink = document.createElement('a');
-  messageLink.className = 'qu-contact-message';
-  messageLink.href = `#/chat/${actorPub}`;
-  messageLink.title = t('message');
-  messageLink.textContent = t('message');
+  // Every action any OTHER app declared for the "contact-row" mount (see
+  // this file's own doc comment) - Chat today, whatever else registers
+  // itself here tomorrow, with zero changes needed in THIS file.
+  for (const action of rowActions) {
+    const link = document.createElement('a');
+    link.className = 'qu-contact-action';
+    link.href = resolveActionHref(action, { pub: actorPub });
+    link.title = action.label;
+    link.textContent = action.icon ?? action.label;
+    li.appendChild(link);
+  }
 
   const removeBtn = document.createElement('button');
   removeBtn.type = 'button';
@@ -88,7 +109,7 @@ function row({ actorPub, profile }, services, refresh) {
     await services.contacts.removeContact(actorPub);
     await refresh();
   });
+  li.appendChild(removeBtn);
 
-  li.append(name, messageLink, removeBtn);
   return li;
 }
