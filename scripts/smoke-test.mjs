@@ -677,6 +677,9 @@ try {
     assert.equal(result, null, 'a corrupted/tampered chunk must be rejected, never silently reassembled into the returned data');
 
     console.log('    OK - chunk content hashes are verified on read, corrupted chunks are rejected, and an identical re-upload resumes by skipping unchanged chunks');
+  }
+
+  // ---------------------------------------------------------------------
   section('Identity backup/transfer: exportSeedCode() -> importSeedCode()');
   // ---------------------------------------------------------------------
   {
