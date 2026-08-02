@@ -78,6 +78,7 @@ const DICT = {
     settings: 'Chat settings', settingsBtn: 'Chat settings', showAliasIn1to1: 'Show sender name in 1:1 chats',
     ownColor: 'Your message color', save: 'Save', saved: 'Saved',
     search: 'Search', searchPlaceholder: 'Search messages…', searchAll: 'All', searchLinks: '🔗 Links', searchFiles: '📎 Files',
+    searchImages: '🖼️ Images', searchVideos: '🎬 Videos', searchDateFrom: 'From', searchDateTo: 'To',
     noResults: 'No results', searchThisChat: 'Search this chat', searchEverywhere: 'Search all chats',
     synced: 'Delivered to server', pendingSync: 'Not yet delivered to server', readBy: 'Read',
     permalink: 'Click to copy a link to this message',
@@ -103,6 +104,7 @@ const DICT = {
     settings: 'Chat-Einstellungen', settingsBtn: 'Chat-Einstellungen', showAliasIn1to1: 'Absendername in 1:1-Chats anzeigen',
     ownColor: 'Farbe deiner Nachrichten', save: 'Speichern', saved: 'Gespeichert',
     search: 'Suche', searchPlaceholder: 'Nachrichten durchsuchen…', searchAll: 'Alle', searchLinks: '🔗 Links', searchFiles: '📎 Dateien',
+    searchImages: '🖼️ Bilder', searchVideos: '🎬 Videos', searchDateFrom: 'Von', searchDateTo: 'Bis',
     noResults: 'Keine Treffer', searchThisChat: 'Diesen Chat durchsuchen', searchEverywhere: 'Alle Chats durchsuchen',
     synced: 'Auf dem Server gespeichert', pendingSync: 'Noch nicht auf dem Server gespeichert', readBy: 'Gelesen',
     permalink: 'Klicken, um einen Link zu dieser Nachricht zu kopieren',
@@ -255,7 +257,7 @@ const STYLE = `
 
   .qu-chat-composer { display: flex; gap: 0.4rem; align-items: center; padding-top: 0.4rem; flex-shrink: 0; position: sticky; bottom: 0; background: canvas; }
   .qu-chat-composer textarea { flex: 1; resize: none; max-height: 7rem; font: inherit; padding: 0.55rem 0.9rem; border-radius: 1.3rem; border: 1px solid #8884; background: transparent; color: inherit; }
-  .qu-chat-icon-btn, .qu-chat-send-btn { border: none; background: #8882; border-radius: 50%; width: 2.4rem; height: 2.4rem; flex-shrink: 0; cursor: pointer; font-size: 1.1em; display: flex; align-items: center; justify-content: center; }
+  .qu-chat-icon-btn, .qu-chat-send-btn { border: none; background: #8882; border-radius: 50%; width: 2.4rem; height: 2.4rem; flex-shrink: 0; cursor: pointer; font-size: 1.1em; display: flex; align-items: center; justify-content: center; text-decoration: none; color: inherit; box-sizing: border-box; }
   .qu-chat-send-btn { background: #3390ec; color: #fff; }
   .qu-chat-send-btn:hover { background: #2b7cd3; }
   .qu-chat-pending-attachment { font-size: 0.8em; opacity: 0.8; display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.3rem; flex-shrink: 0; }
@@ -279,8 +281,12 @@ const STYLE = `
   .qu-chat-settings-status { font-size: 0.85em; opacity: 0.7; }
 
   .qu-chat-search { display: flex; flex-direction: column; gap: 0.5rem; height: 100%; min-height: 0; }
+  .qu-chat-search h1 { margin: 0; font-size: 1.1em; }
   .qu-chat-search-input { padding: 0.5rem 0.8rem; border-radius: 1.2rem; border: 1px solid #8884; background: transparent; color: inherit; font: inherit; }
-  .qu-chat-search-filters { display: flex; gap: 0.4rem; }
+  .qu-chat-search-date-row { display: flex; gap: 0.8rem; flex-wrap: wrap; font-size: 0.85em; }
+  .qu-chat-search-date-row label { display: flex; align-items: center; gap: 0.3rem; opacity: 0.8; }
+  .qu-chat-search-date-row input[type="date"] { padding: 0.25rem 0.4rem; border-radius: 0.4rem; border: 1px solid #8884; background: transparent; color: inherit; font: inherit; }
+  .qu-chat-search-filters { display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .qu-chat-search-filter-btn { border: 1px solid #8884; background: none; color: inherit; border-radius: 999px; padding: 0.25rem 0.7rem; font-size: 0.85em; cursor: pointer; }
   .qu-chat-search-filter-btn[data-active="true"] { background: #3390ec; border-color: #3390ec; color: #fff; }
   .qu-chat-search-results { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; overflow-y: auto; flex: 1; min-height: 0; }
@@ -341,7 +347,10 @@ function fmtTime(ts) {
   if (!ts) return '';
   const date = new Date(ts);
   const sameDay = date.toDateString() === new Date().toDateString();
-  return sameDay ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : date.toLocaleDateString([], { day: '2-digit', month: '2-digit' });
+  const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (sameDay) return time;
+  const day = date.toLocaleDateString([], { day: '2-digit', month: '2-digit' });
+  return `${day} ${time}`;
 }
 
 function colorFor(seed) {
@@ -551,11 +560,16 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
   subscribe(`/store/${SPACE}`);
   subscribe(`/blob/${SPACE}`);
 
-  // Routes: #/chat, #/chat/settings, #/chat/search, #/chat/g/<id>[/m/<msgId>], #/chat/<pub>[/m/<msgId>].
-  const isGroupRoute = segments[1] === 'g';
+  // Routes: #/chat, #/chat/settings, #/chat/search, #/chat/search/<pub>,
+  // #/chat/search/g/<id>, #/chat/g/<id>[/m/<msgId>], #/chat/<pub>[/m/<msgId>].
+  const isSearchRoute = segments[1] === 'search';
+  const searchIsGroup = isSearchRoute && segments[2] === 'g';
+  const searchGroupId = searchIsGroup ? (segments[3] ?? null) : null;
+  const searchPeerActorPub = isSearchRoute && !searchIsGroup ? (segments[2] ?? null) : null;
+  const isGroupRoute = !isSearchRoute && segments[1] === 'g';
   const groupId = isGroupRoute ? (segments[2] ?? null) : null;
-  const peerActorPub = !isGroupRoute && segments[1] !== 'settings' && segments[1] !== 'search' ? (segments[1] ?? null) : null;
-  const anchorMessageId = isGroupRoute ? (segments[3] === 'm' ? segments[4] ?? null : null) : (segments[2] === 'm' ? segments[3] ?? null : null);
+  const peerActorPub = !isSearchRoute && !isGroupRoute && segments[1] !== 'settings' ? (segments[1] ?? null) : null;
+  const anchorMessageId = isGroupRoute ? (segments[3] === 'm' ? segments[4] ?? null : null) : (peerActorPub ? (segments[2] === 'm' ? segments[3] ?? null : null) : null);
 
   (async () => {
     const myActorPub = await services.actors.whoAmI();
@@ -570,7 +584,9 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     subscribe(`/store/${inviteSpace}`);
 
     if (segments[1] === 'settings') await renderSettings();
-    else if (segments[1] === 'search') await renderGlobalSearch(myActorPub);
+    else if (searchGroupId) await renderChatSearchPage(myActorPub, { type: 'group', groupId: searchGroupId });
+    else if (searchPeerActorPub) await renderChatSearchPage(myActorPub, { type: 'direct', peerActorPub: searchPeerActorPub });
+    else if (isSearchRoute) await renderGlobalSearch(myActorPub);
     else if (groupId) await renderRoom(myActorPub, { type: 'group', groupId, anchorMessageId });
     else if (peerActorPub) await renderRoom(myActorPub, { type: 'direct', peerActorPub, anchorMessageId });
     else await renderRoomList(myActorPub);
@@ -797,7 +813,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     container.appendChild(form);
   }
 
-  /** Global search: scans every room's already-listMessages()-fetched content, same local-only-scan approach as the room-scoped search below - see buildSearchResults() (shared) for the matching logic. */
+  /** Global search: scans every room's already-listMessages()-fetched content, same local-only-scan approach as the room-scoped search below - see renderSearchUI() (shared) for the matching logic. */
   async function renderGlobalSearch(myActorPub) {
     if (stopped) return;
     container.textContent = '';
@@ -816,42 +832,98 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     }
     if (stopped) return;
 
-    renderSearchUI(container, rooms, myActorPub, null);
+    renderSearchUI(container, rooms, '#/chat', null);
   }
 
   /**
-   * Shared by both global search (every room) and the in-room search
-   * toggle (a single room passed via `onlyRoom`) - a plain local substring
-   * scan over already-`listMessages()`-fetched content, no network query,
+   * Search scoped to ONE chat - its own subpage (#/chat/search/<pub> or
+   * #/chat/search/g/<groupId>), not an inline in-room toggle: a real route
+   * means a real back button, a shareable/bookmarkable URL, and no risk of
+   * the toggle panel fighting the message list for vertical space.
+   */
+  async function renderChatSearchPage(myActorPub, target) {
+    if (stopped) return;
+    container.textContent = '';
+    let spaceId, threadId, href, name;
+    if (target.type === 'group') {
+      spaceId = SPACE;
+      threadId = target.groupId;
+      href = `#/chat/g/${threadId}`;
+      const config = await services.threads.getConfig(spaceId, threadId);
+      if (stopped) return;
+      if (!config || config.kind !== 'group' || !config.readers?.includes(myActorPub)) {
+        const back = document.createElement('a');
+        back.className = 'qu-chat-back';
+        back.href = '#/chat';
+        back.textContent = t('back');
+        const msg = document.createElement('p');
+        msg.textContent = t('groupNotFound');
+        container.append(back, msg);
+        return;
+      }
+      name = config.name || threadId;
+    } else {
+      spaceId = SPACE;
+      threadId = await roomId([myActorPub, target.peerActorPub]);
+      if (stopped) return;
+      href = `#/chat/${target.peerActorPub}`;
+      const theirProfile = await services.profile.getPublicProfile(target.peerActorPub);
+      if (stopped) return;
+      name = theirProfile?.alias || `~${target.peerActorPub.slice(0, 10)}…`;
+    }
+    renderSearchUI(container, [{ href, name, spaceId, threadId }], href, { href, name });
+  }
+
+  /**
+   * Shared by both global search (every room in `rooms`) and a single
+   * chat's search subpage (`rooms` narrowed to one entry, `onlyRoom` set
+   * for the heading/room-label suppression) - a plain local substring scan
+   * over already-`listMessages()`-fetched content, no network query,
    * matching ReactivityJS/Qu's own search (it never queries the relay
    * either - search only ever covers what's already synced locally).
    * @param {HTMLElement} mountEl
-   * @param {Array<{href:string, name:string, spaceId, threadId, isGroup:boolean}>} rooms
-   * @param {string} myActorPub
-   * @param {{spaceId, threadId}|null} onlyRoom - if set, renders inline (no header/back link) scoped to just this room.
+   * @param {Array<{href:string, name:string, spaceId, threadId}>} rooms
+   * @param {string} backHref
+   * @param {{href:string, name:string}|null} onlyRoom - if set, this is a single-chat search: room label is suppressed on each result (redundant - already all one chat) and the heading names the chat.
    */
-  function renderSearchUI(mountEl, rooms, myActorPub, onlyRoom) {
+  function renderSearchUI(mountEl, rooms, backHref, onlyRoom) {
     const wrap = document.createElement('div');
     wrap.className = 'qu-chat-search';
 
-    if (!onlyRoom) {
-      const back = document.createElement('a');
-      back.className = 'qu-chat-back';
-      back.href = '#/chat';
-      back.textContent = t('back');
-      wrap.appendChild(back);
-    }
+    const back = document.createElement('a');
+    back.className = 'qu-chat-back';
+    back.href = backHref;
+    back.textContent = t('back');
+    wrap.appendChild(back);
+
+    const heading = document.createElement('h1');
+    heading.textContent = onlyRoom ? t('searchThisChat') + (onlyRoom.name ? ` – ${onlyRoom.name}` : '') : t('searchEverywhere');
+    wrap.appendChild(heading);
 
     const input = document.createElement('input');
     input.type = 'search';
     input.className = 'qu-chat-search-input';
     input.placeholder = t('searchPlaceholder');
 
+    const dateRow = document.createElement('div');
+    dateRow.className = 'qu-chat-search-date-row';
+    const dateFromLabel = document.createElement('label');
+    dateFromLabel.textContent = t('searchDateFrom');
+    const dateFrom = document.createElement('input');
+    dateFrom.type = 'date';
+    dateFromLabel.appendChild(dateFrom);
+    const dateToLabel = document.createElement('label');
+    dateToLabel.textContent = t('searchDateTo');
+    const dateTo = document.createElement('input');
+    dateTo.type = 'date';
+    dateToLabel.appendChild(dateTo);
+    dateRow.append(dateFromLabel, dateToLabel);
+
     const filters = document.createElement('div');
     filters.className = 'qu-chat-search-filters';
     let activeFilter = 'all';
     const filterBtns = [];
-    for (const [key, label] of [['all', t('searchAll')], ['links', t('searchLinks')], ['files', t('searchFiles')]]) {
+    for (const [key, label] of [['all', t('searchAll')], ['links', t('searchLinks')], ['images', t('searchImages')], ['videos', t('searchVideos')], ['files', t('searchFiles')]]) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'qu-chat-search-filter-btn';
@@ -869,22 +941,39 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     const resultsEl = document.createElement('ul');
     resultsEl.className = 'qu-chat-search-results';
 
-    wrap.append(input, filters, resultsEl);
+    wrap.append(input, dateRow, filters, resultsEl);
     mountEl.appendChild(wrap);
     input.focus();
 
     async function runSearch() {
       const query = input.value.trim().toLowerCase();
+      // A plain <input type=date>'s value is a LOCAL calendar date
+      // ("YYYY-MM-DD") with no time zone attached - anchoring it to
+      // midnight/23:59:59.999 in the browser's own local time (not UTC)
+      // is what makes "from 2026-01-01" actually include messages sent
+      // that whole day in the user's own time zone.
+      const fromTs = dateFrom.value ? new Date(`${dateFrom.value}T00:00:00`).getTime() : null;
+      const toTs = dateTo.value ? new Date(`${dateTo.value}T23:59:59.999`).getTime() : null;
       resultsEl.textContent = '';
       const matches = [];
-      for (const room of (onlyRoom ? [{ ...onlyRoom, href: '', name: '' }] : rooms)) {
+      for (const room of rooms) {
         const messages = await services.threads.listMessages(room.spaceId, room.threadId);
         for (const message of messages) {
+          if (fromTs !== null && message.ts < fromTs) continue;
+          if (toTs !== null && message.ts > toTs) continue;
+          const mime = message.attachment?.mime ?? '';
+          const isImage = mime.startsWith('image/');
+          const isVideo = mime.startsWith('video/');
+          const isOtherFile = !!message.attachment && !isImage && !isVideo;
           const hasLink = !!message.body && linkifySegments(message.body).some((s) => s.type === 'link');
-          const hasFile = !!message.attachment;
           if (activeFilter === 'links' && !hasLink) continue;
-          if (activeFilter === 'files' && !hasFile) continue;
-          if (query && !(message.body ?? '').toLowerCase().includes(query)) continue;
+          if (activeFilter === 'images' && !isImage) continue;
+          if (activeFilter === 'videos' && !isVideo) continue;
+          if (activeFilter === 'files' && !isOtherFile) continue;
+          if (query) {
+            const haystack = `${message.body ?? ''} ${message.attachment?.name ?? ''}`.toLowerCase();
+            if (!haystack.includes(query)) continue;
+          }
           matches.push({ room, message });
         }
       }
@@ -900,7 +989,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
         const li = document.createElement('li');
         li.className = 'qu-chat-search-result';
         const a = document.createElement('a');
-        a.href = onlyRoom ? `${roomPermalink(onlyRoom, message.id)}` : `${room.href}/m/${message.id}`;
+        a.href = `${room.href}/m/${message.id}`;
         if (!onlyRoom) {
           const roomLabel = document.createElement('div');
           roomLabel.className = 'qu-chat-search-result-room';
@@ -920,19 +1009,9 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     }
 
     input.addEventListener('input', runSearch);
+    dateFrom.addEventListener('change', runSearch);
+    dateTo.addEventListener('change', runSearch);
     runSearch();
-  }
-
-  /** @param {{spaceId, threadId}} room - matched by identity against the CURRENT room being viewed, to build the SAME kind of permalink messageRow()'s own time-click handler builds. */
-  function roomPermalink(room, messageId) {
-    // Reconstructs whichever of #/chat/g/<id> or #/chat/<pub> this room's
-    // threadId corresponds to - callers with the ORIGINAL target (group vs
-    // direct + peerPub) should prefer building it directly; this fallback
-    // is only reached from in-room search, which always has `onlyRoom`
-    // scoped to the room already open, so the CURRENT location's own
-    // path (minus any existing /m/<id> suffix) is simplest and correct.
-    const base = location.hash.split('/m/')[0];
-    return `${base}/m/${messageId}`;
   }
 
   async function renderRoom(myActorPub, target) {
@@ -999,9 +1078,9 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     else headerInfo.appendChild(presenceEl);
     header.appendChild(headerInfo);
 
-    const searchToggleBtn = document.createElement('button');
-    searchToggleBtn.type = 'button';
+    const searchToggleBtn = document.createElement('a');
     searchToggleBtn.className = 'qu-chat-icon-btn';
+    searchToggleBtn.href = isGroup ? `#/chat/search/g/${threadId}` : `#/chat/search/${target.peerActorPub}`;
     searchToggleBtn.textContent = '🔍';
     searchToggleBtn.title = t('searchThisChat');
     header.appendChild(searchToggleBtn);
@@ -1012,15 +1091,6 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     encHint.title = t('encrypted');
     header.appendChild(encHint);
     container.appendChild(header);
-
-    const searchSlot = document.createElement('div');
-    searchSlot.hidden = true;
-    container.appendChild(searchSlot);
-    searchToggleBtn.addEventListener('click', () => {
-      searchSlot.hidden = !searchSlot.hidden;
-      searchSlot.textContent = '';
-      if (!searchSlot.hidden) renderSearchUI(searchSlot, null, myActorPub, { spaceId, threadId });
-    });
 
     const membersEl = document.createElement('div');
     membersEl.className = 'qu-chat-members';
@@ -1567,11 +1637,28 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     let stickingToBottom = true;
     let firstReload = true;
     let currentAnchorMessageId = target.anchorMessageId ?? null;
+    let lastFlashedAnchorId = null; // see reload()'s re-anchor branch below - only flash on a genuinely NEW anchor, not every incidental re-render while one is active
 
     function isNearBottom() {
       return listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight <= 60;
     }
+    // A smooth scrollIntoView() (scrollToMessage() below) fires 'scroll'
+    // events throughout its own animation, same as any other scroll - the
+    // listener further down would otherwise see one of THOSE events land
+    // near the bottom (plausible for an anchor close to the end of the
+    // list) and wrongly conclude "the user scrolled to the bottom",
+    // clearing the very anchor that scroll was FOR. Suppressed for a
+    // fixed settle window around any such programmatic jump - see
+    // scrollToMessage()'s own comment for why this is the fix for the
+    // "jumps back and can't stay on the anchored message" report.
+    let suppressScrollTracking = false;
     function scrollToVeryBottom() {
+      // Arriving at the bottom is unconditionally "sticking" and
+      // anchor-free, set directly rather than left to the scroll
+      // listener to infer - deterministic regardless of whether a
+      // suppression window (see above) happens to be active right now.
+      stickingToBottom = true;
+      clearAnchor();
       // Set it synchronously first (correct immediately for the common
       // all-text case, and critically means a NEXT reload() starting right
       // after - a fast send burst can trigger several in close succession,
@@ -1590,7 +1677,10 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     }
     function setAnchor(messageId) {
       currentAnchorMessageId = messageId;
-      history.replaceState(null, '', roomPermalink({ spaceId, threadId }, messageId));
+      // location.hash reliably IS this room's own URL here (setAnchor()
+      // only ever runs from within an already-mounted renderRoom()) - the
+      // current path minus any existing /m/<id> suffix, plus the new one.
+      history.replaceState(null, '', `${location.hash.split('/m/')[0]}/m/${messageId}`);
     }
     // The native 'scroll' event fires identically for a real user gesture
     // and for our OWN programmatic scrollToVeryBottom() calls above, with
@@ -1610,6 +1700,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       listEl.addEventListener(evt, () => { if (!isNearBottom()) stickingToBottom = false; }, { passive: true });
     }
     listEl.addEventListener('scroll', () => {
+      if (suppressScrollTracking) return;
       if (!isNearBottom()) return;
       stickingToBottom = true;
       clearAnchor();
@@ -1640,7 +1731,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       // restored after the list is rebuilt, rather than always snapping
       // somewhere else.
       let anchorRow = null, anchorOffset = 0;
-      if (!wasStickingToBottom) {
+      if (!wasStickingToBottom && !currentAnchorMessageId) {
         for (const li of listEl.children) {
           if (li.getBoundingClientRect().bottom > listEl.getBoundingClientRect().top) {
             anchorRow = li.dataset?.messageId;
@@ -1661,9 +1752,23 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
           if (myToken !== renderToken) return; // a newer reload() started mid-loop - abandon this stale one
           listEl.appendChild(row);
         }
-        if (firstReload && currentAnchorMessageId) {
+        if (currentAnchorMessageId) {
+          // Re-anchor on EVERY reload while an anchor is active, not just
+          // the first one - an anchor stays active until the user
+          // actually scrolls to the bottom (see clearAnchor()), and
+          // reload() fires constantly for reasons that have nothing to do
+          // with what this device is looking at (a reaction on some other
+          // message, someone else's new message, a pin change - see
+          // watchReactions() above). Falling through to the
+          // "wasStickingToBottom" bottom-jump below on any of those was
+          // the actual bug: it silently overrode the user's own anchor
+          // click/permalink navigation the moment anything else happened
+          // to trigger a reload, which read as the whole view randomly
+          // snapping to the bottom and back.
           firstReload = false;
-          scrollToMessage(currentAnchorMessageId, true);
+          const isNewAnchor = currentAnchorMessageId !== lastFlashedAnchorId;
+          if (isNewAnchor) lastFlashedAnchorId = currentAnchorMessageId;
+          scrollToMessage(currentAnchorMessageId, true, isNewAnchor);
         } else if (firstReload || wasStickingToBottom) {
           firstReload = false;
           scrollToVeryBottom();
@@ -1825,15 +1930,35 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
      *   the backfill/sync has had a chance to land, instead of silently
      *   giving up.
      */
-    function scrollToMessage(messageId, isRetryable) {
+    function scrollToMessage(messageId, isRetryable, flash = true) {
       const row = listEl.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
       if (!row) {
-        if (isRetryable) setTimeout(() => scrollToMessage(messageId, false), 800);
+        if (isRetryable) setTimeout(() => scrollToMessage(messageId, false, flash), 800);
         return;
       }
+      // Jumping to a specific (possibly not-latest) message is exactly the
+      // "not sticking to the bottom" case - without this, whatever caused
+      // `stickingToBottom` to still read true (its default, if the user
+      // never manually wheel/touch-scrolled this session) survives the
+      // jump, and the NEXT reload() for any reason at all (someone else's
+      // reaction on a totally different message, a new message, a pin
+      // change - all of which call reload() via watch(), see
+      // watchReactions() above) would call scrollToVeryBottom() and yank
+      // the view straight back down, undoing the very navigation the user
+      // just asked for - this was the reported "jumps back and forth,
+      // can't stay on the message I clicked" bug. Suppressing tracking for
+      // the scroll animation's own duration additionally stops its OWN
+      // in-flight 'scroll' events (a target near the bottom can pass
+      // isNearBottom() mid-animation) from re-flipping it back true and
+      // clearing the anchor before the jump even finishes.
+      stickingToBottom = false;
+      suppressScrollTracking = true;
       row.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      row.dataset.anchored = 'true';
-      setTimeout(() => { row.dataset.anchored = 'false'; }, 1600);
+      setTimeout(() => { suppressScrollTracking = false; }, 700);
+      if (flash) {
+        row.dataset.anchored = 'true';
+        setTimeout(() => { row.dataset.anchored = 'false'; }, 1600);
+      }
     }
 
     /** @returns {HTMLElement|null} A location-preview block if `body` is a recognized map URL, else null. */
