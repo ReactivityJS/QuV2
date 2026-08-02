@@ -258,6 +258,29 @@ export class QuStore {
   }
 
   /**
+   * Lists every RAW, already-sealed QuBit stored under `pathPrefix` -
+   * bypasses the engine TRANSFORM step entirely, same as `putSealed()`
+   * bypasses SEAL and @qu/sync's `#handleRequest` already bypasses
+   * transform for a single-path `fetch()` (see that method - this is its
+   * prefix-shaped sibling). Requires the mount's adapter to implement
+   * `getAll()` (FsAdapter, MemoryAdapter, IndexedDBAdapter all do); throws
+   * for adapters that don't (e.g. the event-only VolatileAdapter mounts).
+   *
+   * Infrastructure-only, like `putSealed()` - for @qu/sync's reciprocal
+   * catch-up (a reconnecting peer asking a subscribed-to peer "what's
+   * under this prefix that I might have missed") and the client-side sync
+   * outbox's own replay-on-reconnect walk over its unacknowledged writes.
+   * @param {string} pathPrefix
+   * @returns {Promise<Array<{path: string, quBit: object}>>}
+   */
+  async getAllUnderMount(pathPrefix) {
+    const { adapter, rel, mountName } = this.#mount.resolve(pathPrefix);
+    if (!adapter.getAll) throw new Error(`QuStore.getAllUnderMount: mount "${mountName}" has no getAll()`);
+    const entries = await adapter.getAll(rel);
+    return entries.map((entry) => ({ path: `/${mountName}${entry.rel}`, quBit: entry.quBit }));
+  }
+
+  /**
    * Persists an ALREADY-SEALED QuBit (signature/encryption/timestamp
    * already final) directly to its mount and notifies local
    * storage-change listeners - the PERSIST+NOTIFY half of `put()`'s

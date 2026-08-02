@@ -42,6 +42,21 @@
  *      show up even after reconnecting", covering every Service built on
  *      DocumentService/CollectionService/ThreadService (Chat, Calendar, Geo
  *      Chase, Forum, Todo, ...), not just one app.
+ *  11. Sync outbox: a write made while genuinely offline (not just a
+ *      mid-session drop - a full "reload", i.e. the old SyncEngine/transport
+ *      pair and its in-memory send queue are discarded) is still delivered
+ *      to the relay once a new connection is established, and the outbox
+ *      entry is cleared once the relay acknowledges it (see @qu/sync's
+ *      outbox.js and SyncEngine's `sync-ack` handling).
+ *  12. Reciprocal prefix catch-up AT THE SyncEngine LEVEL (not via any
+ *      Service-level freshness tracker, unlike #10): SyncEngine's own
+ *      reconnect hook asks the relay for everything under each subscribed
+ *      prefix and merges it, so a plain `qu.get()` (no Service, no
+ *      backgroundRefresh call) already sees a write missed while offline.
+ *  13. Assets: per-chunk content-hash verification rejects a
+ *      corrupted/tampered chunk instead of silently reassembling it, and
+ *      re-uploading an unchanged file resumes by skipping chunks already
+ *      present with matching content (see AssetEngine's chunkHashes).
  *
  * NOT covered here (verified manually with Playwright during development,
  * not wired into this script to avoid adding a browser-automation
@@ -498,6 +513,146 @@ try {
     bob.sync.close();
     bob.transport.close();
     console.log('    OK - a message missed while genuinely disconnected self-corrects on reconnect via background refresh');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Sync outbox: a write made while genuinely offline survives a "reload" and reaches the relay on reconnect');
+  // ---------------------------------------------------------------------
+  {
+    const { MemoryAdapter } = await import('@qu/runtime');
+    const { createServices } = await import('@qu/services');
+    const { DocumentEngine } = await import('@qu/engines');
+    const { MemoryOutboxStore } = await import('@qu/sync');
+
+    const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+    new DocumentEngine(rt.core);
+    const Qu = createServices(rt.core, {});
+
+    // Stands in for the browser's IndexedDBOutboxStore (same OutboxStore
+    // contract, see @qu/sync/outbox.js) - what matters for this test is
+    // that it survives what's about to be discarded below, exactly like
+    // IndexedDB would survive a real page reload.
+    const outbox = new MemoryOutboxStore();
+
+    const transport1 = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+    await transport1.connect();
+    const sync1 = new SyncEngine(rt.core, transport1, { publishAllTo: 'relay', outbox });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Genuinely offline, THEN write - unlike a mid-session drop, this
+    // transport (and its own in-memory send queue) is about to be thrown
+    // away entirely, same as a reload would do.
+    transport1.close();
+    await new Promise((r) => setTimeout(r, 20));
+    await Qu.documents.create('offline-space', 'note-1', { title: 'Written while offline' });
+
+    const pendingBeforeReload = await outbox.getAll();
+    assert.equal(pendingBeforeReload.length, 1, 'the offline write should have been recorded in the outbox');
+    sync1.close(); // discard, along with transport1 - simulates the page (and its in-memory send queue) going away
+
+    // "Reload": a brand new transport + SyncEngine, same outbox.
+    const transport2 = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+    const sync2 = new SyncEngine(rt.core, transport2, { publishAllTo: 'relay', outbox });
+    await transport2.connect();
+    await new Promise((r) => setTimeout(r, 250)); // let the outbox replay + relay's ack round-trip complete
+
+    const onRelay = await relayA.services.documents.get('offline-space', 'note-1');
+    assert.equal(onRelay?.title, 'Written while offline', 'the relay should have received the write via outbox replay on reconnect');
+
+    const pendingAfterAck = await outbox.getAll();
+    assert.equal(pendingAfterAck.length, 0, 'the outbox entry should be cleared once the relay acknowledged it');
+
+    sync2.close();
+    transport2.close();
+    console.log('    OK - an offline write persisted in the outbox is replayed and acknowledged after reconnect, surviving a simulated reload');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Reciprocal prefix catch-up at the SyncEngine level (independent of any Service-level freshness tracker)');
+  // ---------------------------------------------------------------------
+  {
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    async function connectRawClient() {
+      const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+      const transport = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+      await transport.connect();
+      const sync = new SyncEngine(rt.core, transport, { publishAllTo: 'relay' });
+      return { rt, sync, transport };
+    }
+
+    const writer = await connectRawClient();
+    const reader = await connectRawClient();
+    reader.sync.subscribe('/store/prefix-catchup-space');
+    await new Promise((r) => setTimeout(r, 50));
+
+    reader.transport.close();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // No engine registered for the 'notes' segment - a plain seal+persist
+    // write, deliberately avoiding any Service/Engine machinery here so
+    // this test isolates SyncEngine's OWN reconnect behaviour.
+    await writer.rt.core.put('/store/prefix-catchup-space/notes/hello', { title: 'missed while reader was offline' }, {});
+    await new Promise((r) => setTimeout(r, 150)); // let it reach relayA
+
+    // Reconnect - SyncEngine's own onReconnect hook resubscribes AND fires
+    // fetchPrefix() for every active subscription (see sync-engine.js).
+    await reader.transport.connect();
+    await new Promise((r) => setTimeout(r, 250)); // let the prefix-request/response round-trip complete
+
+    // Read straight off the local mount, NOT through any Service-level
+    // syncFetch/freshness-tracker call (unlike test #10) - proving this
+    // arrived via SyncEngine's own reciprocal catch-up alone.
+    const recovered = await reader.rt.core.get('/store/prefix-catchup-space/notes/hello');
+    assert.equal(
+      recovered?.val?.title,
+      'missed while reader was offline',
+      "SyncEngine's reconnect-time fetchPrefix() should have recovered the write the reader missed while disconnected"
+    );
+
+    writer.sync.close();
+    writer.transport.close();
+    reader.sync.close();
+    reader.transport.close();
+    console.log("    OK - SyncEngine's own reciprocal fetchPrefix() on reconnect recovered a write missed while disconnected, with no Service-level help");
+  }
+
+  // ---------------------------------------------------------------------
+  section('Assets: chunk integrity verification rejects tampering, resumed re-upload skips unchanged chunks');
+  // ---------------------------------------------------------------------
+  {
+    const { AssetEngine } = await import('@qu/engines');
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+    rt.core.mount('blob', new MemoryAdapter());
+    const assetEngine = new AssetEngine(rt.core, { chunkSize: 16 }); // force multiple small chunks
+
+    const original = new TextEncoder().encode('0123456789ABCDEF'.repeat(4)); // 64 bytes -> 4 chunks of 16
+    await rt.core.put('/store/files/assets/doc1', { name: 'doc1.txt', mime: 'text/plain', data: original }, {});
+
+    const meta1 = (await rt.core.get('/store/files/assets/doc1/meta')).val;
+    assert.equal(meta1.chunkCount, 4, 'expected 4 chunks for a 64-byte file with chunkSize 16');
+    assert.equal(meta1.chunkHashes.length, 4, 'meta should carry one content hash per chunk');
+
+    // Re-upload the IDENTICAL file - every chunk should be recognised as
+    // already-present-and-identical and skipped (see #handlePut's resume/dedup check).
+    const chunk0Before = await rt.core.get(`${meta1.blobPath}/chunk_0`);
+    await rt.core.put('/store/files/assets/doc1', { name: 'doc1.txt', mime: 'text/plain', data: original }, {});
+    const chunk0After = await rt.core.get(`${meta1.blobPath}/chunk_0`);
+    assert.equal(chunk0After.ts, chunk0Before.ts, 'an identical re-upload should not rewrite an already-present chunk (resume/dedup)');
+
+    // Corrupt one stored chunk directly (simulates transit corruption or a
+    // tampering peer) and confirm getAsset() refuses to reassemble it.
+    const { adapter: blobAdapter, rel: chunk1Rel } = rt.core.resolveMount(`${meta1.blobPath}/chunk_1`);
+    const corrupted = { ...(await blobAdapter.get(chunk1Rel)) };
+    corrupted.val = QuCrypto.toBase64(new TextEncoder().encode('TAMPERED-BYTES!'));
+    await blobAdapter.put(chunk1Rel, corrupted);
+
+    const result = await assetEngine.getAsset('/store/files/assets/doc1');
+    assert.equal(result, null, 'a corrupted/tampered chunk must be rejected, never silently reassembled into the returned data');
+
+    console.log('    OK - chunk content hashes are verified on read, corrupted chunks are rejected, and an identical re-upload resumes by skipping unchanged chunks');
   }
 
   // ---------------------------------------------------------------------

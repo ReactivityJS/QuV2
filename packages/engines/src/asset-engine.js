@@ -78,11 +78,37 @@ export class AssetEngine {
     const blobPath = toBlobPath(ctx.path);
 
     const chunks = chunkData(file.data, this.chunkSize);
+    // Content hash per chunk, over the PLAINTEXT bytes (before any
+    // encryption `ctx.options` applies below) - stored in meta so
+    // getAsset() can verify what it reassembles actually matches what was
+    // uploaded (see that method), and reused here for RESUME: retrying an
+    // interrupted upload of the same file (same chunkSize -> same
+    // boundaries -> same hashes) should only re-send chunks that aren't
+    // already there, not start over.
+    const chunkHashes = await Promise.all(chunks.map((chunk) => hashChunk(chunk)));
+    const isEncrypted = !!ctx.options?.encryptWith;
+
     await Promise.all(
-      chunks.map((chunk, i) => this.qu.put(`${blobPath}/chunk_${i}`, QuCrypto.toBase64(chunk), ctx.options))
+      chunks.map(async (chunk, i) => {
+        const chunkPath = `${blobPath}/chunk_${i}`;
+        // Dedup/resume check only makes sense for UNENCRYPTED chunks: two
+        // independent `encryptWith` calls over the same plaintext produce
+        // DIFFERENT ciphertext (ephemeral-ECDH per call, see
+        // @qu/core/crypto.js's encrypt()), so an already-stored encrypted
+        // chunk can never be recognised as "the same content" this way -
+        // always re-write in that case, same as before this change.
+        if (!isEncrypted) {
+          const existing = await this.qu.get(chunkPath);
+          if (existing && !isEncryptedEnvelope(existing.val)) {
+            const existingHash = await hashChunk(QuCrypto.fromBase64(existing.val));
+            if (existingHash === chunkHashes[i]) return; // already present, byte-identical - nothing to resend
+          }
+        }
+        await this.qu.put(chunkPath, QuCrypto.toBase64(chunk), ctx.options);
+      })
     );
 
-    const meta = { name: file.name, mime: file.mime, size: file.size, chunkCount: chunks.length, blobPath };
+    const meta = { name: file.name, mime: file.mime, size: file.size, chunkCount: chunks.length, chunkHashes, blobPath };
     const metaQuBit = await this.qu.put(`${ctx.path}/meta`, meta, ctx.options);
 
     return { handled: true, result: metaQuBit };
@@ -108,6 +134,14 @@ export class AssetEngine {
    * produces an encrypted meta doc too, not just encrypted chunks. A
    * caller that never uploads anything encrypted (no `decrypt` given, or
    * an unencrypted asset) sees no behavior change.
+   *
+   * INTEGRITY: each decoded chunk is checked against `meta.chunkHashes[i]`
+   * (see `#handlePut()`) when present - a chunk whose content doesn't
+   * match what was actually uploaded (transit corruption, or a tampering
+   * peer) is treated exactly like a MISSING chunk: one `syncFetch` backfill
+   * attempt, then given up on if still bad, rather than silently
+   * reassembled into corrupted output. Assets written before this field
+   * existed have no `chunkHashes` and are read as before, unverified.
    * @param {string} storePath - The original path passed to `put()`, e.g. `/store/gallery/assets/photo1`.
    * @param {(path: string) => Promise<object|null>} [syncFetch]
    * @param {(quBit: {val: *, pub: string|null}) => Promise<*|null>} [decrypt]
@@ -127,34 +161,51 @@ export class AssetEngine {
     }
     if (!meta) return null;
 
-    let chunkBits = await Promise.all(
-      Array.from({ length: meta.chunkCount }, (_, i) => this.qu.get(`${meta.blobPath}/chunk_${i}`))
-    );
-    if (syncFetch && chunkBits.some((c) => !c)) {
-      await Promise.all(chunkBits.map((c, i) => (c ? null : syncFetch(`${meta.blobPath}/chunk_${i}`).catch(() => {}))));
-      chunkBits = await Promise.all(
-        Array.from({ length: meta.chunkCount }, (_, i) => this.qu.get(`${meta.blobPath}/chunk_${i}`))
-      );
-    }
-    if (chunkBits.some((c) => !c)) return null; // a chunk is missing - incomplete/corrupt upload, or unreachable peer
+    const fetchChunkBits = () =>
+      Promise.all(Array.from({ length: meta.chunkCount }, (_, i) => this.qu.get(`${meta.blobPath}/chunk_${i}`)));
 
-    const chunkVals = [];
-    for (const c of chunkBits) {
-      let v = c.val;
-      if (decrypt && isEncryptedEnvelope(v)) v = await decrypt(c);
-      if (v == null) return null; // couldn't decrypt this chunk - not a reader, or sender unresolvable
-      chunkVals.push(v);
+    // Decodes+decrypts+hash-verifies one chunk; `null` means "not usable
+    // yet, for any reason" (missing, undecryptable, or hash mismatch) -
+    // the caller treats all three identically as something to backfill.
+    const decodeChunk = async (chunkBit, index) => {
+      if (!chunkBit) return null;
+      let v = chunkBit.val;
+      if (decrypt && isEncryptedEnvelope(v)) v = await decrypt(chunkBit);
+      if (v == null) return null; // couldn't decrypt - not a reader, or sender unresolvable
+      const bytes = QuCrypto.fromBase64(v);
+      if (meta.chunkHashes?.[index] && (await hashChunk(bytes)) !== meta.chunkHashes[index]) {
+        console.warn(`[AssetEngine] chunk ${index} of "${storePath}" failed hash verification - discarding`);
+        return null;
+      }
+      return bytes;
+    };
+
+    let chunkBits = await fetchChunkBits();
+    let chunkByteArrays = await Promise.all(chunkBits.map((c, i) => decodeChunk(c, i)));
+
+    if (syncFetch && chunkByteArrays.some((b) => !b)) {
+      await Promise.all(
+        chunkByteArrays.map((b, i) => (b ? null : syncFetch(`${meta.blobPath}/chunk_${i}`).catch(() => {})))
+      );
+      chunkBits = await fetchChunkBits();
+      chunkByteArrays = await Promise.all(chunkBits.map((c, i) => decodeChunk(c, i)));
     }
-    const chunkBytes = chunkVals.map((v) => QuCrypto.fromBase64(v));
-    const totalLength = chunkBytes.reduce((sum, b) => sum + b.length, 0);
+    if (chunkByteArrays.some((b) => !b)) return null; // still missing/corrupt after backfill - incomplete upload, or unreachable/malicious peer
+
+    const totalLength = chunkByteArrays.reduce((sum, b) => sum + b.length, 0);
     const data = new Uint8Array(totalLength);
     let offset = 0;
-    for (const bytes of chunkBytes) {
+    for (const bytes of chunkByteArrays) {
       data.set(bytes, offset);
       offset += bytes.length;
     }
     return { meta, data };
   }
+}
+
+/** @param {Uint8Array} bytes @returns {Promise<string>} Hex SHA-256, used for chunk content-verification/dedup. */
+async function hashChunk(bytes) {
+  return QuCrypto.toHex(await QuCrypto.sha256(bytes));
 }
 
 /**
