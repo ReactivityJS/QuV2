@@ -361,12 +361,22 @@ export class QuRelay {
       candidates = mentions.filter((pub) => pub !== authorPub).map((actorPub) => ({ actorPub, mention: true }));
     }
 
-    // Calendar has two distinct push-worthy actions (see its manifest's
-    // `pushActions`) distinguished by threadId, not by `mention` - an
-    // `invite-<actorPub>` thread only ever has that one invitee as a
-    // candidate (see ThreadService's `mail` preset), while `activity`'s
-    // candidates are every OTHER current member of the calendar.
-    const calendarFunctionName = appId === 'calendar' ? (threadId === 'activity' ? 'eventChange' : 'invite') : null;
+    // Calendar has three distinct push-worthy actions (see its manifest's
+    // `pushActions`) distinguished by threadId, not by `mention`:
+    //   - `activity` - candidates are every OTHER current member of the
+    //     calendar (a growing reader list, see ThreadService.addReader()).
+    //   - `invite-<actorPub>` - only ever has that one invitee as a
+    //     candidate (see ThreadService's `mail` preset): a calendar-level share.
+    //   - `guest~<eventId>~<actorPub>` - same single-candidate shape, but
+    //     for inviting one person to one specific EVENT rather than the
+    //     whole calendar (see apps/calendar/client.js's `inviteGuest()`).
+    //     `~` is used as the separator (not `-`) because both a UUID event
+    //     id and a base64url actor pubkey can themselves contain `-`,
+    //     which would make splitting the threadId back apart ambiguous.
+    const calendarFunctionName = appId !== 'calendar' ? null
+      : threadId === 'activity' ? 'eventChange'
+      : threadId.startsWith('guest~') ? 'guestInvite'
+      : 'invite';
 
     for (const { actorPub, mention } of candidates) {
       const prefs = await this.services.notificationPrefs.getPrefsFor(actorPub);
@@ -383,6 +393,11 @@ export class QuRelay {
         ? { title: 'Calendar invitation', body: 'You were invited to a shared calendar.', appId, url: `#/calendar/${calendarMatch[1]}` }
         : calendarFunctionName === 'eventChange'
         ? { title: 'Calendar updated', body: 'A shared calendar you belong to has new activity.', appId, url: `#/calendar/${calendarMatch[1]}` }
+        : calendarFunctionName === 'guestInvite'
+        // threadId is `guest~<eventId>~<actorPub>` - the middle segment is
+        // the event id, safe to surface (routing metadata, not decrypted
+        // content) so the notification deep-links straight to the event.
+        ? { title: 'Event invitation', body: 'You were invited to an event.', appId, url: `#/calendar/${calendarMatch[1]}/${threadId.split('~')[1]}` }
         : {
             title: mention ? `Mentioned in ${appId}` : `New message in ${appId}`,
             body: `~${(authorPub ?? 'someone').slice(0, 10)}… sent a message`,

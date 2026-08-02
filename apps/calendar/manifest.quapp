@@ -10,6 +10,7 @@
   "requires": ["document-service", "collection-service", "thread-service"],
   "pushActions": [
     { "id": "invite", "label": "Calendar invitations" },
-    { "id": "eventChange", "label": "Shared calendar changes" }
+    { "id": "eventChange", "label": "Shared calendar changes" },
+    { "id": "guestInvite", "label": "Event invitations" }
   ]
 }
