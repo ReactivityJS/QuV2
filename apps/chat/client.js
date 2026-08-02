@@ -189,7 +189,12 @@ const STYLE = `
   .qu-chat-pinned-jump-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.85em; }
   .qu-chat-pinned-count { all: unset; cursor: pointer; flex-shrink: 0; font-size: 0.78em; opacity: 0.7; padding: 0.1rem 0.4rem; border: 1px solid #8886; border-radius: 999px; }
 
-  .qu-chat-messages { list-style: none; margin: 0; padding: 0.3rem 0; display: flex; flex-direction: column; gap: 0.5rem; flex: 1; min-height: 0; overflow-y: auto; scroll-behavior: smooth; }
+  /* Bottom padding deliberately bigger than the top - the composer sits
+     right below this list as a flex sibling (not overlapping it), but
+     with no gap at all the newest message reads as jammed against the
+     composer rather than clearly "the end of the list", especially right
+     after an auto-scroll-to-bottom. */
+  .qu-chat-messages { list-style: none; margin: 0; padding: 0.3rem 0 0.9rem; display: flex; flex-direction: column; gap: 0.5rem; flex: 1; min-height: 0; overflow-y: auto; scroll-behavior: smooth; }
   .qu-chat-msg-row { display: flex; flex-direction: column; max-width: min(32rem, 82%); }
   .qu-chat-msg-row[data-mine="true"] { align-self: flex-end; }
   .qu-chat-msg-row[data-mine="false"] { align-self: flex-start; }
@@ -239,8 +244,8 @@ const STYLE = `
   @keyframes qu-chat-spin { to { transform: rotate(360deg); } }
   .qu-chat-msg-actions-btn { all: unset; cursor: pointer; padding: 0 0.2rem; opacity: 0.7; line-height: 1; }
   .qu-chat-msg-actions-btn:hover { opacity: 1; }
-  .qu-chat-msg-quick-react-btn { all: unset; cursor: pointer; padding: 0 0.2rem; opacity: 0.8; line-height: 1; font-size: 1.6em; }
-  .qu-chat-msg-quick-react-btn:hover { opacity: 1; }
+  .qu-chat-msg-quick-react-btn { all: unset; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; width: 1.5em; height: 1.5em; border-radius: 50%; border: 1px solid #8886; opacity: 0.8; line-height: 1; font-size: 1.15em; font-weight: 600; }
+  .qu-chat-msg-quick-react-btn:hover { opacity: 1; background: #8882; }
   .qu-chat-msg-row[data-anchored="true"] .qu-chat-msg-outer { animation: qu-chat-anchor-flash 1.6s ease; }
   @keyframes qu-chat-anchor-flash { 0%, 100% { background: #8881; } 30% { background: color-mix(in srgb, var(--qu-chat-own-color, #3390ec) 35%, transparent); } }
 
@@ -326,6 +331,12 @@ const STYLE = `
   .qu-chat-search-result-room { font-weight: 600; font-size: 0.85em; opacity: 0.8; }
   .qu-chat-search-result-time { font-size: 0.72em; opacity: 0.6; margin-top: 0.2rem; }
   .qu-chat-search-empty { opacity: 0.6; padding: 0.5rem; }
+  .qu-chat-search-preview { margin-top: 0.4rem; display: flex; align-items: center; gap: 0.5rem; }
+  .qu-chat-search-thumb { width: 4.5rem; height: 4.5rem; object-fit: cover; border-radius: 0.5rem; flex-shrink: 0; background: #8882; }
+  .qu-chat-search-file { font-size: 0.85em; opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qu-chat-search-download-btn { border: 1px solid #8886; background: none; color: inherit; border-radius: 999px; padding: 0.2rem 0.6rem; font-size: 0.78em; cursor: pointer; flex-shrink: 0; }
+  .qu-chat-search-download-btn:hover { background: #8882; }
+  .qu-chat-search-link-preview { flex: 1; min-width: 0; cursor: inherit; }
 
   .qu-chat-lightbox { position: fixed; inset: 0; background: #000000e6; z-index: 100; align-items: center; justify-content: center; touch-action: none; overflow: hidden; }
   .qu-chat-lightbox:not([hidden]) { display: flex; }
@@ -568,6 +579,28 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
   let unwatch = null;
   let unwatchPins = null;
   const reactionUnwatches = new Map(); // messageId -> unwatch(), see reload()'s watchReactions() below
+  // assetId -> Promise<{url, meta}|null>, kept for this whole mount()
+  // (spans every room visited this session, not just one) - reload()
+  // rebuilds every message row from scratch on ANY change anywhere in the
+  // room (see reload()'s own doc comment on why), and messageRow() used to
+  // kick off a FRESH services.assets.download() for every image/video/
+  // audio attachment on every single one of those rebuilds - the actual
+  // network+decrypt+decode work is real (not just a DOM re-paint), so
+  // besides being wasteful it visibly blanked out and re-loaded already-
+  // shown media on every unrelated reaction/pin/new-message elsewhere in
+  // the room. An attachment's bytes never change once posted (no edit
+  // path for attachments), so caching by assetId is safe for this
+  // mount's whole lifetime - revoked in the app-level teardown below.
+  const assetCache = new Map();
+  function cachedAsset(spaceId, assetId) {
+    if (!assetCache.has(assetId)) {
+      assetCache.set(assetId, services.assets.download(spaceId, assetId).then((asset) => {
+        if (!asset) return null;
+        return { url: URL.createObjectURL(new Blob([asset.data], { type: asset.meta.mime })), meta: asset.meta };
+      }));
+    }
+    return assetCache.get(assetId);
+  }
   let stopHeartbeat = null;
   let presenceTimer = null;
   let readReceiptTimer = null;
@@ -899,6 +932,89 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
   }
 
   /**
+   * A search result's own media preview - a scaled-down version of what
+   * messageRow() shows inline in the room itself (see its "attachment"
+   * block and buildLinkPreview() above), so a hit is recognizable at a
+   * glance instead of just a text snippet, plus an explicit download
+   * button for every attachment kind (images/videos included, not just
+   * "other files" - a search result may be the ONLY place someone finds
+   * an old photo again). Returns a plain (non-anchor) node meant to sit
+   * INSIDE the result's own `<a>` (see the results loop below) - nesting
+   * a real `<a>` (what buildLinkPreview() itself returns) inside another
+   * `<a>` gets silently reparented apart by the HTML parser, so the link-
+   * preview case here is a non-interactive lookalike `<div>` instead; a
+   * nested `<button>` (the download control) doesn't have that problem,
+   * it just needs its own stopPropagation so it downloads instead of
+   * also navigating to the message.
+   * @param {string|number} spaceId @param {object} message
+   * @returns {HTMLElement|null}
+   */
+  function buildSearchPreview(spaceId, message) {
+    const wrap = document.createElement('div');
+    wrap.className = 'qu-chat-search-preview';
+
+    function downloadBtn(assetId) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'qu-chat-search-download-btn';
+      btn.textContent = `⬇ ${t('download')}`;
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const a = await cachedAsset(spaceId, assetId);
+        if (!a) return;
+        const anchor = document.createElement('a');
+        anchor.href = a.url;
+        anchor.download = a.meta.name;
+        anchor.click();
+      });
+      return btn;
+    }
+
+    if (message.attachment) {
+      const mime = message.attachment.mime ?? '';
+      if (mime.startsWith('image/')) {
+        const img = document.createElement('img');
+        img.className = 'qu-chat-search-thumb';
+        cachedAsset(spaceId, message.attachment.assetId).then((a) => { if (a) img.src = a.url; });
+        wrap.append(img, downloadBtn(message.attachment.assetId));
+      } else if (mime.startsWith('video/')) {
+        const video = document.createElement('video');
+        video.className = 'qu-chat-search-thumb';
+        video.muted = true;
+        video.preload = 'metadata';
+        cachedAsset(spaceId, message.attachment.assetId).then((a) => { if (a) video.src = `${a.url}#t=0.1`; });
+        wrap.append(video, downloadBtn(message.attachment.assetId));
+      } else if (!isVoiceMessageFilename(message.attachment.name) && !mime.startsWith('audio/')) {
+        const file = document.createElement('div');
+        file.className = 'qu-chat-search-file';
+        file.textContent = `📎 ${message.attachment.name} (${fmtSize(message.attachment.size)})`;
+        wrap.append(file, downloadBtn(message.attachment.assetId));
+      } else {
+        const file = document.createElement('div');
+        file.className = 'qu-chat-search-file';
+        file.textContent = `🎙️ ${t('voiceMessage')}`;
+        wrap.append(file, downloadBtn(message.attachment.assetId));
+      }
+    } else if (message.body) {
+      const link = linkifySegments(message.body).find((s) => s.type === 'link');
+      if (link && !parseLocationFromUrl(link.value)) {
+        const card = document.createElement('div');
+        card.className = 'qu-chat-link-preview qu-chat-search-link-preview';
+        const host = document.createElement('div');
+        host.className = 'qu-chat-link-preview-host';
+        host.textContent = `🔗 ${link.hostname}`;
+        const title = document.createElement('div');
+        title.className = 'qu-chat-link-preview-title';
+        title.textContent = link.value;
+        card.append(host, title);
+        wrap.appendChild(card);
+      }
+    }
+    return wrap.childNodes.length ? wrap : null;
+  }
+
+  /**
    * Shared by both global search (every room in `rooms`) and a single
    * chat's search subpage (`rooms` narrowed to one entry, `onlyRoom` set
    * for the heading/room-label suppression) - a plain local substring scan
@@ -1023,6 +1139,8 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
         const snippet = document.createElement('div');
         snippet.textContent = message.body?.trim() || attachmentPreviewLabel(message.attachment);
         a.appendChild(snippet);
+        const preview = buildSearchPreview(room.spaceId, message);
+        if (preview) a.appendChild(preview);
         const time = document.createElement('div');
         time.className = 'qu-chat-search-result-time';
         time.textContent = fmtTime(message.ts);
@@ -1875,11 +1993,20 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
         }
       }
 
-      listEl.textContent = '';
+      // Built OFF-DOM (a detached fragment), not directly into the live
+      // listEl - messageRow() is async (name resolution, reaction
+      // fetches, ...) and awaits ONE message at a time, so clearing and
+      // repopulating the LIVE list across that loop used to leave it
+      // empty/partially-built across several real paint frames - visibly
+      // the "scrolls up, then back down" flash this replaces. Building
+      // into `frag` first means the live list's scrollHeight never
+      // moves until the single atomic swap below, right before scroll
+      // position is restored in the same frame.
+      const frag = document.createDocumentFragment();
       if (messages.length === 0) {
         const li = document.createElement('li');
         li.textContent = t('empty');
-        listEl.appendChild(li);
+        frag.appendChild(li);
       } else {
         for (const message of messages) {
           let row;
@@ -1902,9 +2029,13 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
             row.dataset.messageId = message.id;
             row.textContent = t('messageRenderError');
           }
-          if (myToken !== renderToken) return; // a newer reload() started mid-loop - abandon this stale one
-          listEl.appendChild(row);
+          if (myToken !== renderToken) return; // a newer reload() started mid-loop - abandon this stale one, live list still untouched
+          frag.appendChild(row);
         }
+      }
+      if (myToken !== renderToken) return;
+      listEl.replaceChildren(frag);
+      if (messages.length > 0) {
         if (currentAnchorMessageId) {
           // Re-anchor on EVERY reload while an anchor is active, not just
           // the first one - an anchor stays active until the user
@@ -2233,26 +2364,25 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
           if (isVoice) { const label = document.createElement('div'); label.className = 'qu-chat-voice-label'; label.textContent = t('voiceMessage'); attEl.appendChild(label); }
           const audio = document.createElement('audio');
           audio.controls = true;
-          services.assets.download(spaceId, message.attachment.assetId).then((asset) => {
-            if (stopped || !asset) return;
-            audio.src = URL.createObjectURL(new Blob([asset.data], { type: asset.meta.mime }));
+          cachedAsset(spaceId, message.attachment.assetId).then((a) => {
+            if (stopped || !a) return;
+            audio.src = a.url;
           });
           attEl.appendChild(audio);
         } else if (message.attachment.mime?.startsWith('image/')) {
           const img = document.createElement('img');
-          services.assets.download(spaceId, message.attachment.assetId).then((asset) => {
-            if (stopped || !asset) return;
-            const url = URL.createObjectURL(new Blob([asset.data], { type: asset.meta.mime }));
-            img.src = url;
-            img.addEventListener('click', () => openLightbox(url));
+          cachedAsset(spaceId, message.attachment.assetId).then((a) => {
+            if (stopped || !a) return;
+            img.src = a.url;
+            img.addEventListener('click', () => openLightbox(a.url));
           });
           attEl.appendChild(img);
         } else if (message.attachment.mime?.startsWith('video/')) {
           const video = document.createElement('video');
           video.controls = true;
-          services.assets.download(spaceId, message.attachment.assetId).then((asset) => {
-            if (stopped || !asset) return;
-            video.src = URL.createObjectURL(new Blob([asset.data], { type: asset.meta.mime }));
+          cachedAsset(spaceId, message.attachment.assetId).then((a) => {
+            if (stopped || !a) return;
+            video.src = a.url;
           });
           attEl.appendChild(video);
         } else {
@@ -2261,14 +2391,12 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
           link.href = '#';
           link.addEventListener('click', async (e) => {
             e.preventDefault();
-            const asset = await services.assets.download(spaceId, message.attachment.assetId);
-            if (!asset) return;
-            const url = URL.createObjectURL(new Blob([asset.data], { type: asset.meta.mime }));
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = asset.meta.name;
-            a.click();
-            URL.revokeObjectURL(url);
+            const a = await cachedAsset(spaceId, message.attachment.assetId);
+            if (!a) return;
+            const anchor = document.createElement('a');
+            anchor.href = a.url;
+            anchor.download = a.meta.name;
+            anchor.click();
           });
           attEl.appendChild(link);
         }
@@ -2306,20 +2434,6 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
 
       const meta = document.createElement('div');
       meta.className = 'qu-chat-msg-meta';
-      // Always-visible "add a reaction" affordance, separate from the ⋮
-      // menu's own "React" item - a dedicated one-tap icon instead of
-      // menu → React being the only way in, matching the common
-      // messenger pattern (Matrix, Telegram, Discord, ...) of a
-      // leftmost, clearly-visible quick-react icon ahead of the rest of
-      // the message's own metadata (pin/edited/time/tick) and the "⋮"
-      // menu, which stays last.
-      const quickReactBtn = document.createElement('button');
-      quickReactBtn.type = 'button';
-      quickReactBtn.className = 'qu-chat-msg-quick-react-btn';
-      quickReactBtn.textContent = '😊';
-      quickReactBtn.title = t('react');
-      quickReactBtn.addEventListener('click', (e) => { e.stopPropagation(); openReactionPopup(message, quickReactBtn); });
-      meta.appendChild(quickReactBtn);
       if (isPinned) {
         const pinBadge = document.createElement('span');
         pinBadge.className = 'qu-chat-msg-pin-badge';
@@ -2357,6 +2471,19 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       actionsBtn.title = t('more');
       actionsBtn.addEventListener('click', (e) => { e.stopPropagation(); openActionsMenu(message, allMessages, isPinned, actionsBtn); });
       meta.appendChild(actionsBtn);
+
+      // Always-visible "add a reaction" affordance, separate from the ⋮
+      // menu's own "React" item - the RIGHTMOST element of the row (after
+      // "⋮", per feedback), and a plain "+" glyph rather than an actual
+      // emoji face - a real face here read as an already-applied
+      // reaction rather than an invitation to pick one.
+      const quickReactBtn = document.createElement('button');
+      quickReactBtn.type = 'button';
+      quickReactBtn.className = 'qu-chat-msg-quick-react-btn';
+      quickReactBtn.textContent = '+';
+      quickReactBtn.title = t('react');
+      quickReactBtn.addEventListener('click', (e) => { e.stopPropagation(); openReactionPopup(message, quickReactBtn); });
+      meta.appendChild(quickReactBtn);
       footer.appendChild(meta);
 
       outer.appendChild(footer);
@@ -2453,5 +2580,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     if (presenceTimer) clearInterval(presenceTimer);
     if (readReceiptTimer) clearInterval(readReceiptTimer);
     for (const cleanup of roomCleanups) cleanup();
+    for (const p of assetCache.values()) p.then((a) => { if (a) URL.revokeObjectURL(a.url); });
+    assetCache.clear();
   };
 }
