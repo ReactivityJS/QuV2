@@ -5,7 +5,7 @@ import { THREAD_PRESETS } from './thread-service.js';
  * CHAT SERVICE — group-chat creation and discovery on top of ThreadService.
  *
  * A 1:1 room needs no discovery step: its id is DERIVED from both members'
- * pubkeys (see apps/chat/client.js's `roomId()`), so either side lands in
+ * pubkeys (see this class's `roomId()`), so either side lands in
  * the same room with Contacts as the mutual-interest signal. A GROUP's id
  * is arbitrary (there's no deterministic function of an open-ended member
  * list two people would independently compute the same way), so an
@@ -26,6 +26,21 @@ import { THREAD_PRESETS } from './thread-service.js';
 export class ChatService {
   static SPACE = 'chat';
   static #INVITE_THREAD_ID = 'groups';
+
+  /**
+   * A deterministic 1:1/group room id both members derive independently,
+   * order-independent - pure function of the member set, no identity/thread
+   * state needed, hence static. Moved here (from apps/chat/client.js, which
+   * used to call `@qu/core`'s `QuCrypto` directly) so an App never has to
+   * reach past its Service layer for a plain hash derivation.
+   * @param {string[]} memberPubs
+   * @returns {Promise<string>}
+   */
+  static async roomId(memberPubs) {
+    const sorted = [...memberPubs].sort();
+    const hash = await QuCrypto.sha256(new TextEncoder().encode(sorted.join(',')));
+    return `r-${QuCrypto.toHex(hash).slice(0, 32)}`;
+  }
 
   /**
    * @param {ThreadService} threads

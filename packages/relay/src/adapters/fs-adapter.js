@@ -120,8 +120,13 @@ export class FsAdapter {
       // absent) or, on filesystems without atomic rename guarantees, a
       // torn write from BEFORE this fix - treat either as "nothing usable
       // here yet" rather than crashing the caller (see push delivery,
-      // which reads a possibly-just-written collection).
-      if (err instanceof SyntaxError) return null;
+      // which reads a possibly-just-written collection). Still log it: a
+      // genuinely corrupted file on disk looks identical to "never
+      // written" to every caller otherwise, and that's worth knowing about.
+      if (err instanceof SyntaxError) {
+        console.error(`[FsAdapter] corrupt JSON at ${this.#filePath(rel)}: ${err.message}`);
+        return null;
+      }
       throw err;
     }
   }

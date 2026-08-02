@@ -44,8 +44,7 @@
  * Routes: `#/chat` (room list), `#/chat/<peerActorPub>` (1:1 room),
  * `#/chat/g/<groupId>` (group room).
  */
-import { QuCrypto } from '@qu/core';
-import { THREAD_PRESETS, paths } from '@qu/services';
+import { THREAD_PRESETS, ChatService, paths } from '@qu/services';
 import { watch } from '@qu/reactive';
 import { createI18n } from '@qu/i18n';
 
@@ -328,13 +327,6 @@ function ensureStyle() {
   style.id = STYLE_ID;
   style.textContent = STYLE;
   document.head.appendChild(style);
-}
-
-/** @returns {Promise<string>} A deterministic room id both members derive independently, order-independent. */
-async function roomId(memberPubs) {
-  const sorted = [...memberPubs].sort();
-  const hash = await QuCrypto.sha256(new TextEncoder().encode(sorted.join(',')));
-  return `r-${QuCrypto.toHex(hash).slice(0, 32)}`;
 }
 
 function fmtSize(bytes) {
@@ -630,7 +622,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
 
     const rooms = [];
     for (const { actorPub, profile } of contacts) {
-      const id = await roomId([myActorPub, actorPub]);
+      const id = await ChatService.roomId([myActorPub, actorPub]);
       rooms.push({ type: 'direct', href: `#/chat/${actorPub}`, seed: actorPub, name: profile?.alias || `~${actorPub.slice(0, 10)}…`, avatar: profile?.avatar ?? null, spaceId: SPACE, threadId: id });
     }
     for (const id of groupIds) {
@@ -822,7 +814,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
 
     const rooms = [];
     for (const { actorPub, profile } of contacts) {
-      const id = await roomId([myActorPub, actorPub]);
+      const id = await ChatService.roomId([myActorPub, actorPub]);
       rooms.push({ href: `#/chat/${actorPub}`, name: profile?.alias || `~${actorPub.slice(0, 10)}…`, spaceId: SPACE, threadId: id, isGroup: false });
     }
     for (const id of groupIds) {
@@ -864,7 +856,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       name = config.name || threadId;
     } else {
       spaceId = SPACE;
-      threadId = await roomId([myActorPub, target.peerActorPub]);
+      threadId = await ChatService.roomId([myActorPub, target.peerActorPub]);
       if (stopped) return;
       href = `#/chat/${target.peerActorPub}`;
       const theirProfile = await services.profile.getPublicProfile(target.peerActorPub);
@@ -1039,7 +1031,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       headerSeed = threadId;
     } else {
       spaceId = SPACE;
-      threadId = await roomId([myActorPub, target.peerActorPub]);
+      threadId = await ChatService.roomId([myActorPub, target.peerActorPub]);
       if (stopped) return;
       config = await services.threads.createThread(spaceId, threadId, THREAD_PRESETS.chat([myActorPub, target.peerActorPub]));
       if (stopped) return;
@@ -1245,7 +1237,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       const targets = [];
       for (const { actorPub, profile } of contacts) {
         if (target.type === 'direct' && actorPub === target.peerActorPub) continue;
-        targets.push({ href: `#/chat/${actorPub}`, seed: actorPub, name: profile?.alias || `~${actorPub.slice(0, 10)}…`, avatar: profile?.avatar ?? null, spaceId: SPACE, threadId: await roomId([myActorPub, actorPub]), config: THREAD_PRESETS.chat([myActorPub, actorPub]) });
+        targets.push({ href: `#/chat/${actorPub}`, seed: actorPub, name: profile?.alias || `~${actorPub.slice(0, 10)}…`, avatar: profile?.avatar ?? null, spaceId: SPACE, threadId: await ChatService.roomId([myActorPub, actorPub]), config: THREAD_PRESETS.chat([myActorPub, actorPub]) });
       }
       for (const id of groupIds) {
         if (target.type === 'group' && id === target.groupId) continue;
