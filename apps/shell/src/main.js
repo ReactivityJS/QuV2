@@ -25,7 +25,7 @@
  * hand-rolled `#...` string) - that's what makes the header's back/forward
  * buttons below meaningful: hash changes are real browser history entries.
  */
-import { QuRuntime, IndexedDBAdapter } from '@qu/runtime';
+import { QuRuntime, IndexedDBAdapter, IndexedDBOutboxStore } from '@qu/runtime';
 import { DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine } from '@qu/engines';
 import { QuIdentityEngine, actorPath } from '@qu/identity';
 import { SyncEngine, WebSocketClientTransport } from '@qu/sync';
@@ -81,8 +81,12 @@ async function boot() {
   // publishAllTo: 'relay' - see SyncEngine's own doc comment for why a
   // star-topology client (this shell, talking to its one relay) wants
   // unconditional publish rather than subscription-based broadcasting for
-  // its OWN writes.
-  const sync = new SyncEngine(qu, transport, { publishAllTo: 'relay' });
+  // its OWN writes. `outbox`: a persistent (IndexedDB-backed) record of
+  // writes not yet acknowledged by the relay - see outbox.js - so a write
+  // made while genuinely offline survives a reload/relaunch and gets
+  // resent once the relay is reachable again, instead of only surviving a
+  // same-session reconnect (all the transport's own in-memory queue can do).
+  const sync = new SyncEngine(qu, transport, { publishAllTo: 'relay', outbox: new IndexedDBOutboxStore('quniverse-sync-outbox') });
   transport.connect().catch((err) => console.error('[shell] relay connection failed:', err));
 
   const identity = new QuIdentityEngine(qu);

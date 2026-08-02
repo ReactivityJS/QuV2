@@ -25,6 +25,21 @@ export class MemoryAdapter {
     return this.#store.get(rel) ?? null;
   }
 
+  /**
+   * Lists every stored QuBit whose relative path starts with `relPrefix` -
+   * see FsAdapter.getAll()'s doc comment for what this is used for
+   * (reciprocal sync catch-up, outbox replay).
+   * @param {string} relPrefix
+   * @returns {Promise<Array<{rel: string, quBit: object}>>}
+   */
+  async getAll(relPrefix) {
+    const out = [];
+    for (const [rel, quBit] of this.#store) {
+      if (rel.startsWith(relPrefix)) out.push({ rel, quBit });
+    }
+    return out;
+  }
+
   /** @returns {number} Number of stored entries - handy for tests/metrics. */
   size() {
     return this.#store.size;
