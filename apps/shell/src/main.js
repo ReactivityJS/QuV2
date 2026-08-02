@@ -25,7 +25,7 @@
  * hand-rolled `#...` string) - that's what makes the header's back/forward
  * buttons below meaningful: hash changes are real browser history entries.
  */
-import { QuRuntime, IndexedDBAdapter } from '@qu/runtime';
+import { QuRuntime, IndexedDBAdapter, IndexedDBOutboxStore } from '@qu/runtime';
 import { DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine } from '@qu/engines';
 import { QuIdentityEngine, actorPath } from '@qu/identity';
 import { SyncEngine, WebSocketClientTransport } from '@qu/sync';
@@ -42,6 +42,10 @@ import { createDisclosureMenu, menuItem } from './menu.js';
 import { buildAppContextMenu } from './context-menu.js';
 import { t } from './i18n.js';
 import { getStoredLocale, setLocale } from '@qu/i18n';
+import { renderOnboarding } from './onboarding.js';
+
+const STORE_DB_NAME = 'quniverse-store';
+const BLOB_DB_NAME = 'quniverse-blob';
 
 /** @type {{trustedPublisherPubs?: string[], locale?: string}} */
 const CONFIG = globalThis.QU_SHELL_CONFIG ?? {};
@@ -50,9 +54,11 @@ async function boot() {
   registerServiceWorker();
   listenForNotificationClicks((url) => { location.hash = url; });
 
-  const runtime = new QuRuntime({ storeAdapter: new IndexedDBAdapter('quniverse-store') });
+  const storeAdapter = new IndexedDBAdapter(STORE_DB_NAME);
+  const blobAdapter = new IndexedDBAdapter(BLOB_DB_NAME);
+  const runtime = new QuRuntime({ storeAdapter });
   const qu = runtime.core;
-  qu.mount('blob', new IndexedDBAdapter('quniverse-blob'));
+  qu.mount('blob', blobAdapter);
 
   new DocumentEngine(qu);
   new CollectionEngine(qu);
@@ -76,27 +82,43 @@ async function boot() {
   // publishAllTo: 'relay' - see SyncEngine's own doc comment for why a
   // star-topology client (this shell, talking to its one relay) wants
   // unconditional publish rather than subscription-based broadcasting for
-  // its OWN writes.
-  const sync = new SyncEngine(qu, transport, { publishAllTo: 'relay' });
+  // its OWN writes. `outbox`: a persistent (IndexedDB-backed) record of
+  // writes not yet acknowledged by the relay - see outbox.js - so a write
+  // made while genuinely offline survives a reload/relaunch and gets
+  // resent once the relay is reachable again, instead of only surviving a
+  // same-session reconnect (all the transport's own in-memory queue can do).
+  const sync = new SyncEngine(qu, transport, { publishAllTo: 'relay', outbox: new IndexedDBOutboxStore('quniverse-sync-outbox') });
   transport.connect().catch((err) => console.error('[shell] relay connection failed:', err));
 
   const identity = new QuIdentityEngine(qu);
   if (!(await identity.hasIdentity())) {
-    const mnemonic = identity.generateMnemonic();
-    await identity.importMnemonic(mnemonic);
-    console.warn('[shell] New identity created. Recovery phrase (save this somewhere safe):', mnemonic);
-    // Publish an (initially empty) public profile immediately, rather than
-    // waiting for a visit to the Profile app - the ONLY thing another
-    // identity needs to encrypt something FOR this one (an encrypted
-    // Thread's reader key, an @qu/identity attestation, ...) is the
-    // xPublicKey this always includes (see QuIdentityEngine's
-    // publishMainProfile()), which is derivable the moment an identity
-    // exists. Without this, the very first Chat/Inbox message to a
-    // brand-new identity would fail with "no published profile" until they
-    // happened to open Profile first - alias/avatar can be filled in
-    // later, but the key an encrypted message needs shouldn't be gated on
-    // a UI visit that has nothing to do with encryption.
-    await identity.publishMainProfile({});
+    // Renders straight into document.body - no shell chrome exists yet at
+    // this point in boot(), and none should: a device with no identity has
+    // nothing meaningful to show a nav/header for. See onboarding.js for
+    // the two paths (create new / import an existing identity from another
+    // device via pasted code or QR scan) and why the mnemonic can ONLY
+    // ever be shown at creation time (never again afterward - see
+    // @qu/identity's exportSeedCode() doc comment).
+    const outcome = await renderOnboarding(document.body, identity);
+    if (outcome === 'created') {
+      // Publish an (initially empty) public profile immediately, rather
+      // than waiting for a visit to the Profile app - the ONLY thing
+      // another identity needs to encrypt something FOR this one (an
+      // encrypted Thread's reader key, an @qu/identity attestation, ...)
+      // is the xPublicKey this always includes (see QuIdentityEngine's
+      // publishMainProfile()), which is derivable the moment an identity
+      // exists. Without this, the very first Chat/Inbox message to a
+      // brand-new identity would fail with "no published profile" until
+      // they happened to open Profile first - alias/avatar can be filled
+      // in later, but the key an encrypted message needs shouldn't be
+      // gated on a UI visit that has nothing to do with encryption.
+      await identity.publishMainProfile({});
+    }
+    // 'imported': this identity's profile was already published by
+    // whichever device it originated on (and will sync in once this
+    // session subscribes/backfills - see @qu/services/sync-freshness.js) -
+    // publishing an EMPTY one here would overwrite the real alias/avatar
+    // the moment it synced out, so this path deliberately does nothing.
   }
 
   // See ThreadService's constructor doc comment (@qu/services) for why it
@@ -104,19 +126,43 @@ async function boot() {
   // sender, whose profile hasn't happened to sync to THIS session yet
   // (subscribe() only covers writes made after subscribing - no history
   // replay) would otherwise fail for no reason a user could fix.
-  const Qu = createServices(qu, { assetEngine, identityEngine: identity, syncFetch: (path) => sync.fetch(path) });
+  const Qu = createServices(qu, {
+    assetEngine, identityEngine: identity,
+    syncFetch: (path) => sync.fetch(path),
+    // Lets every Service background-refresh data it already has cached but
+    // that might have gone stale while this session was offline (see
+    // @qu/services/sync-freshness.js) - subscribe()-based live sync alone
+    // never catches up on anything missed while disconnected.
+    getSyncGeneration: () => sync.getGeneration(),
+  });
   const actorPub = await Qu.actors.whoAmI();
 
-  const shell = new Shell(qu, Qu, actorPub, sync);
+  // "Forget this identity" (see apps/profile/client.js's backup section,
+  // exposed to it via ctx.wipeIdentity below) - permanently deletes BOTH
+  // local IndexedDB databases (see IndexedDBAdapter.destroy()'s own doc
+  // comment for why an all-or-nothing wipe is the only option this stack
+  // has) and reloads, landing back on the onboarding screen above. Defined
+  // here (closing over storeAdapter/blobAdapter, which the Shell instance
+  // itself has no reason to hold onto otherwise) rather than as a Shell
+  // method.
+  async function wipeIdentity() {
+    sync.close();
+    transport.close();
+    await Promise.all([storeAdapter.destroy(), blobAdapter.destroy()]);
+    location.reload();
+  }
+
+  const shell = new Shell(qu, Qu, actorPub, sync, wipeIdentity);
   await shell.mount(document.body);
 }
 
 class Shell {
-  constructor(qu, Qu, actorPub, sync) {
+  constructor(qu, Qu, actorPub, sync, wipeIdentity) {
     this.qu = qu;
     this.Qu = Qu;
     this.actorPub = actorPub;
     this.sync = sync;
+    this.wipeIdentity = wipeIdentity;
     this.apps = [];
     this.adminPubs = [];
     this.stopMountedApp = null;
@@ -481,6 +527,11 @@ class Shell {
       apps: this.apps,
       subscribe: (pathPrefix) => this.sync.subscribe(pathPrefix),
       fetch: (path) => this.sync.fetch(path),
+      // Permanently deletes this identity and every byte of its local data,
+      // then reloads - see boot()'s own definition of this function for
+      // exactly what that means. Used by apps/profile/client.js's backup
+      // section; any app COULD call it, but only Profile currently does.
+      wipeIdentity: this.wipeIdentity,
     });
     this.stopMountedApp = typeof stop === 'function' ? stop : null;
   }

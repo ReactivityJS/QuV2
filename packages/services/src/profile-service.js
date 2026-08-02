@@ -1,6 +1,7 @@
 import { QuCrypto } from '@qu/core';
 import { actorPath } from '@qu/identity';
 import { putPrivate, getPrivate } from './private-storage.js';
+import { createFreshnessTracker } from './sync-freshness.js';
 
 /** @param {string} actorPub @returns {string} */
 function privateExtraPath(actorPub) {
@@ -29,6 +30,8 @@ function privateExtraPath(actorPub) {
  *     sees it", the simplest possible reading of "private toggle".
  */
 export class ProfileService {
+  #backgroundRefresh;
+
   /**
    * @param {import('@qu/core').QuCore} qu
    * @param {import('@qu/identity').QuIdentityEngine} identityEngine
@@ -38,11 +41,16 @@ export class ProfileService {
    *   own constructor doc comment. Without it, `getPublicProfile()` for
    *   someone whose profile was published before this session subscribed
    *   would return null forever, no matter how long it waits.
+   * @param {() => number} [getGeneration] - Optional: `SyncEngine.getGeneration()`
+   *   (see @qu/sync) - background-refreshes an already-cached profile that
+   *   might have changed (new alias/avatar) while this session was offline
+   *   (see @qu/services/sync-freshness.js).
    */
-  constructor(qu, identityEngine, syncFetch = null) {
+  constructor(qu, identityEngine, syncFetch = null, getGeneration = null) {
     this.qu = qu;
     this.identity = identityEngine;
     this.syncFetch = syncFetch;
+    this.#backgroundRefresh = createFreshnessTracker(syncFetch, getGeneration);
   }
 
   async #myActorPub() {
@@ -86,8 +94,28 @@ export class ProfileService {
    */
   async getOwnProfile() {
     const actorPub = await this.#myActorPub();
+
+    // Backfill/background-refresh BOTH pieces (same sync-freshness.js
+    // pattern getPublicProfile() already used for a THIRD PARTY's profile -
+    // this method never had it for "my own", because before cross-device
+    // identity import existed, "my own profile" was always written on
+    // THIS SAME device and so was always already local. A freshly imported
+    // identity (see @qu/identity's importSeedCode()) starts with an empty
+    // local store, so without this its alias/avatar/epub and any private
+    // fields would silently stay blank forever, even though the real data
+    // is sitting on the relay under this exact actorPub.
+    const profilePath = actorPath(actorPub, 'profile');
+    const localProfile = await this.qu.get(profilePath);
+    if (localProfile) this.#backgroundRefresh(profilePath);
+    else if (this.syncFetch) await this.syncFetch(profilePath).catch(() => {});
+
+    const extraPath = privateExtraPath(actorPub);
+    const localExtra = await this.qu.get(extraPath);
+    if (localExtra) this.#backgroundRefresh(extraPath);
+    else if (this.syncFetch) await this.syncFetch(extraPath).catch(() => {});
+
     const { alias = '', avatar = '', xPublicKey = '', ...publicExtra } = (await this.identity.getProfile(actorPub)) ?? {};
-    const privateExtra = (await getPrivate(this.qu, this.identity, privateExtraPath(actorPub))) ?? {};
+    const privateExtra = (await getPrivate(this.qu, this.identity, extraPath)) ?? {};
 
     const fields = [
       ...Object.entries(publicExtra).map(([key, value]) => ({ key, value, visibility: 'public' })),
@@ -110,7 +138,9 @@ export class ProfileService {
    */
   async getPublicProfile(actorPub) {
     let profile = await this.identity.getProfile(actorPub);
-    if (!profile && this.syncFetch) {
+    if (profile) {
+      this.#backgroundRefresh(actorPath(actorPub, 'profile'));
+    } else if (this.syncFetch) {
       try {
         await this.syncFetch(actorPath(actorPub, 'profile'));
       } catch {

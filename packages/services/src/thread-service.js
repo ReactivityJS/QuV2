@@ -3,6 +3,7 @@ import { threadMetaPath, threadMessagePath, threadMessagesCollectionId, threadRe
 import { applyFormatting } from './thread-formatting.js';
 import { putPrivate, getPrivate } from './private-storage.js';
 import { isEncryptedEnvelope, resolveReaderXKeys, decryptEnvelope } from './crypto-envelope.js';
+import { createFreshnessTracker } from './sync-freshness.js';
 
 /**
  * THREAD SERVICE — the Entity API for Threads (see @qu/engines/thread-engine.js
@@ -21,6 +22,8 @@ import { isEncryptedEnvelope, resolveReaderXKeys, decryptEnvelope } from './cryp
  * producing a `createThread()` config, nothing else app-specific.
  */
 export class ThreadService {
+  #backgroundRefresh;
+
   /**
    * @param {import('@qu/core').QuCore} qu
    * @param {import('@qu/identity').QuIdentityEngine} identityEngine
@@ -38,12 +41,21 @@ export class ThreadService {
    *   from the UI's perspective. Omit this (e.g. server-side/relay usage,
    *   which has no peer to fetch from in the same sense) and both methods
    *   simply behave as before - local-only, no fallback.
+   * @param {() => number} [getGeneration] - Optional: `SyncEngine.getGeneration()`
+   *   (see @qu/sync) - enables a background staleness re-check for a thread
+   *   config/messages collection/message that already exists locally (see
+   *   @qu/services/sync-freshness.js). Without this, `subscribe()`'s
+   *   "future writes only" gap meant a room this session had already
+   *   opened before going offline never caught up on what was posted while
+   *   it was away, even after reconnecting - the local-miss-only backfill
+   *   below never re-runs once something is cached.
    */
-  constructor(qu, identityEngine, collectionService, syncFetch = null) {
+  constructor(qu, identityEngine, collectionService, syncFetch = null, getGeneration = null) {
     this.qu = qu;
     this.identity = identityEngine;
     this.collections = collectionService;
     this.syncFetch = syncFetch;
+    this.#backgroundRefresh = createFreshnessTracker(syncFetch, getGeneration);
   }
 
   /** @returns {Promise<string>} base64url pubkey of this identity's main key. */
@@ -60,7 +72,11 @@ export class ThreadService {
    */
   async #getProfile(actorPub) {
     const local = await this.identity.getProfile(actorPub);
-    if (local || !this.syncFetch) return local;
+    if (local) {
+      this.#backgroundRefresh(`/store/actors/~${actorPub}/profile`); // e.g. a reader's key rotated while this session was offline
+      return local;
+    }
+    if (!this.syncFetch) return null;
     try {
       await this.syncFetch(`/store/actors/~${actorPub}/profile`);
     } catch {
@@ -106,6 +122,31 @@ export class ThreadService {
   }
 
   /**
+   * Resets a thread's history back to empty - same threadId, same config/
+   * members, only the messages and pins lists are cleared. Deliberately a
+   * ThreadService method, not something any one app (Chat, Forum, Inbox -
+   * all built on this same class) should reimplement by poking
+   * CollectionService directly: "delete/recreate a chat" is a thread-level
+   * operation, not a Chat-specific one.
+   *
+   * There is no delete primitive anywhere in Qu's storage layer - every
+   * write is an overwrite, never a removal (see @qu/core's QuStore) - so
+   * this does NOT erase the old message documents themselves, only the
+   * COLLECTIONS that list them (same "unlinked, not erased" shape as
+   * CollectionService.removeItem() - see its own doc comment). A thread
+   * with non-'*' readers is encrypted for every member, not just the
+   * caller: resetting its collections is a normal write like any other in
+   * this thread, so it is visible to - and syncs to - every member, not
+   * just this device. Callers should treat this as destructive and confirm
+   * with the user first.
+   * @param {string|number} spaceId @param {string} threadId
+   */
+  async clearMessages(spaceId, threadId) {
+    await this.collections.create(spaceId, threadMessagesCollectionId(threadId), []);
+    await this.collections.create(spaceId, threadPinsCollectionId(threadId), []);
+  }
+
+  /**
    * Backfills via `syncFetch` (if provided) on a local miss - see
    * `createThread()`'s doc comment for why this matters even for a caller
    * that only wants to READ a config (e.g. Chat's group room view uses
@@ -117,7 +158,10 @@ export class ThreadService {
   async getConfig(spaceId, threadId) {
     const path = threadMetaPath(spaceId, threadId);
     const local = await this.qu.get(path);
-    if (local) return local.val;
+    if (local) {
+      this.#backgroundRefresh(path);
+      return local.val;
+    }
     if (!this.syncFetch) return null;
     await this.syncFetch(path).catch(() => {});
     const retried = await this.qu.get(path);
@@ -336,6 +380,19 @@ export class ThreadService {
    * messages were already exchanged (e.g. the other side messages first,
    * or this identity never subscribed to the thread's space before now)
    * would otherwise show up silently empty.
+   *
+   * A LOCAL HIT (the collection doc already exists) also gets a background
+   * staleness re-check (see sync-freshness.js), and so does every
+   * already-cached individual message - THIS is what actually fixes
+   * "a message from while I was offline never shows up even after
+   * reconnecting": the miss-only backfill above only ever helps a room
+   * opened for the very first time; a room this session had already synced
+   * SOME of before going offline previously had no way to notice it missed
+   * anything, because the collection document (and most/all message docs)
+   * were never actually "missing" locally, just stale. Re-checking an
+   * already-known MESSAGE path also catches an edit made while offline
+   * (`editMessage()` overwrites the same path, so a cached copy would
+   * otherwise show the pre-edit body forever).
    * @param {string|number} spaceId
    * @param {string} threadId
    * @returns {Promise<Array<object>>}
@@ -344,7 +401,9 @@ export class ThreadService {
     const collPath = collectionPath(spaceId, threadMessagesCollectionId(threadId));
     const { adapter, rel } = this.qu.resolveMount(collPath);
     let raw = await adapter.get(rel);
-    if (!raw && this.syncFetch) {
+    if (raw) {
+      this.#backgroundRefresh(collPath);
+    } else if (this.syncFetch) {
       await this.syncFetch(collPath).catch(() => {});
       raw = await adapter.get(rel);
     }
@@ -355,6 +414,7 @@ export class ThreadService {
       await Promise.all(paths.map((path, i) => (quBits[i] ? null : this.syncFetch(path).catch(() => {}))));
       quBits = await Promise.all(paths.map((path) => this.qu.get(path)));
     }
+    for (const path of paths) this.#backgroundRefresh(path);
 
     const messages = [];
     for (const quBit of quBits) {
@@ -434,20 +494,21 @@ export class ThreadService {
    */
   async getReactions(spaceId, threadId, messageId) {
     const collectionId = threadReactionsCollectionId(threadId, messageId);
-    let paths = await this.collections.listRawPaths(spaceId, collectionId);
-    // A length-0 result here means EITHER "no reactions" OR "this
-    // session hasn't synced this message's reactions collection yet" -
-    // listRawPaths() can't tell the two apart (unlike getConfig()'s
-    // null-vs-value distinction), so an empty result always gets one
-    // backfill attempt. Harmless when genuinely empty (syncFetch just
-    // finds nothing new); without it, a room opened after reactions
-    // already existed showed messages correctly but reactions stayed
-    // permanently empty until someone reacted again while this peer
-    // was present.
-    if (paths.length === 0 && this.syncFetch) {
-      await this.syncFetch(collectionPath(spaceId, collectionId)).catch(() => {});
-      paths = await this.collections.listRawPaths(spaceId, collectionId);
-    }
+    // listRawPaths() ALREADY backfills correctly on its own (see
+    // CollectionService.listRawPaths()'s own doc comment): a blocking
+    // syncFetch when this collection has genuinely never been seen
+    // locally, or a gated (once-per-generation) background-refresh when
+    // it has - a length-0 RESULT here can't tell those two cases apart
+    // (unlike getConfig()'s null-vs-value distinction), so a second,
+    // ungated "still empty? fetch again" attempt on top used to refetch
+    // on EVERY call once this collection was confirmed genuinely empty -
+    // each fetch re-persisting the same already-known QuBit (same or
+    // older `ts`, never newer - see SyncEngine#persistDirectly's
+    // never-regress check, which only skips a STRICTLY older write) fired
+    // a fresh `storage:put`, which re-triggered every `watch()` on this
+    // path, which called back in here - a self-sustaining loop with
+    // nothing left to converge on. Trust listRawPaths()'s own backfill.
+    const paths = await this.collections.listRawPaths(spaceId, collectionId);
     const byEmoji = {};
     for (const path of paths) {
       const quBit = await this.qu.get(path);
@@ -476,14 +537,16 @@ export class ThreadService {
     else await this.collections.removeItem(spaceId, collectionId, path, putOptions);
   }
 
-  /** @param {string|number} spaceId @param {string} threadId @returns {Promise<string[]>} Currently pinned message ids. */
+  /**
+   * @param {string|number} spaceId @param {string} threadId
+   * @returns {Promise<string[]>} Currently pinned message ids. See
+   *   getReactions()'s doc comment for why this relies entirely on
+   *   listRawPaths()'s own (correctly gated) backfill rather than adding
+   *   a second, ungated "still empty? fetch again" attempt on top.
+   */
   async listPinned(spaceId, threadId) {
     const collectionId = threadPinsCollectionId(threadId);
-    let paths = await this.collections.listRawPaths(spaceId, collectionId);
-    if (paths.length === 0 && this.syncFetch) { // see getReactions()'s identical backfill for why an empty result still gets one attempt
-      await this.syncFetch(collectionPath(spaceId, collectionId)).catch(() => {});
-      paths = await this.collections.listRawPaths(spaceId, collectionId);
-    }
+    const paths = await this.collections.listRawPaths(spaceId, collectionId);
     return paths.map((path) => path.slice(path.lastIndexOf('/') + 1));
   }
 

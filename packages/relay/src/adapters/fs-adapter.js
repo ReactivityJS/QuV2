@@ -1,6 +1,30 @@
 import { promises as fs } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
+
+/**
+ * Recursively lists every `.json` file under `dir` (one file per stored
+ * QuBit - see the class doc comment). Mirrors relay.js's own
+ * `walkJsonFiles()` (used by Relay Admin's Data Explorer) - kept as a
+ * second small copy here rather than a shared import so `FsAdapter` stays a
+ * self-contained, dependency-free module; the duplication is ~15 lines.
+ */
+async function walkJsonFiles(dir) {
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return []; // directory doesn't exist (e.g. nothing stored under this prefix yet)
+  }
+  const out = [];
+  for (const entry of entries) {
+    const full = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) out.push(...(await walkJsonFiles(full)));
+    // FsAdapter's atomic write leaves a `<path>.<uuid>.tmp` file briefly mid-rename - never a finished, readable QuBit.
+    else if (entry.name.endsWith('.json')) out.push(full);
+  }
+  return out;
+}
 
 /**
  * FS ADAPTER — Node.js filesystem persistence. Stores each QuBit as one
@@ -120,9 +144,46 @@ export class FsAdapter {
       // absent) or, on filesystems without atomic rename guarantees, a
       // torn write from BEFORE this fix - treat either as "nothing usable
       // here yet" rather than crashing the caller (see push delivery,
-      // which reads a possibly-just-written collection).
-      if (err instanceof SyntaxError) return null;
+      // which reads a possibly-just-written collection). Still log it: a
+      // genuinely corrupted file on disk looks identical to "never
+      // written" to every caller otherwise, and that's worth knowing about.
+      if (err instanceof SyntaxError) {
+        console.error(`[FsAdapter] corrupt JSON at ${this.#filePath(rel)}: ${err.message}`);
+        return null;
+      }
       throw err;
     }
+  }
+
+  /**
+   * Lists every QuBit stored under `relPrefix` - the prefix-enumeration
+   * primitive this codebase otherwise doesn't have anywhere (see
+   * relay.js's own `walkJsonFiles()` doc comment). Used by @qu/sync's
+   * reciprocal catch-up (a reconnecting peer asking "what's under this
+   * prefix that I might have missed") and by the client-side sync outbox's
+   * replay-on-reconnect walk.
+   *
+   * ASSUMES `relPrefix` aligns with a real directory boundary - true for
+   * every prefix actually used by `SyncEngine.subscribe()` today (always a
+   * whole path segment, e.g. a space id). A prefix that lands mid-segment
+   * (e.g. `/wik` meaning to match `/wiki/...`) simply finds no directory
+   * and returns nothing, rather than matching by string prefix - a
+   * deliberate simplicity trade-off, not a bug, given how `subscribe()` is
+   * actually called throughout this codebase.
+   * @param {string} relPrefix
+   * @returns {Promise<Array<{rel: string, quBit: object}>>}
+   */
+  async getAll(relPrefix) {
+    const dir = join(this.basePath, relPrefix.replace(/^\//, ''));
+    const files = await walkJsonFiles(dir);
+    const entries = await Promise.all(files.map(async (filePath) => {
+      const rel = '/' + relative(this.basePath, filePath).split(sep).join('/').replace(/\.json$/, '');
+      try {
+        return { rel, quBit: JSON.parse(await fs.readFile(filePath, 'utf8')) };
+      } catch {
+        return null; // corrupt/mid-rename - skip, consistent with get()'s own handling
+      }
+    }));
+    return entries.filter((e) => e !== null);
   }
 }

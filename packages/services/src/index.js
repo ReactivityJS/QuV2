@@ -47,19 +47,28 @@ export { unwrap, unwrapAll } from './unwrap.js';
 
 /**
  * @param {import('@qu/core').QuCore} qu
- * @param {{assetEngine: import('@qu/engines').AssetEngine, identityEngine: import('@qu/identity').QuIdentityEngine, syncFetch?: (path: string) => Promise<object|null>}} deps
+ * @param {{assetEngine: import('@qu/engines').AssetEngine, identityEngine: import('@qu/identity').QuIdentityEngine, syncFetch?: (path: string) => Promise<object|null>, getSyncGeneration?: () => number}} deps
  *   `syncFetch` - typically `(path) => sync.fetch(path)` (see @qu/sync) -
- *   is forwarded to ThreadService, DirectoryService and ProfileService so
- *   each can backfill data that hasn't synced yet (see ThreadService's own
- *   constructor doc comment for why); omit it for a server-side/relay
- *   QuCore, which has no equivalent single upstream peer to fetch from.
+ *   is forwarded to every Service that can backfill data which hasn't
+ *   synced yet; omit it for a server-side/relay QuCore, which has no
+ *   equivalent single upstream peer to fetch from.
+ *   `getSyncGeneration` - typically `() => sync.getGeneration()` (see
+ *   @qu/sync) - lets those same Services ALSO background-refresh data they
+ *   already have locally cached but which might have gone stale while this
+ *   session was offline (see @qu/services/sync-freshness.js) - the fix for
+ *   "a message/event/game update from while I was offline never shows up,
+ *   even after reconnecting", since `subscribe()`-based sync only ever
+ *   delivers writes made after a live connection exists, never a catch-up.
+ *   Omitting it (but providing `syncFetch`) still gets the miss-only
+ *   backfill every Service already had; omitting both is the old,
+ *   local-only behavior.
  * @returns {{documents: DocumentService, collections: CollectionService, assets: AssetService, actors: ActorService, starred: StarredService, threads: ThreadService, favorites: FavoritesService, contacts: ContactsService, directory: DirectoryService, cms: CmsService, profile: ProfileService}}
  */
-export function createServices(qu, { assetEngine, identityEngine, syncFetch }) {
-  const collections = new CollectionService(qu);
-  const starred = new StarredService(qu, identityEngine);
-  const documents = new DocumentService(qu, syncFetch);
-  const threads = new ThreadService(qu, identityEngine, collections, syncFetch);
+export function createServices(qu, { assetEngine, identityEngine, syncFetch, getSyncGeneration }) {
+  const collections = new CollectionService(qu, syncFetch, getSyncGeneration);
+  const starred = new StarredService(qu, identityEngine, syncFetch, getSyncGeneration);
+  const documents = new DocumentService(qu, syncFetch, getSyncGeneration);
+  const threads = new ThreadService(qu, identityEngine, collections, syncFetch, getSyncGeneration);
   return {
     documents,
     collections,
@@ -72,7 +81,7 @@ export function createServices(qu, { assetEngine, identityEngine, syncFetch }) {
     contacts: new ContactsService(starred, identityEngine),
     directory: new DirectoryService(documents, collections, identityEngine, syncFetch),
     cms: new CmsService(documents, collections),
-    profile: new ProfileService(qu, identityEngine, syncFetch),
+    profile: new ProfileService(qu, identityEngine, syncFetch, getSyncGeneration),
     notificationPrefs: new NotificationPrefsService(qu, identityEngine),
     pushSubscriptions: new PushSubscriptionService(documents, collections, identityEngine, syncFetch),
     geochase: new GeoChaseService(qu, documents, collections, identityEngine),

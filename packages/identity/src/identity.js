@@ -43,7 +43,7 @@
  */
 
 import { QuCrypto } from '@qu/core';
-import { generateMnemonicPhrase, mnemonicToSeedBytes } from './bip39.js';
+import { generateMnemonicPhrase, mnemonicToSeedBytes, isValidMnemonic } from './bip39.js';
 import { deriveNodeFromPath } from './bip32.js';
 import {
   mainSigningPath,
@@ -54,6 +54,21 @@ import {
 } from './paths.js';
 
 const SEED_PATH = '/store/secure/identity/seed';
+
+// Both caches below are naturally bounded for a single identity's OWN keys
+// (one process only ever derives so many space keypairs), but
+// `_attestationCache` is keyed by OTHER actors' pubkeys - a long-running
+// relay or a client resolving many distinct senders' attestations over time
+// would otherwise grow it without bound. A simple insertion-order cap
+// (Map preserves insertion order, so the first key is the oldest) is enough
+// here; this isn't a hot enough path to warrant real LRU bookkeeping.
+const MAX_CACHE_ENTRIES = 2000;
+
+function capCache(map, maxEntries = MAX_CACHE_ENTRIES) {
+  while (map.size > maxEntries) {
+    map.delete(map.keys().next().value);
+  }
+}
 
 /**
  * The one place that knows how an actor's public documents map to storage
@@ -122,13 +137,21 @@ export class QuIdentityEngine {
    * @returns {Promise<void>}
    */
   async importMnemonic(mnemonic, passphrase = '', { overwrite = false } = {}) {
+    if (!isValidMnemonic(mnemonic)) {
+      throw new Error('QuIdentityEngine.importMnemonic: invalid mnemonic (bad word or checksum).');
+    }
     const seed = await mnemonicToSeedBytes(mnemonic, passphrase);
+    await this.#storeSeed(seed, overwrite);
+  }
+
+  /** Shared by importMnemonic() and importSeedCode() - see either's own doc comment for the overwrite guard's reasoning. */
+  async #storeSeed(seed, overwrite) {
     if (!overwrite) {
       const existing = await this.qu.get(SEED_PATH);
       const existingSeed = existing?.val ?? existing;
       if (existingSeed && !bytesEqual(new Uint8Array(existingSeed), seed)) {
         throw new Error(
-          'QuIdentityEngine.importMnemonic: this store already holds a different identity seed. ' +
+          'QuIdentityEngine: this store already holds a different identity seed. ' +
             'A QuCore holds one identity at a time - use a separate store per identity, or pass ' +
             '{ overwrite: true } if you intend to replace it.'
         );
@@ -136,6 +159,54 @@ export class QuIdentityEngine {
     }
     await this.qu.put(SEED_PATH, Array.from(seed)); // plain array -> safe to JSON-serialise across adapters
     this._keyCache.clear();
+  }
+
+  /**
+   * Exports the master seed as an opaque, base64url-encoded backup code -
+   * the cross-device transfer/backup mechanism (see apps/profile/client.js's
+   * "Identity backup" section, and @qu/qr for the QR-code presentation of
+   * this same string). This is deliberately NOT the original 24-word
+   * mnemonic: `importMnemonic()` only ever stores the SEED derived from it
+   * (BIP-39's mnemonic -> seed step is one-way PBKDF2 - see bip39.js's own
+   * doc comment), so the words themselves are gone the moment
+   * `generateMnemonic()`'s return value is - a backup code taken later can
+   * only ever be the seed itself.
+   *
+   * SECURITY: this code IS the private key material for every identity
+   * (main + every space) this engine can ever derive - treat it exactly
+   * like a private key. Never log it, never transmit it anywhere but a
+   * channel the user controls end-to-end (their own second device's
+   * camera/clipboard), and never call this without the caller having
+   * already gotten the user's explicit, informed confirmation.
+   * @returns {Promise<string>} base64url-encoded seed bytes.
+   */
+  async exportSeedCode() {
+    const seed = await this._getMasterSeed();
+    return QuCrypto.toBase64Url(seed);
+  }
+
+  /**
+   * The restore/transfer counterpart to exportSeedCode() - imports a
+   * previously exported backup code directly (skipping BIP-39 derivation
+   * entirely, since a backup code already IS the derived seed, not a
+   * mnemonic - see exportSeedCode()'s own doc comment). Same
+   * one-seed-per-store overwrite guard as importMnemonic().
+   * @param {string} code - As returned by exportSeedCode().
+   * @param {{overwrite?: boolean}} [options]
+   * @returns {Promise<void>}
+   * @throws {Error} If `code` isn't valid base64url, or doesn't decode to a 64-byte seed.
+   */
+  async importSeedCode(code, { overwrite = false } = {}) {
+    let seed;
+    try {
+      seed = QuCrypto.fromBase64Url(String(code).trim());
+    } catch {
+      seed = null;
+    }
+    if (!seed || seed.length !== 64) {
+      throw new Error('QuIdentityEngine.importSeedCode: not a valid backup code');
+    }
+    await this.#storeSeed(seed, overwrite);
   }
 
   /**
@@ -173,6 +244,7 @@ export class QuIdentityEngine {
     const { privateKeyPkcs8, publicKey } = await QuCrypto.keypairFromSeed(curve, node.privateKey);
     const keypair = { privateKeyPkcs8, publicKey };
     this._keyCache.set(cacheKey, keypair);
+    capCache(this._keyCache);
     return keypair;
   }
 
@@ -372,6 +444,7 @@ export class QuIdentityEngine {
 
   #cacheAndReturn(actorPub, value) {
     this._attestationCache.set(actorPub, value);
+    capCache(this._attestationCache);
     return value;
   }
 }

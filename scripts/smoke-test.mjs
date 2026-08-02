@@ -31,13 +31,63 @@
  *      invite flow uses, proving a non-Thread-native app gets a properly
  *      labeled, deep-linked notification "for free" the same way Calendar's
  *      invite flow already did.
+ *   9. Mounts and actions: actionsForMount()/resolveActionHref() (the
+ *      Contact List / Chat "contact-row" pattern).
+ *  10. Sync freshness/reconnect catch-up: a message posted while a peer
+ *      genuinely wasn't connected (transport closed, then reconnected) is
+ *      NOT delivered by subscribe() alone, but IS picked up by @qu/services'
+ *      background-refresh-on-reconnect mechanism (see
+ *      @qu/services/sync-freshness.js and @qu/sync's SyncEngine.getGeneration())
+ *      - this is the fix for "messages/events from while I was offline never
+ *      show up even after reconnecting", covering every Service built on
+ *      DocumentService/CollectionService/ThreadService (Chat, Calendar, Geo
+ *      Chase, Forum, Todo, ...), not just one app.
+ *  11. Sync outbox: a write made while genuinely offline (not just a
+ *      mid-session drop - a full "reload", i.e. the old SyncEngine/transport
+ *      pair and its in-memory send queue are discarded) is still delivered
+ *      to the relay once a new connection is established, and the outbox
+ *      entry is cleared once the relay acknowledges it (see @qu/sync's
+ *      outbox.js and SyncEngine's `sync-ack` handling).
+ *  12. Reciprocal prefix catch-up AT THE SyncEngine LEVEL (not via any
+ *      Service-level freshness tracker, unlike #10): SyncEngine's own
+ *      reconnect hook asks the relay for everything under each subscribed
+ *      prefix and merges it, so a plain `qu.get()` (no Service, no
+ *      backgroundRefresh call) already sees a write missed while offline.
+ *  13. Assets: per-chunk content-hash verification rejects a
+ *      corrupted/tampered chunk instead of silently reassembling it, and
+ *      re-uploading an unchanged file resumes by skipping chunks already
+ *      present with matching content (see AssetEngine's chunkHashes).
+ *  14. Identity backup/transfer: QuIdentityEngine.exportSeedCode() ->
+ *      importSeedCode() reconstructs the SAME identity (same derived main
+ *      keypair) in a fresh store, the cross-device mechanism
+ *      apps/profile/client.js's backup section and apps/shell's onboarding
+ *      screen both build their UI around - plus the overwrite guard
+ *      (rejects a conflicting import without { overwrite: true }) and
+ *      malformed-code rejection.
+ *  15. @qu/qr: encodeToImageData() -> decodeFromImageData() round-trips a
+ *      real payload-shaped string (the exact shape exportSeedCode()
+ *      produces) through actual QR encoding/decoding - no browser/DOM
+ *      needed, see that package's own doc comment for why.
+ *  16. Cross-device data recovery: a SECOND client that imports device A's
+ *      backup code (see #11) must not just derive the same keypair - its
+ *      OWN alias/avatar/epub (ProfileService.getOwnProfile()) and starred
+ *      items (StarredService, e.g. Favorites) must actually show up too,
+ *      by backfilling from the relay rather than starting blank. Both had
+ *      NO backfill at all before this section existed (found from a real
+ *      user report after #11 shipped: "epub and alias/favorites don't
+ *      transfer") - this is the regression test for that fix.
  *
  * NOT covered here (verified manually with Playwright during development,
  * not wired into this script to avoid adding a browser-automation
  * dependency to routine test runs): apps/shell actually rendering in a
  * browser - self-generating nav from /apps.json, mounting apps/notes'
- * clientMain, <qu-view>/<qu-bind>/<qu-list> reactivity, favoriting, and
- * identity/data persistence across a reload via IndexedDB.
+ * clientMain, <qu-view>/<qu-bind>/<qu-list> reactivity, favoriting,
+ * identity/data persistence across a reload via IndexedDB, the onboarding
+ * screen (apps/shell/src/onboarding.js), the profile app's backup UI
+ * (camera-based QR scanning in particular - `getUserMedia`/`<video>` have
+ * no meaningful Node equivalent), and IndexedDBAdapter.destroy() (there is
+ * no `indexedDB` global in Node) - the identity/QR *logic* those UIs are
+ * built on is what sections 11-12 above actually verify.
  */
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -409,6 +459,353 @@ try {
     assert.throws(() => resolveActionHref(contactRowActions[0], {}), /needs param "pub"/, 'a missing template param must fail loudly, not silently produce a broken href');
 
     console.log('    OK - actionsForMount()/resolveActionHref() filter, sort and resolve declared actions correctly');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Sync freshness: a message missed while genuinely disconnected is picked up on reconnect, not just via subscribe()');
+  // ---------------------------------------------------------------------
+  {
+    const { DocumentEngine, CollectionEngine, ThreadEngine } = await import('@qu/engines');
+    const { createServices, THREAD_PRESETS } = await import('@qu/services');
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    async function connectClient() {
+      const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+      new DocumentEngine(rt.core);
+      new CollectionEngine(rt.core);
+      new ThreadEngine(rt.core);
+      const identity = new QuIdentityEngine(rt.core);
+      await identity.importMnemonic(identity.generateMnemonic());
+      const transport = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+      await transport.connect();
+      const sync = new SyncEngine(rt.core, transport, { publishAllTo: 'relay' });
+      const Qu = createServices(rt.core, {
+        identityEngine: identity,
+        syncFetch: (p) => sync.fetch(p),
+        getSyncGeneration: () => sync.getGeneration(),
+      });
+      return { identity, sync, transport, Qu };
+    }
+
+    const alice = await connectClient();
+    const bob = await connectClient();
+    await alice.Qu.actors.publishMainProfile({ name: 'Alice-Freshness' });
+    await bob.Qu.actors.publishMainProfile({ name: 'Bob-Freshness' });
+    const alicePub = await alice.Qu.actors.whoAmI();
+    const bobPub = await bob.Qu.actors.whoAmI();
+    await new Promise((r) => setTimeout(r, 200)); // let both profiles reach relayA
+
+    const spaceId = 'chat';
+    const threadId = 'smoke-freshness-room';
+    bob.sync.subscribe(`/store/${spaceId}`); // mirrors apps/chat/client.js's own unconditional subscribe()
+
+    await alice.Qu.threads.createThread(spaceId, threadId, THREAD_PRESETS.chat([alicePub, bobPub]));
+    await alice.Qu.threads.postMessage(spaceId, threadId, { body: 'first message, while Bob is live-connected' });
+    await new Promise((r) => setTimeout(r, 200));
+    const beforeDisconnect = await bob.Qu.threads.listMessages(spaceId, threadId);
+    assert.equal(beforeDisconnect.length, 1, 'Bob, still connected, should already have the first message via live subscribe()');
+
+    // Bob "goes offline": a deliberate close (not a network blip) so this
+    // test doesn't race real auto-reconnect timing - reconnect is driven
+    // explicitly below instead, same net effect.
+    bob.transport.close();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Alice posts a SECOND message while Bob is genuinely disconnected -
+    // nothing delivers this to Bob no matter how long he waits, per
+    // SyncEngine's own doc comment (subscribe() only ever covers writes
+    // made AFTER a live connection exists).
+    await alice.Qu.threads.postMessage(spaceId, threadId, { body: 'second message, sent while Bob was offline' });
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Bob reconnects (transport.connect() re-arms it - see
+    // WebSocketClientTransport's own doc comment). SyncEngine's onReconnect
+    // hook bumps the generation and replays Bob's subscription BEFORE this
+    // await resolves (see @qu/sync/sync-engine.js's constructor).
+    await bob.transport.connect();
+
+    const immediatelyAfterReconnect = await bob.Qu.threads.listMessages(spaceId, threadId);
+    assert.equal(immediatelyAfterReconnect.length, 1, 'the second message should NOT be visible yet - the background refresh this listMessages() call just triggered is fire-and-forget, not awaited');
+
+    await new Promise((r) => setTimeout(r, 400)); // let the background refresh's fetch() round-trip complete
+    const afterBackgroundRefresh = await bob.Qu.threads.listMessages(spaceId, threadId);
+    assert.equal(afterBackgroundRefresh.length, 2, 'both messages should now be visible - reconnecting triggered a background catch-up that subscribe() alone never would have delivered');
+    assert.equal(afterBackgroundRefresh[1].body, 'second message, sent while Bob was offline');
+
+    alice.sync.close();
+    alice.transport.close();
+    bob.sync.close();
+    bob.transport.close();
+    console.log('    OK - a message missed while genuinely disconnected self-corrects on reconnect via background refresh');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Sync outbox: a write made while genuinely offline survives a "reload" and reaches the relay on reconnect');
+  // ---------------------------------------------------------------------
+  {
+    const { MemoryAdapter } = await import('@qu/runtime');
+    const { createServices } = await import('@qu/services');
+    const { DocumentEngine } = await import('@qu/engines');
+    const { MemoryOutboxStore } = await import('@qu/sync');
+
+    const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+    new DocumentEngine(rt.core);
+    const Qu = createServices(rt.core, {});
+
+    // Stands in for the browser's IndexedDBOutboxStore (same OutboxStore
+    // contract, see @qu/sync/outbox.js) - what matters for this test is
+    // that it survives what's about to be discarded below, exactly like
+    // IndexedDB would survive a real page reload.
+    const outbox = new MemoryOutboxStore();
+
+    const transport1 = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+    await transport1.connect();
+    const sync1 = new SyncEngine(rt.core, transport1, { publishAllTo: 'relay', outbox });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Genuinely offline, THEN write - unlike a mid-session drop, this
+    // transport (and its own in-memory send queue) is about to be thrown
+    // away entirely, same as a reload would do.
+    transport1.close();
+    await new Promise((r) => setTimeout(r, 20));
+    await Qu.documents.create('offline-space', 'note-1', { title: 'Written while offline' });
+
+    const pendingBeforeReload = await outbox.getAll();
+    assert.equal(pendingBeforeReload.length, 1, 'the offline write should have been recorded in the outbox');
+    sync1.close(); // discard, along with transport1 - simulates the page (and its in-memory send queue) going away
+
+    // "Reload": a brand new transport + SyncEngine, same outbox.
+    const transport2 = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+    const sync2 = new SyncEngine(rt.core, transport2, { publishAllTo: 'relay', outbox });
+    await transport2.connect();
+    await new Promise((r) => setTimeout(r, 250)); // let the outbox replay + relay's ack round-trip complete
+
+    const onRelay = await relayA.services.documents.get('offline-space', 'note-1');
+    assert.equal(onRelay?.title, 'Written while offline', 'the relay should have received the write via outbox replay on reconnect');
+
+    const pendingAfterAck = await outbox.getAll();
+    assert.equal(pendingAfterAck.length, 0, 'the outbox entry should be cleared once the relay acknowledged it');
+
+    sync2.close();
+    transport2.close();
+    console.log('    OK - an offline write persisted in the outbox is replayed and acknowledged after reconnect, surviving a simulated reload');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Reciprocal prefix catch-up at the SyncEngine level (independent of any Service-level freshness tracker)');
+  // ---------------------------------------------------------------------
+  {
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    async function connectRawClient() {
+      const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+      const transport = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+      await transport.connect();
+      const sync = new SyncEngine(rt.core, transport, { publishAllTo: 'relay' });
+      return { rt, sync, transport };
+    }
+
+    const writer = await connectRawClient();
+    const reader = await connectRawClient();
+    reader.sync.subscribe('/store/prefix-catchup-space');
+    await new Promise((r) => setTimeout(r, 50));
+
+    reader.transport.close();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // No engine registered for the 'notes' segment - a plain seal+persist
+    // write, deliberately avoiding any Service/Engine machinery here so
+    // this test isolates SyncEngine's OWN reconnect behaviour.
+    await writer.rt.core.put('/store/prefix-catchup-space/notes/hello', { title: 'missed while reader was offline' }, {});
+    await new Promise((r) => setTimeout(r, 150)); // let it reach relayA
+
+    // Reconnect - SyncEngine's own onReconnect hook resubscribes AND fires
+    // fetchPrefix() for every active subscription (see sync-engine.js).
+    await reader.transport.connect();
+    await new Promise((r) => setTimeout(r, 250)); // let the prefix-request/response round-trip complete
+
+    // Read straight off the local mount, NOT through any Service-level
+    // syncFetch/freshness-tracker call (unlike test #10) - proving this
+    // arrived via SyncEngine's own reciprocal catch-up alone.
+    const recovered = await reader.rt.core.get('/store/prefix-catchup-space/notes/hello');
+    assert.equal(
+      recovered?.val?.title,
+      'missed while reader was offline',
+      "SyncEngine's reconnect-time fetchPrefix() should have recovered the write the reader missed while disconnected"
+    );
+
+    writer.sync.close();
+    writer.transport.close();
+    reader.sync.close();
+    reader.transport.close();
+    console.log("    OK - SyncEngine's own reciprocal fetchPrefix() on reconnect recovered a write missed while disconnected, with no Service-level help");
+  }
+
+  // ---------------------------------------------------------------------
+  section('Assets: chunk integrity verification rejects tampering, resumed re-upload skips unchanged chunks');
+  // ---------------------------------------------------------------------
+  {
+    const { AssetEngine } = await import('@qu/engines');
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+    rt.core.mount('blob', new MemoryAdapter());
+    const assetEngine = new AssetEngine(rt.core, { chunkSize: 16 }); // force multiple small chunks
+
+    const original = new TextEncoder().encode('0123456789ABCDEF'.repeat(4)); // 64 bytes -> 4 chunks of 16
+    await rt.core.put('/store/files/assets/doc1', { name: 'doc1.txt', mime: 'text/plain', data: original }, {});
+
+    const meta1 = (await rt.core.get('/store/files/assets/doc1/meta')).val;
+    assert.equal(meta1.chunkCount, 4, 'expected 4 chunks for a 64-byte file with chunkSize 16');
+    assert.equal(meta1.chunkHashes.length, 4, 'meta should carry one content hash per chunk');
+
+    // Re-upload the IDENTICAL file - every chunk should be recognised as
+    // already-present-and-identical and skipped (see #handlePut's resume/dedup check).
+    const chunk0Before = await rt.core.get(`${meta1.blobPath}/chunk_0`);
+    await rt.core.put('/store/files/assets/doc1', { name: 'doc1.txt', mime: 'text/plain', data: original }, {});
+    const chunk0After = await rt.core.get(`${meta1.blobPath}/chunk_0`);
+    assert.equal(chunk0After.ts, chunk0Before.ts, 'an identical re-upload should not rewrite an already-present chunk (resume/dedup)');
+
+    // Corrupt one stored chunk directly (simulates transit corruption or a
+    // tampering peer) and confirm getAsset() refuses to reassemble it.
+    const { adapter: blobAdapter, rel: chunk1Rel } = rt.core.resolveMount(`${meta1.blobPath}/chunk_1`);
+    const corrupted = { ...(await blobAdapter.get(chunk1Rel)) };
+    corrupted.val = QuCrypto.toBase64(new TextEncoder().encode('TAMPERED-BYTES!'));
+    await blobAdapter.put(chunk1Rel, corrupted);
+
+    const result = await assetEngine.getAsset('/store/files/assets/doc1');
+    assert.equal(result, null, 'a corrupted/tampered chunk must be rejected, never silently reassembled into the returned data');
+
+    console.log('    OK - chunk content hashes are verified on read, corrupted chunks are rejected, and an identical re-upload resumes by skipping unchanged chunks');
+  section('Identity backup/transfer: exportSeedCode() -> importSeedCode()');
+  // ---------------------------------------------------------------------
+  {
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    const sourceRt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+    const sourceIdentity = new QuIdentityEngine(sourceRt.core);
+    await sourceIdentity.importMnemonic(sourceIdentity.generateMnemonic());
+    const sourceMainPub = QuCrypto.toBase64Url((await sourceIdentity.getMainKey()).publicKey);
+
+    const code = await sourceIdentity.exportSeedCode();
+    assert.equal(typeof code, 'string');
+    assert.ok(code.length > 0);
+
+    // A fresh "device" (its own empty store) importing that code must
+    // derive the EXACT same main keypair - this is the whole point of the
+    // transfer mechanism apps/profile's backup section exposes.
+    const targetRt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+    const targetIdentity = new QuIdentityEngine(targetRt.core);
+    await targetIdentity.importSeedCode(code);
+    const targetMainPub = QuCrypto.toBase64Url((await targetIdentity.getMainKey()).publicKey);
+    assert.equal(targetMainPub, sourceMainPub, 'importing a backup code must reconstruct the exact same identity');
+
+    // The same one-seed-per-store guard importMnemonic() already has -
+    // a second, DIFFERENT identity must not silently clobber an existing one.
+    const otherRt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+    const otherIdentity = new QuIdentityEngine(otherRt.core);
+    await otherIdentity.importMnemonic(otherIdentity.generateMnemonic());
+    await assert.rejects(
+      () => otherIdentity.importSeedCode(code),
+      /already holds a different identity seed/,
+      'importing a different identity without { overwrite: true } must be rejected'
+    );
+    await otherIdentity.importSeedCode(code, { overwrite: true }); // explicit overwrite must succeed
+    assert.equal(QuCrypto.toBase64Url((await otherIdentity.getMainKey()).publicKey), sourceMainPub);
+
+    // Garbage input must fail loudly, not silently derive a bogus identity.
+    const garbageRt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+    await assert.rejects(
+      () => new QuIdentityEngine(garbageRt.core).importSeedCode('not-a-real-backup-code'),
+      /not a valid backup code/
+    );
+
+    console.log('    OK - a backup code reconstructs the exact same identity on a fresh store, with the same conflict guard as importMnemonic()');
+  }
+
+  // ---------------------------------------------------------------------
+  section('@qu/qr: encodeToImageData() -> decodeFromImageData() round-trip');
+  // ---------------------------------------------------------------------
+  {
+    const { encodeToImageData, decodeFromImageData } = await import('@qu/qr');
+    // Same shape/length a real identity backup code has (base64url, ~86
+    // chars for a 64-byte seed) - proving the QR mechanism can actually
+    // carry this payload, not just a short test string.
+    const payload = QuCrypto.toBase64Url(crypto.getRandomValues(new Uint8Array(64)));
+    const { data, width, height } = encodeToImageData(payload);
+    const decoded = decodeFromImageData(data, width, height);
+    assert.equal(decoded, payload, 'a QR-encoded identity backup code must decode back to the exact original string');
+    console.log('    OK - a full-size identity backup code survives a real QR encode/decode round trip');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Cross-device data recovery: own profile + favorites backfill after importSeedCode()');
+  // ---------------------------------------------------------------------
+  {
+    const { DocumentEngine, CollectionEngine, ThreadEngine } = await import('@qu/engines');
+    const { createServices } = await import('@qu/services');
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    async function connectClient(identitySeedCode) {
+      const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+      new DocumentEngine(rt.core);
+      new CollectionEngine(rt.core);
+      new ThreadEngine(rt.core);
+      const identity = new QuIdentityEngine(rt.core);
+      if (identitySeedCode) await identity.importSeedCode(identitySeedCode);
+      else await identity.importMnemonic(identity.generateMnemonic());
+      const transport = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+      await transport.connect();
+      const sync = new SyncEngine(rt.core, transport, { publishAllTo: 'relay' });
+      const Qu = createServices(rt.core, {
+        identityEngine: identity,
+        syncFetch: (p) => sync.fetch(p),
+        getSyncGeneration: () => sync.getGeneration(),
+      });
+      return { identity, sync, transport, Qu };
+    }
+
+    // "Device A": a real identity with an alias, a custom private field, and a favorited app.
+    const deviceA = await connectClient();
+    await deviceA.Qu.profile.saveProfile({
+      alias: 'CrossDeviceAlias',
+      avatar: '🚀',
+      fields: [{ key: 'note', value: 'secret-note', visibility: 'private' }],
+    });
+    const ownProfileA = await deviceA.Qu.profile.getOwnProfile();
+    await deviceA.Qu.favorites.add('chat');
+    await new Promise((r) => setTimeout(r, 200)); // let it all reach relayA
+
+    const backupCode = await deviceA.identity.exportSeedCode();
+
+    // "Device B": a FRESH, empty store importing that same backup code -
+    // exactly apps/profile/client.js's "Use a different identity" flow.
+    const deviceB = await connectClient(backupCode);
+    const mainPubA = QuCrypto.toBase64Url((await deviceA.identity.getMainKey()).publicKey);
+    const mainPubB = QuCrypto.toBase64Url((await deviceB.identity.getMainKey()).publicKey);
+    assert.equal(mainPubB, mainPubA, 'importing the backup code must derive the identical identity');
+
+    // First read may still be pre-backfill (fire-and-forget) - same
+    // "flash of empty, then self-corrects" shape as section 10's message
+    // backfill. Poll briefly rather than assuming a single fixed wait.
+    let ownProfileB = await deviceB.Qu.profile.getOwnProfile();
+    let favoritesB = await deviceB.Qu.favorites.list();
+    for (let i = 0; i < 10 && (ownProfileB.alias !== 'CrossDeviceAlias' || favoritesB.length === 0); i++) {
+      await new Promise((r) => setTimeout(r, 300));
+      ownProfileB = await deviceB.Qu.profile.getOwnProfile();
+      favoritesB = await deviceB.Qu.favorites.list();
+    }
+
+    assert.equal(ownProfileB.alias, 'CrossDeviceAlias', 'alias must backfill on the newly-imported device');
+    assert.equal(ownProfileB.avatar, '🚀', 'avatar must backfill on the newly-imported device');
+    assert.equal(ownProfileB.epub, ownProfileA.epub, 'epub must backfill on the newly-imported device (it comes from the same published profile document, not local re-derivation)');
+    assert.deepEqual(favoritesB, ['chat'], 'starred/favorited items must backfill on the newly-imported device');
+    const privateField = ownProfileB.fields.find((f) => f.key === 'note');
+    assert.equal(privateField?.value, 'secret-note', 'private profile fields (self-encrypted) must backfill and still decrypt correctly on the newly-imported device');
+
+    deviceA.sync.close(); deviceA.transport.close();
+    deviceB.sync.close(); deviceB.transport.close();
+    console.log('    OK - alias, avatar, epub, private fields, and favorites all backfill onto a freshly-imported identity');
   }
 
   // ---------------------------------------------------------------------

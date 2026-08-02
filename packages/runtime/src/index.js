@@ -26,3 +26,4 @@ export class QuRuntime {
 
 export { MemoryAdapter } from './memory.js';
 export { IndexedDBAdapter } from './indexeddb.js';
+export { IndexedDBOutboxStore } from './outbox.js';

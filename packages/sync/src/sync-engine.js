@@ -94,36 +94,47 @@ export class SyncEngine {
   #subscriptions = new Map(); // path/prefix -> Set<peerId> (subscribers TO us)
   #mySubscriptions = new Map(); // path/prefix -> targetPeerId (subscriptions WE made, see subscribe() below)
   #pendingRequests = new Map(); // requestId -> {resolve, reject, timeout}
+  #pendingPrefixRequests = new Map(); // requestId -> {resolve, reject, timeout} - see fetchPrefix()
   #requestCounter = 0;
   #unsubscribeLocalWrites;
+  #generation = 0;
+  #reconnectCallbacks = []; // app-level onReconnect() listeners (see below) - separate from the transport's OWN reconnect hook, which this class already consumes internally to replay subscriptions
+  #outbox; // see outbox.js - only ever set for a publishAllTo (client) SyncEngine
 
   /**
    * @param {import('@qu/core').QuCore} qu
    * @param {import('./transport.js').Transport} transport
-   * @param {{publishAllTo?: string}} [options] - `publishAllTo`: ALWAYS
-   *   forward every local write (except LOCAL_ONLY_PREFIX) to this one
-   *   peerId, unconditionally - no subscription round-trip required. This
-   *   is what a star-topology CLIENT (a browser shell talking to its one
-   *   relay, see apps/shell's connect()) should set: `subscribe()` only
-   *   ever covers what the REMOTE side later decides to tell you about
-   *   (and requires that round-trip to complete first), which creates an
-   *   unavoidable race for anything the CLIENT itself writes very early
-   *   (e.g. a brand-new identity's own public profile, published the
-   *   moment it's created - see apps/shell's boot()) - if that write
-   *   happens before the relay's own subscribe-back message has arrived,
+   * @param {{publishAllTo?: string, outbox?: import('./outbox.js').OutboxStore}} [options] -
+   *   `publishAllTo`: ALWAYS forward every local write (except
+   *   LOCAL_ONLY_PREFIX) to this one peerId, unconditionally - no
+   *   subscription round-trip required. This is what a star-topology
+   *   CLIENT (a browser shell talking to its one relay, see
+   *   apps/shell's connect()) should set: `subscribe()` only ever covers
+   *   what the REMOTE side later decides to tell you about (and requires
+   *   that round-trip to complete first), which creates an unavoidable
+   *   race for anything the CLIENT itself writes very early (e.g. a
+   *   brand-new identity's own public profile, published the moment it's
+   *   created - see apps/shell's boot()) - if that write happens before
+   *   the relay's own subscribe-back message has arrived,
    *   subscription-based broadcasting would silently drop it. Unconditional
    *   publish to a known, single upstream peer has no such race: it works
    *   the instant the transport is connected. Left unset (the default) for
    *   relay-to-relay peering, where publishing EVERYTHING unconditionally
    *   to whoever merely connected would be too permissive - that direction
    *   stays exactly as explicit/subscription-based as before.
+   *   `outbox`: an `OutboxStore` (see outbox.js) that persistently records
+   *   every `publishAllTo` write until it's acknowledged, and gets replayed
+   *   on every (re)connect - closes the one gap the transport's own
+   *   in-memory send queue can't (a reload while offline). Only meaningful
+   *   together with `publishAllTo`; ignored otherwise.
    */
-  constructor(qu, transport, { publishAllTo = null } = {}) {
+  constructor(qu, transport, { publishAllTo = null, outbox = null } = {}) {
     this.#qu = qu;
     this.#transport = transport;
     this.#publishAllTo = publishAllTo;
+    this.#outbox = outbox;
 
-    this.#unsubscribeLocalWrites = this.#qu.onStorageChange(({ path, quBit, origin }) => {
+    this.#unsubscribeLocalWrites = this.#qu.onStorageChange(async ({ path, quBit, origin }) => {
       // `origin === 'sync'` means this notify came from QuStore.putSealed()
       // (see its own doc comment) - i.e. THIS SyncEngine (or another one
       // sharing this qu instance) just persisted a write that arrived FROM
@@ -135,7 +146,27 @@ export class SyncEngine {
       if (origin === 'sync') return;
       if (path.startsWith(LOCAL_ONLY_PREFIX)) return; // see LOCAL_ONLY_PREFIX doc comment above
       const message = { type: 'sync', path, quBit };
-      if (this.#publishAllTo) this.#transport.sendTo(this.#publishAllTo, message);
+      if (this.#publishAllTo) {
+        if (this.#outbox) {
+          // Recorded BEFORE sending, and awaited here (QuEvents.emit awaits
+          // every storage:put listener - see events.js - so this genuinely
+          // delays QuStore.put()'s own resolution until the entry is
+          // durable): a crash/reload between "sent" and "acknowledged" must
+          // never lose the entry, only a crash/reload between "wrote
+          // locally" and "recorded in the outbox" can (a strictly smaller
+          // window than today's in-memory-only queue, which loses anything
+          // not yet flushed to an OPEN socket). A failed outbox write is
+          // logged, not thrown - matching every other notify listener here,
+          // a persistence hiccup in this side channel must never fail the
+          // write itself.
+          try {
+            await this.#outbox.set(path, quBit);
+          } catch (err) {
+            console.error(`[SyncEngine] failed to record outbox entry for "${path}":`, err);
+          }
+        }
+        this.#transport.sendTo(this.#publishAllTo, message);
+      }
       this.#broadcastToSubscribers(path, message, this.#publishAllTo); // publishAllTo already got it above - never send it twice
     });
 
@@ -156,16 +187,92 @@ export class SyncEngine {
     // connections rather than initiating/losing one of its own, doesn't).
     if (typeof this.#transport.onReconnect === 'function') {
       this.#transport.onReconnect(() => {
+        // Bumps BEFORE resubscribing - see getGeneration()'s own doc
+        // comment for what this drives downstream (@qu/services' background
+        // refresh). Fires on the very FIRST connect too (not just actual
+        // reconnects - see WebSocketClientTransport's own onReconnect() doc
+        // comment), which is exactly right: a fresh page load has the exact
+        // same "local IndexedDB data could be stale, this session has no
+        // idea what it missed" problem a mid-session reconnect does.
+        this.#generation++;
         for (const { prefix, targetPeerId } of this.#mySubscriptions.values()) {
           this.#transport.sendTo(targetPeerId, { type: 'subscribe', path: prefix });
+          // RECIPROCAL CATCH-UP - see fetchPrefix()'s own doc comment for
+          // why this closes the "subscribe only delivers FUTURE writes" gap
+          // for whatever this side missed while disconnected. Fire-and-forget
+          // (never blocks reconnect/resubscribe): a slow or failing catch-up
+          // must not stop the connection from otherwise being usable.
+          this.fetchPrefix(prefix, targetPeerId).catch((err) => {
+            console.warn(`[SyncEngine] reciprocal catch-up for "${prefix}" failed:`, err);
+          });
         }
+        // OUTBOX REPLAY - the other half of the offline-robustness story
+        // (see outbox.js): resend whatever is still unacknowledged from a
+        // PREVIOUS connection, including one that ended in a reload (the
+        // transport's own in-memory #sendQueue can't do this - it's gone
+        // the moment the page was). Also fires on the very first connect,
+        // same reasoning as the generation bump above. Harmless if the
+        // transport's own #sendQueue already covers the same entry (a
+        // mid-session drop-and-reconnect with no reload in between) -
+        // #persistDirectly's ts-guard on the receiving end makes a
+        // duplicate resend a no-op, not a correctness issue, just a
+        // redundant message in that common case.
+        this.#replayOutbox();
+        for (const cb of this.#reconnectCallbacks) cb();
       });
+    }
+  }
+
+  /** Resends every still-unacknowledged outbox entry to `publishAllTo`. See outbox.js. */
+  async #replayOutbox() {
+    if (!this.#outbox || !this.#publishAllTo) return;
+    try {
+      const entries = await this.#outbox.getAll();
+      for (const { path, quBit } of entries) {
+        this.#transport.sendTo(this.#publishAllTo, { type: 'sync', path, quBit });
+      }
+    } catch (err) {
+      console.error('[SyncEngine] outbox replay failed:', err);
     }
   }
 
   /** Stops listening to local writes. Call when tearing down this SyncEngine. */
   close() {
     this.#unsubscribeLocalWrites();
+  }
+
+  /**
+   * SUBSCRIBE-BASED SYNC ONLY EVER DELIVERS FUTURE WRITES (see this class's
+   * own doc comment, and subscribe()'s) - a session that was offline, or
+   * simply wasn't running yet, has no way to learn what it missed just by
+   * staying connected from now on. This is the "generation" a caller (see
+   * @qu/services' `createFreshnessTracker()`) can use to know THAT it
+   * might have missed something and refresh accordingly - bumped once per
+   * connection established (including the very first one, not just actual
+   * reconnects). A caller that read+cached a path under an OLDER generation
+   * than this one should treat that cached value as merely a fast first
+   * answer, worth a background re-check - see sync-freshness.js for the
+   * concrete pattern this enables.
+   * @returns {number}
+   */
+  getGeneration() {
+    return this.#generation;
+  }
+
+  /**
+   * Registers a callback fired every time this SyncEngine's connection to
+   * its remote peer is (re-)established, including the very first one -
+   * see getGeneration()'s own doc comment for why the first connection
+   * counts too. A thin passthrough over the transport's own onReconnect()
+   * (already used internally, above, to replay subscriptions) - exposed
+   * here so application code holding a SyncEngine (not the raw transport)
+   * can react too, e.g. to force-refresh whatever it currently has open.
+   * A no-op registration (never fires) on a transport that doesn't support
+   * reconnecting at all (see the constructor's own duck-typed check).
+   * @param {() => void} callback
+   */
+  onReconnect(callback) {
+    this.#reconnectCallbacks.push(callback);
   }
 
   /**
@@ -247,6 +354,58 @@ export class SyncEngine {
   }
 
   /**
+   * RECIPROCAL CATCH-UP - asks `targetPeerId` for every QuBit it has under
+   * `prefix`, merges each one locally (via the same ts-guarded
+   * `#persistDirectly` a normal synced write or `fetch()` response uses -
+   * never regresses newer local data), and returns however many arrived.
+   *
+   * This is what closes the gap `subscribe()`'s own doc comment names
+   * plainly: subscribing only ever delivers writes made AFTER the
+   * subscription exists, so a peer reconnecting after time offline (or
+   * connecting for the very first time) has no way to learn what it
+   * missed just by staying connected from now on. Called automatically for
+   * every active subscription on every (re)connect (see the constructor) -
+   * a caller only needs this directly for an ad hoc, not-yet-subscribed
+   * prefix.
+   *
+   * Deliberately ONE-DIRECTIONAL (the requester pulls from the target, not
+   * a two-way exchange) - unlike a peer-symmetric mesh, this codebase's
+   * only real topology is a star (browser clients each hold one relay
+   * connection, see `publishAllTo`), so the other direction - a relay
+   * learning about writes a client made while genuinely disconnected (not
+   * just this same request pending) - is handled by the client's own
+   * persistent sync outbox replaying on reconnect (see outbox.js), not by
+   * the relay asking back here. Two simpler, direction-specific mechanisms
+   * instead of one generic bidirectional protocol neither side's topology
+   * actually needs.
+   *
+   * @param {string} prefix
+   * @param {string|null} [targetPeerId]
+   * @param {number} [timeoutMs=15000]
+   * @returns {Promise<number>} How many QuBits were received and merged.
+   */
+  async fetchPrefix(prefix, targetPeerId = null, timeoutMs = 15000) {
+    const requestId = `${Date.now()}-${this.#requestCounter++}`;
+    const entries = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.#pendingPrefixRequests.delete(requestId);
+        reject(new Error(`SyncEngine.fetchPrefix: timed out waiting for "${prefix}"`));
+      }, timeoutMs);
+      this.#pendingPrefixRequests.set(requestId, { resolve, reject, timeout });
+
+      const message = { type: 'prefix-request', requestId, prefix, requester: this.#transport.getPeerId() };
+      if (targetPeerId) this.#transport.sendTo(targetPeerId, message);
+      else this.#transport.send(message);
+    });
+
+    for (const { path, quBit } of entries) {
+      if (!isValidQuBit(quBit)) continue; // same shape guard #handleResponse applies to a single fetch()
+      await this.#persistDirectly(path, quBit);
+    }
+    return entries.length;
+  }
+
+  /**
    * @param {string} path
    * @param {object} message
    * @param {string|null} [excludePeerId] - Never re-send to whoever this
@@ -271,6 +430,12 @@ export class SyncEngine {
         return this.#handleRequest(message, peerId);
       case 'response':
         return this.#handleResponse(message);
+      case 'prefix-request':
+        return this.#handlePrefixRequest(message, peerId);
+      case 'prefix-response':
+        return this.#handlePrefixResponse(message);
+      case 'sync-ack':
+        return this.#handleSyncAck(message);
       case 'subscribe':
         return this.#addSubscriber(message.path, peerId);
       case 'unsubscribe':
@@ -307,6 +472,11 @@ export class SyncEngine {
     // the class doc comment's security note for what this re-broadcast does
     // and does not guarantee).
     this.#broadcastToSubscribers(path, { type: 'sync', path, quBit }, originPeerId);
+    // Unconditional ack back to whoever sent this - see outbox.js. A peer
+    // with no outbox configured (the relay's own SyncEngine, a plain Node
+    // test peer, ...) just never registers a 'sync-ack' handler's worth of
+    // caring; this message costs it one ignored switch-case, nothing more.
+    this.#transport.sendTo(originPeerId, { type: 'sync-ack', path, ts: quBit.ts });
   }
 
   async #handleRequest({ requestId, path }, peerId) {
@@ -339,15 +509,78 @@ export class SyncEngine {
     pending.resolve(quBit ?? null);
   }
 
+  /** @param {{requestId: string, prefix: string}} message @param {string} peerId - see fetchPrefix() */
+  async #handlePrefixRequest({ requestId, prefix }, peerId) {
+    try {
+      const raw = await this.#qu.getAllUnderMount(prefix);
+      // Same hard rail as #handleRequest()'s single-path fetch() - a peer
+      // can never learn a local-only secret via prefix catch-up either,
+      // regardless of how broad a prefix it asks for (e.g. the mount root).
+      const entries = raw.filter(({ path }) => !path.startsWith(LOCAL_ONLY_PREFIX));
+      this.#transport.sendTo(peerId, { type: 'prefix-response', requestId, entries });
+    } catch (err) {
+      console.error(`[SyncEngine] error handling prefix-request for "${prefix}":`, err);
+      this.#transport.sendTo(peerId, { type: 'prefix-response', requestId, entries: [] });
+    }
+  }
+
+  /** @param {{requestId: string, entries: Array<{path: string, quBit: object}>}} message - see fetchPrefix() */
+  #handlePrefixResponse({ requestId, entries }) {
+    const pending = this.#pendingPrefixRequests.get(requestId);
+    if (!pending) return; // late or duplicate response - ignore
+    clearTimeout(pending.timeout);
+    this.#pendingPrefixRequests.delete(requestId);
+    pending.resolve(Array.isArray(entries) ? entries : []);
+  }
+
+  /**
+   * @param {{path: string, ts: number}} message - see outbox.js and
+   *   `#handleSync`'s unconditional ack send.
+   */
+  async #handleSyncAck({ path, ts }) {
+    if (!this.#outbox) return; // this SyncEngine doesn't track an outbox - nothing to clear
+    try {
+      const pending = await this.#outbox.get(path);
+      // Only clear if the ack covers what we actually have queued (or
+      // something newer) - a late ack for an OLDER version must never wipe
+      // out a NEWER local write to the same path made in the meantime and
+      // already re-queued under the same key.
+      if (pending && typeof pending.ts === 'number' && pending.ts <= ts) {
+        await this.#outbox.delete(path);
+      }
+    } catch (err) {
+      console.error(`[SyncEngine] failed to process sync-ack for "${path}":`, err);
+    }
+  }
+
   /**
    * Writes an already-sealed QuBit straight to its mount and notifies
    * local storage-change listeners (see QuStore.putSealed() for why this
    * must notify, not just persist - @qu/reactive's `watch()`, and
    * everything built on it, would otherwise never react to anything
    * arriving from another peer).
+   *
+   * NEVER REGRESSES a path to an OLDER value (compares `ts`, always present
+   * on a QuBit - see @qu/core/qubit.js) - both callers above (`#handleSync`
+   * and `#handleResponse`) can legitimately race a write this same peer
+   * makes to the SAME path a moment later: `fetch()` in particular is what
+   * @qu/services' background-refresh mechanism (see sync-freshness.js) now
+   * uses to check an ALREADY-locally-cached path for staleness, which can
+   * be in flight AT THE SAME TIME this identity's own more recent write to
+   * that exact path is happening (e.g. CollectionService.addItem() reading
+   * "is this stale?" right before writing) - a slow response arriving
+   * AFTER that newer local write would otherwise silently overwrite it
+   * with the older data it fetched, making a just-sent message vanish
+   * again. Found by a real two-peer smoke test (see scripts/smoke-test.mjs's
+   * "Sync freshness" section) where exactly this raced and reverted the
+   * sender's own message.
    */
   async #persistDirectly(path, quBit) {
     try {
+      const existing = await this.#qu.get(path);
+      if (existing && typeof existing.ts === 'number' && typeof quBit.ts === 'number' && existing.ts > quBit.ts) {
+        return; // local data is already newer than this incoming write - never regress
+      }
       await this.#qu.putSealed(path, quBit);
     } catch (err) {
       console.error(`[SyncEngine] failed to persist synced QuBit for "${path}":`, err);
