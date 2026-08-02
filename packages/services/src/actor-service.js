@@ -1,3 +1,5 @@
+import { isEncryptedEnvelope, decryptEnvelope } from './crypto-envelope.js';
+
 /**
  * ACTOR SERVICE — the Entity API for identities.
  *
@@ -92,5 +94,38 @@ export class ActorService {
     const mainKey = await this.identity.getMainKey();
     const signature = await QuCrypto.sign(new TextEncoder().encode(JSON.stringify(payload)), mainKey.privateKeyPkcs8);
     return { actorPub: QuCrypto.toBase64Url(mainKey.publicKey), signature: QuCrypto.toBase64Url(signature) };
+  }
+
+  /**
+   * Attempts to decrypt an arbitrary QuBit's `val` FOR THIS identity -
+   * "is one of this envelope's listed recipients me, and if so here's the
+   * plaintext" (see crypto-envelope.js's `decryptEnvelope()`), without the
+   * caller needing to know which Service/Thread produced it. Built for
+   * Relay Admin's Data Explorer (see apps/relay-admin/client.js), which
+   * pulls raw QuBits straight off disk and has no thread/document context
+   * to decrypt through the normal Service layer.
+   * @param {{val: *, pub: string|null}} quBit - Only `val`/`pub` are read.
+   * @param {(actorPub: string) => Promise<object|null>} getProfile -
+   *   Resolves the SENDER's profile (for their X key) - pass e.g.
+   *   `services.profile.getPublicProfile` for syncFetch-backed resolution.
+   *   Accepts either that method's app-facing shape (`{epub}`) or
+   *   `@qu/identity`'s raw shape (`{xPublicKey}`, what `decryptEnvelope()`
+   *   itself expects) - normalized below so a caller doesn't need to know
+   *   which one it's holding.
+   * @returns {Promise<{encrypted: boolean, value: *}>} `encrypted: false`
+   *   means `val` was already plaintext (returned as-is); `encrypted: true`
+   *   with `value: null` means this identity isn't a listed recipient (or
+   *   the sender's key couldn't be resolved) - genuinely undecryptable
+   *   here, not an error.
+   */
+  async decryptForMe(quBit, getProfile) {
+    if (!isEncryptedEnvelope(quBit?.val)) return { encrypted: false, value: quBit?.val };
+    const normalizedGetProfile = async (actorPub) => {
+      const profile = await getProfile(actorPub);
+      if (!profile) return null;
+      return { ...profile, xPublicKey: profile.xPublicKey ?? profile.epub };
+    };
+    const value = await decryptEnvelope(quBit, this.identity, normalizedGetProfile);
+    return { encrypted: true, value };
   }
 }
