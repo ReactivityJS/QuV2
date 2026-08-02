@@ -1,5 +1,5 @@
 import { QuCrypto } from '@qu/core';
-import { documentPath } from './paths.js';
+import { documentPath, collectionPath } from './paths.js';
 
 const SUBSCRIPTIONS_COLLECTION = 'subscriptions';
 
@@ -33,16 +33,36 @@ export class PushSubscriptionService {
    * @param {import('./document-service.js').DocumentService} documentService
    * @param {import('./collection-service.js').CollectionService} collectionService
    * @param {import('@qu/identity').QuIdentityEngine} identityEngine
+   * @param {(path: string) => Promise<object|null>} [syncFetch] - Optional:
+   *   backfills this identity's subscriptions collection before
+   *   subscribe()/unsubscribe() modify it. Without this, a SECOND device
+   *   subscribing to push (a local store that never independently synced
+   *   `/store/push-<pub>/...`) would see no local collection, and
+   *   addItem() would create a brand new one containing only ITS OWN
+   *   subscription - silently discarding every other device's, since the
+   *   write it produces unconditionally overwrites whatever's on the
+   *   relay. Confirmed by a real adversarial test: device A subscribes,
+   *   device B (fresh local store, same identity) subscribes next -
+   *   without backfill, the relay ends up with ONLY device B's
+   *   subscription.
    */
-  constructor(documentService, collectionService, identityEngine) {
+  constructor(documentService, collectionService, identityEngine, syncFetch = null) {
     this.documents = documentService;
     this.collections = collectionService;
     this.identity = identityEngine;
+    this.syncFetch = syncFetch;
   }
 
   async #myActorPub() {
     const mainKey = await this.identity.getMainKey();
     return QuCrypto.toBase64Url(mainKey.publicKey);
+  }
+
+  /** Backfills the subscriptions collection via syncFetch (if provided) on a local miss - see constructor doc comment. */
+  async #backfillCollection(spaceId) {
+    if (!this.syncFetch) return;
+    if ((await this.collections.list(spaceId, SUBSCRIPTIONS_COLLECTION)) !== null) return;
+    await this.syncFetch(collectionPath(spaceId, SUBSCRIPTIONS_COLLECTION)).catch(() => {});
   }
 
   /**
@@ -61,9 +81,13 @@ export class PushSubscriptionService {
       { endpoint: subscription.endpoint, keys: subscription.keys },
       { signWith: mainKey.privateKeyPkcs8, writerPub: mainKey.publicKey }
     );
-    if ((await this.collections.list(spaceId, SUBSCRIPTIONS_COLLECTION)) === null) {
-      await this.collections.create(spaceId, SUBSCRIPTIONS_COLLECTION, []);
-    }
+    await this.#backfillCollection(spaceId);
+    // No manual "if the collection doesn't exist yet, create it empty"
+    // step here on purpose - CollectionService.addItem() already handles
+    // a genuinely-new collection correctly (creates it with just this one
+    // item) AND, after the backfill above, has the real current list to
+    // read rather than mistaking "not synced to THIS device yet" for
+    // "doesn't exist" and clobbering it.
     await this.collections.addItem(spaceId, SUBSCRIPTIONS_COLLECTION, documentPath(spaceId, id));
   }
 
@@ -72,6 +96,7 @@ export class PushSubscriptionService {
     const actorPub = await this.#myActorPub();
     const spaceId = spaceFor(actorPub);
     const id = await subscriptionId(endpoint);
+    await this.#backfillCollection(spaceId);
     await this.collections.removeItem(spaceId, SUBSCRIPTIONS_COLLECTION, documentPath(spaceId, id));
   }
 

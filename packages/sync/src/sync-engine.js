@@ -96,6 +96,8 @@ export class SyncEngine {
   #pendingRequests = new Map(); // requestId -> {resolve, reject, timeout}
   #requestCounter = 0;
   #unsubscribeLocalWrites;
+  #generation = 0;
+  #reconnectCallbacks = []; // app-level onReconnect() listeners (see below) - separate from the transport's OWN reconnect hook, which this class already consumes internally to replay subscriptions
 
   /**
    * @param {import('@qu/core').QuCore} qu
@@ -156,9 +158,18 @@ export class SyncEngine {
     // connections rather than initiating/losing one of its own, doesn't).
     if (typeof this.#transport.onReconnect === 'function') {
       this.#transport.onReconnect(() => {
+        // Bumps BEFORE resubscribing - see getGeneration()'s own doc
+        // comment for what this drives downstream (@qu/services' background
+        // refresh). Fires on the very FIRST connect too (not just actual
+        // reconnects - see WebSocketClientTransport's own onReconnect() doc
+        // comment), which is exactly right: a fresh page load has the exact
+        // same "local IndexedDB data could be stale, this session has no
+        // idea what it missed" problem a mid-session reconnect does.
+        this.#generation++;
         for (const { prefix, targetPeerId } of this.#mySubscriptions.values()) {
           this.#transport.sendTo(targetPeerId, { type: 'subscribe', path: prefix });
         }
+        for (const cb of this.#reconnectCallbacks) cb();
       });
     }
   }
@@ -166,6 +177,40 @@ export class SyncEngine {
   /** Stops listening to local writes. Call when tearing down this SyncEngine. */
   close() {
     this.#unsubscribeLocalWrites();
+  }
+
+  /**
+   * SUBSCRIBE-BASED SYNC ONLY EVER DELIVERS FUTURE WRITES (see this class's
+   * own doc comment, and subscribe()'s) - a session that was offline, or
+   * simply wasn't running yet, has no way to learn what it missed just by
+   * staying connected from now on. This is the "generation" a caller (see
+   * @qu/services' `createFreshnessTracker()`) can use to know THAT it
+   * might have missed something and refresh accordingly - bumped once per
+   * connection established (including the very first one, not just actual
+   * reconnects). A caller that read+cached a path under an OLDER generation
+   * than this one should treat that cached value as merely a fast first
+   * answer, worth a background re-check - see sync-freshness.js for the
+   * concrete pattern this enables.
+   * @returns {number}
+   */
+  getGeneration() {
+    return this.#generation;
+  }
+
+  /**
+   * Registers a callback fired every time this SyncEngine's connection to
+   * its remote peer is (re-)established, including the very first one -
+   * see getGeneration()'s own doc comment for why the first connection
+   * counts too. A thin passthrough over the transport's own onReconnect()
+   * (already used internally, above, to replay subscriptions) - exposed
+   * here so application code holding a SyncEngine (not the raw transport)
+   * can react too, e.g. to force-refresh whatever it currently has open.
+   * A no-op registration (never fires) on a transport that doesn't support
+   * reconnecting at all (see the constructor's own duck-typed check).
+   * @param {() => void} callback
+   */
+  onReconnect(callback) {
+    this.#reconnectCallbacks.push(callback);
   }
 
   /**
@@ -345,9 +390,28 @@ export class SyncEngine {
    * must notify, not just persist - @qu/reactive's `watch()`, and
    * everything built on it, would otherwise never react to anything
    * arriving from another peer).
+   *
+   * NEVER REGRESSES a path to an OLDER value (compares `ts`, always present
+   * on a QuBit - see @qu/core/qubit.js) - both callers above (`#handleSync`
+   * and `#handleResponse`) can legitimately race a write this same peer
+   * makes to the SAME path a moment later: `fetch()` in particular is what
+   * @qu/services' background-refresh mechanism (see sync-freshness.js) now
+   * uses to check an ALREADY-locally-cached path for staleness, which can
+   * be in flight AT THE SAME TIME this identity's own more recent write to
+   * that exact path is happening (e.g. CollectionService.addItem() reading
+   * "is this stale?" right before writing) - a slow response arriving
+   * AFTER that newer local write would otherwise silently overwrite it
+   * with the older data it fetched, making a just-sent message vanish
+   * again. Found by a real two-peer smoke test (see scripts/smoke-test.mjs's
+   * "Sync freshness" section) where exactly this raced and reverted the
+   * sender's own message.
    */
   async #persistDirectly(path, quBit) {
     try {
+      const existing = await this.#qu.get(path);
+      if (existing && typeof existing.ts === 'number' && typeof quBit.ts === 'number' && existing.ts > quBit.ts) {
+        return; // local data is already newer than this incoming write - never regress
+      }
       await this.#qu.putSealed(path, quBit);
     } catch (err) {
       console.error(`[SyncEngine] failed to persist synced QuBit for "${path}":`, err);

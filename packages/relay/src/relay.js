@@ -347,8 +347,15 @@ export class QuRelay {
     // calendar collapses into ONE 'calendar' row in notification settings
     // instead of one per calendar id.
     const calendarMatch = String(spaceId).match(/^calendar-(.+)$/);
+    // `geochase-<id>` is Geo Chase's per-game space (see
+    // @qu/services/geochase-service.js's `spaceFor()` and
+    // apps/geochase/client.js's `notifyInvitees()`) - recognized the same
+    // way `calendar-<id>` is above, so every game collapses into ONE
+    // 'geochase' row in notification settings instead of one per game id.
+    const geochaseMatch = String(spaceId).match(/^geochase-(.+)$/);
     const appId = spaceId === 'forum' ? 'forum' : spaceId === 'chat' ? 'chat'
-      : String(spaceId).startsWith('inbox-') ? 'inbox' : calendarMatch ? 'calendar' : String(spaceId);
+      : String(spaceId).startsWith('inbox-') ? 'inbox' : calendarMatch ? 'calendar'
+      : geochaseMatch ? 'geochase' : String(spaceId);
 
     /** @type {Array<{actorPub: string, mention: boolean}>} */
     let candidates;
@@ -377,18 +384,40 @@ export class QuRelay {
       : threadId === 'activity' ? 'eventChange'
       : threadId.startsWith('guest~') ? 'guestInvite'
       : 'invite';
+    // Geo Chase only ever posts one kind of notice (an `invite-<pub>`
+    // thread on game creation - see apps/geochase/client.js's
+    // `notifyInvitees()`), so unlike Calendar there's no second threadId to
+    // branch on.
+    const geochaseFunctionName = appId === 'geochase' ? 'invite' : null;
 
     for (const { actorPub, mention } of candidates) {
       const prefs = await this.services.notificationPrefs.getPrefsFor(actorPub);
-      const functionName = calendarFunctionName ?? (mention ? 'mention' : 'newMessage');
+      const functionName = calendarFunctionName ?? geochaseFunctionName ?? (mention ? 'mention' : 'newMessage');
       if (!NotificationPrefsService.shouldNotify(prefs, { appId, mention, functionName })) continue;
 
       // Content-blind by design (see this method's own doc comment) - even
-      // for Calendar, the relay never decrypts the activity/invite body, so
-      // wording stays generic. The one thing it CAN safely add is the
-      // calendar id itself: that's the storage path (`spaceId`), not
-      // encrypted content, so the notification can deep-link straight to
-      // the specific calendar instead of just the app root.
+      // for Calendar/Geo Chase, the relay never decrypts the activity/
+      // invite body, so wording stays generic. The one thing it CAN safely
+      // add is the calendar/game id itself: that's the storage path
+      // (`spaceId`), not encrypted content, so the notification can
+      // deep-link straight to the specific calendar/game instead of just
+      // the app root.
+      // Chat deep-links to the SPECIFIC room, not just `#/chat` (the room
+      // list) - see apps/chat/client.js's own doc comment for its route
+      // scheme (`#/chat/<peerActorPub>` for 1:1, `#/chat/g/<groupId>` for a
+      // group). A group room's `threadId` IS its groupId (see
+      // THREAD_PRESETS.group), so that's directly usable; a 1:1 room's
+      // `threadId` is a one-way hash of both members' pubkeys (see
+      // apps/chat/client.js's `roomId()`) and can't be reversed back into a
+      // pubkey - but it doesn't need to be: a 1:1 room has EXACTLY two
+      // readers, so from THIS candidate's point of view the "other side" of
+      // the conversation is simply whoever authored this message (`authorPub`
+      // is already excluded from `candidates` above, so it's never the
+      // recipient themselves).
+      const chatUrl = appId === 'chat'
+        ? (config.kind === 'group' ? `#/chat/g/${threadId}` : `#/chat/${authorPub}`)
+        : null;
+
       const payload = calendarFunctionName === 'invite'
         ? { title: 'Calendar invitation', body: 'You were invited to a shared calendar.', appId, url: `#/calendar/${calendarMatch[1]}` }
         : calendarFunctionName === 'eventChange'
@@ -398,6 +427,10 @@ export class QuRelay {
         // the event id, safe to surface (routing metadata, not decrypted
         // content) so the notification deep-links straight to the event.
         ? { title: 'Event invitation', body: 'You were invited to an event.', appId, url: `#/calendar/${calendarMatch[1]}/${threadId.split('~')[1]}` }
+        : geochaseFunctionName === 'invite'
+        ? { title: 'Geo Chase invitation', body: 'You were invited to a Geo Chase game.', appId, url: `#/geochase/${geochaseMatch[1]}` }
+        : chatUrl
+        ? { title: mention ? 'Mentioned in Chat' : 'New message in Chat', body: `~${(authorPub ?? 'someone').slice(0, 10)}… sent a message`, appId, url: chatUrl }
         : {
             title: mention ? `Mentioned in ${appId}` : `New message in ${appId}`,
             body: `~${(authorPub ?? 'someone').slice(0, 10)}… sent a message`,

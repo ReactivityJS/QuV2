@@ -40,6 +40,9 @@ export function buildAppsCatalog(loader, disabledAppNames = []) {
       clientSignature: manifest.clientSignature,
       enabled: !disabledAppNames.includes(manifest.name),
       pushActions: manifest.pushActions ?? [],
+      // See @qu/foundation/actions.js's `actionsForMount()` - this is the
+      // catalog entries it reads `.actions` off of.
+      actions: manifest.actions ?? [],
     });
   }
   return out;

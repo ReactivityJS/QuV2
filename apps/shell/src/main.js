@@ -103,7 +103,15 @@ async function boot() {
   // sender, whose profile hasn't happened to sync to THIS session yet
   // (subscribe() only covers writes made after subscribing - no history
   // replay) would otherwise fail for no reason a user could fix.
-  const Qu = createServices(qu, { assetEngine, identityEngine: identity, syncFetch: (path) => sync.fetch(path) });
+  const Qu = createServices(qu, {
+    assetEngine, identityEngine: identity,
+    syncFetch: (path) => sync.fetch(path),
+    // Lets every Service background-refresh data it already has cached but
+    // that might have gone stale while this session was offline (see
+    // @qu/services/sync-freshness.js) - subscribe()-based live sync alone
+    // never catches up on anything missed while disconnected.
+    getSyncGeneration: () => sync.getGeneration(),
+  });
   const actorPub = await Qu.actors.whoAmI();
 
   const shell = new Shell(qu, Qu, actorPub, sync);
@@ -464,6 +472,14 @@ class Shell {
     // applies to a not-yet-synced profile.
     const stop = mod.mount(this.screenEl, {
       qu: this.qu, services: this.Qu, appId, segments,
+      // The full manifest catalog (same data `_refreshApps()` fetched from
+      // `/apps.json`) - lets a mounted app discover what OTHER apps have
+      // declared for one of ITS OWN mount points (see
+      // @qu/foundation/actions.js's `actionsForMount()`) without ever
+      // importing them: only one app's `clientMain` is ever loaded at a
+      // time (see this method's own doc comment above), so this static
+      // catalog is the only cross-app discovery a mounted app has.
+      apps: this.apps,
       subscribe: (pathPrefix) => this.sync.subscribe(pathPrefix),
       fetch: (path) => this.sync.fetch(path),
     });

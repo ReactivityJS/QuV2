@@ -85,6 +85,7 @@ const DICT = {
     remove: 'Remove', leave: 'Leave', leaveConfirm: 'Leave "{title}"? You will lose access unless invited again.',
     renameLabel: 'Name', colorLabel: 'Color', viewOnly: 'View only',
     noAccessTitle: 'No access', noAccessBody: 'You don’t have access to "{title}" — ask the owner to invite you.',
+    noEditableCalendars: 'No calendar you can add events to — create one first.',
     invalidLink: 'This calendar link is invalid, or the calendar isn’t reachable right now.',
     inviteFailed: 'Could not invite {name}: {message}',
     unknownPerson: '~{pub}…', youSuffix: '{name} (you)',
@@ -108,6 +109,7 @@ const DICT = {
     remove: 'Entfernen', leave: 'Verlassen', leaveConfirm: '"{title}" verlassen? Der Zugriff geht verloren, bis erneut eingeladen wird.',
     renameLabel: 'Name', colorLabel: 'Farbe', viewOnly: 'Nur Ansicht',
     noAccessTitle: 'Kein Zugriff', noAccessBody: 'Kein Zugriff auf "{title}" — bitte vom Besitzer einladen lassen.',
+    noEditableCalendars: 'Kein Kalender, dem du Termine hinzufügen kannst — zuerst einen anlegen.',
     invalidLink: 'Dieser Kalender-Link ist ungültig, oder der Kalender ist gerade nicht erreichbar.',
     inviteFailed: '{name} konnte nicht eingeladen werden: {message}',
     unknownPerson: '~{pub}…', youSuffix: '{name} (Du)',
@@ -893,7 +895,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
 
     if (editableCals.length === 0) {
       const p = document.createElement('p');
-      p.textContent = t('noAccessTitle');
+      p.textContent = t('noEditableCalendars');
       container.appendChild(p);
       return;
     }
@@ -1361,16 +1363,16 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
   async function inviteMember(id, actorPub, role) {
     const spaceId = spaceOf(id);
 
-    // Attempted FIRST, before any membership state is written: posting
-    // into a one-shot, single-reader Thread (purely to trigger the relay's
-    // push pipeline for THIS invitee alone - see @qu/relay's
-    // `#deliverThreadPush()`) fails closed if the invitee has no resolvable
-    // encryption key yet (see ThreadService.postMessage's own doc comment).
-    // Ordering it first means that failure aborts the whole invite instead
-    // of silently granting access nobody was actually notified about.
+    // Attempted FIRST, before any membership state is written: ThreadService
+    // .notify() (the generalized version of what this used to hand-roll -
+    // create a one-shot single-reader `invite-<actorPub>` Thread and post
+    // into it, purely to trigger the relay's push pipeline for THIS
+    // invitee alone, see @qu/relay's `#deliverThreadPush()`) fails closed
+    // if the invitee has no resolvable encryption key yet. Ordering it
+    // first means that failure aborts the whole invite instead of silently
+    // granting access nobody was actually notified about.
     try {
-      await services.threads.createThread(spaceId, `invite-${actorPub}`, THREAD_PRESETS.mail(actorPub));
-      await services.threads.postMessage(spaceId, `invite-${actorPub}`, { body: 'invited' });
+      await services.threads.notify(spaceId, actorPub, 'invited');
     } catch {
       throw new Error('their profile hasn’t synced yet - try again shortly');
     }

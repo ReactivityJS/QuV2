@@ -31,8 +31,24 @@ import { randomUUID } from 'node:crypto';
  *      skips writing if it's already at least as new, so final state
  *      always reflects the logically-latest write regardless of I/O
  *      completion order.
+ *   3. SERIALIZATION - point 2's own read-then-write is ITSELF a
+ *      check-then-act race if two `put()` calls for the SAME path overlap:
+ *      both can read the same "current" value before either has written,
+ *      both pass the ts-guard, and whichever finishes its write second
+ *      physically wins regardless of which call's `ts` was actually
+ *      newer - silently reverting a later write back to an earlier one.
+ *      Confirmed by a real adversarial test (two writes to the same
+ *      collection path issued in quick succession by a single client -
+ *      `createThread()`'s empty-collection write immediately followed by
+ *      `postMessage()`'s `addItem()` write - lost the second write more
+ *      often than not). `#putLocked()` below is the actual read+write
+ *      body; `put()` chains calls for the SAME path through
+ *      `#writeLocks` so only one is ever in flight per path - calls for
+ *      DIFFERENT paths still run fully in parallel.
  */
 export class FsAdapter {
+  #writeLocks = new Map(); // filePath -> tail of the promise chain serializing put() calls to that path
+
   /** @param {string} [basePath='./qu-store'] */
   constructor(basePath = './qu-store') {
     this.basePath = basePath;
@@ -54,8 +70,28 @@ export class FsAdapter {
    *   comment point 2 - the CALLER wrote this value, so it's what they get
    *   back; `get()` immediately after may show something else).
    */
-  async put(rel, quBit) {
+  put(rel, quBit) {
     const filePath = this.#filePath(rel);
+    const previousTail = this.#writeLocks.get(filePath) ?? Promise.resolve();
+    // Chained via `.then(fn, fn)` (not `.finally()`) so a REJECTED previous
+    // write never poisons this one - each put() must still get its own
+    // fair attempt regardless of whether an earlier one for this path failed.
+    const thisWrite = previousTail.then(
+      () => this.#putLocked(rel, filePath, quBit),
+      () => this.#putLocked(rel, filePath, quBit)
+    );
+    this.#writeLocks.set(filePath, thisWrite);
+    // Once this write settles, only remove the map entry if nothing newer
+    // has replaced it in the meantime (a later put() for the same path may
+    // already be the current tail) - otherwise we'd drop a still-pending
+    // chain and let a future call start unserialized.
+    thisWrite.finally(() => {
+      if (this.#writeLocks.get(filePath) === thisWrite) this.#writeLocks.delete(filePath);
+    });
+    return thisWrite;
+  }
+
+  async #putLocked(rel, filePath, quBit) {
     await this.#ensureDir(filePath);
 
     const current = await this.get(rel);

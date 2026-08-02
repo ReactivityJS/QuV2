@@ -1,5 +1,8 @@
 import { collectionPath } from './paths.js';
 import { unwrap, unwrapAll } from './unwrap.js';
+import { createFreshnessTracker } from './sync-freshness.js';
+
+const MAX_MUTATE_RETRIES = 5;
 
 /**
  * COLLECTION SERVICE — the Entity API for ordered lists of references.
@@ -8,11 +11,50 @@ import { unwrap, unwrapAll } from './unwrap.js';
  * (see @qu/engines) resolves it into the referenced items on read. This
  * class hides that shape and the path convention behind plain methods
  * returning plain arrays of unwrapped values.
+ *
+ * `addItem()`/`removeItem()` are read-modify-write: read the current list,
+ * compute the new one, `create()` (an unconditional overwrite) the result.
+ * Two calls for the SAME collection that overlap - from the same process
+ * (e.g. two rapid UI actions) or, worse, from two DIFFERENT peers writing
+ * near-simultaneously - can each read the list BEFORE the other's write
+ * lands, both compute a "new" list missing the other's change, and
+ * whichever writes last simply overwrites the first's addition/removal
+ * out of existence. Found by a real adversarial multi-peer test (10
+ * concurrent same-process addItem() calls left only 1 of 10 items; two
+ * peers concurrently adding different items each ended up with only their
+ * own). Mitigated two ways below, neither requiring a server-side
+ * transaction (QuStore has none):
+ *   - `#locks` serializes calls for the SAME collection from THIS process
+ *     - fully eliminates the same-process case, and reduces (but cannot
+ *       eliminate) cross-peer contention.
+ *   - `#mutateOnce()` re-reads after writing and retries (recomputing from
+ *     the fresh state) if this call's OWN intended change didn't survive -
+ *     converges correctly even when a genuinely concurrent peer's write
+ *     raced and won, since each retry starts from the latest known state
+ *     rather than the stale one that caused the conflict.
  */
 export class CollectionService {
-  /** @param {import('@qu/core').QuCore} qu */
-  constructor(qu) {
+  #locks = new Map(); // "spaceId:collectionId" -> tail of the promise chain serializing addItem()/removeItem() for that collection
+  #backgroundRefresh;
+
+  /**
+   * @param {import('@qu/core').QuCore} qu
+   * @param {(path: string) => Promise<object|null>} [syncFetch] - Optional:
+   *   `SyncEngine.fetch()` (see @qu/sync) - backfills `list()`/`listRawPaths()`
+   *   on a local miss (a collection this session has never seen before,
+   *   e.g. a shared link opened for the first time) AND background-refreshes
+   *   one that already exists locally but might be stale (this session was
+   *   offline while a peer added/removed an item - see sync-freshness.js).
+   *   Previously this Service had NO syncFetch of its own at all - every
+   *   caller that needed backfill (Forum, Calendar, Geo Chase) had to
+   *   remember to fetch the collection path itself before calling list();
+   *   an app that forgot got a silent false-empty/stale result forever.
+   * @param {() => number} [getGeneration] - `SyncEngine.getGeneration()`, see sync-freshness.js.
+   */
+  constructor(qu, syncFetch = null, getGeneration = null) {
     this.qu = qu;
+    this.syncFetch = syncFetch;
+    this.#backgroundRefresh = createFreshnessTracker(syncFetch, getGeneration);
   }
 
   /**
@@ -29,12 +71,22 @@ export class CollectionService {
   /**
    * @param {string|number} spaceId
    * @param {string} collectionId
-   * @returns {Promise<Array<*>|null>} The resolved, unwrapped items, or null if the collection doesn't exist.
+   * @returns {Promise<Array<*>|null>} The resolved, unwrapped items, or null
+   *   if the collection doesn't exist ANYWHERE (locally or, once backfilled,
+   *   on the network either) - see the constructor's own doc comment for
+   *   the backfill/background-refresh this now does.
    */
   async list(spaceId, collectionId) {
-    const quBit = await this.qu.get(collectionPath(spaceId, collectionId));
-    if (!quBit) return null;
-    return unwrapAll(quBit.val);
+    const path = collectionPath(spaceId, collectionId);
+    const quBit = await this.qu.get(path);
+    if (quBit) {
+      this.#backgroundRefresh(path);
+      return unwrapAll(quBit.val);
+    }
+    if (!this.syncFetch) return null;
+    await this.syncFetch(path).catch(() => {});
+    const retried = await this.qu.get(path);
+    return retried ? unwrapAll(retried.val) : null;
   }
 
   /**
@@ -46,9 +98,7 @@ export class CollectionService {
    * @returns {Promise<void>}
    */
   async addItem(spaceId, collectionId, itemPath, options = {}) {
-    const currentPaths = await this.listRawPaths(spaceId, collectionId);
-    if (currentPaths.includes(itemPath)) return; // already present, avoid duplicate entries
-    await this.create(spaceId, collectionId, [...currentPaths, itemPath], options);
+    return this.#mutate(spaceId, collectionId, itemPath, true, options);
   }
 
   /**
@@ -61,9 +111,42 @@ export class CollectionService {
    * @returns {Promise<void>}
    */
   async removeItem(spaceId, collectionId, itemPath, options = {}) {
-    const currentPaths = await this.listRawPaths(spaceId, collectionId);
-    if (!currentPaths.includes(itemPath)) return;
-    await this.create(spaceId, collectionId, currentPaths.filter((p) => p !== itemPath), options);
+    return this.#mutate(spaceId, collectionId, itemPath, false, options);
+  }
+
+  /** Serializes same-process calls for `spaceId:collectionId` - see class doc comment. */
+  #mutate(spaceId, collectionId, itemPath, isAdd, options) {
+    const key = `${spaceId}:${collectionId}`;
+    const previousTail = this.#locks.get(key) ?? Promise.resolve();
+    const thisRun = previousTail.then(
+      () => this.#mutateOnce(spaceId, collectionId, itemPath, isAdd, options),
+      () => this.#mutateOnce(spaceId, collectionId, itemPath, isAdd, options)
+    );
+    this.#locks.set(key, thisRun);
+    thisRun.finally(() => {
+      if (this.#locks.get(key) === thisRun) this.#locks.delete(key);
+    });
+    return thisRun;
+  }
+
+  async #mutateOnce(spaceId, collectionId, itemPath, isAdd, options, attempt = 0) {
+    const current = await this.listRawPaths(spaceId, collectionId);
+    const alreadyDesired = isAdd ? current.includes(itemPath) : !current.includes(itemPath);
+    if (alreadyDesired) return;
+
+    const next = isAdd ? [...current, itemPath] : current.filter((p) => p !== itemPath);
+    await this.create(spaceId, collectionId, next, options);
+
+    if (attempt >= MAX_MUTATE_RETRIES) return; // give up - a pathologically hot collection stays best-effort past this many rounds
+    const after = await this.listRawPaths(spaceId, collectionId);
+    const survived = isAdd ? after.includes(itemPath) : !after.includes(itemPath);
+    if (!survived) {
+      // A concurrent writer's put() (from another peer, or another
+      // process entirely) landed after ours and didn't include our
+      // change - retry from the FRESH state rather than the stale read
+      // that caused the conflict, so this call's own intent still lands.
+      return this.#mutateOnce(spaceId, collectionId, itemPath, isAdd, options, attempt + 1);
+    }
   }
 
   /**
@@ -81,8 +164,15 @@ export class CollectionService {
    * @returns {Promise<string[]>}
    */
   async listRawPaths(spaceId, collectionId) {
-    const { adapter, rel } = this.qu.resolveMount(collectionPath(spaceId, collectionId));
-    const raw = await adapter.get(rel);
+    const path = collectionPath(spaceId, collectionId);
+    const { adapter, rel } = this.qu.resolveMount(path);
+    let raw = await adapter.get(rel);
+    if (raw) {
+      this.#backgroundRefresh(path);
+    } else if (this.syncFetch) {
+      await this.syncFetch(path).catch(() => {});
+      raw = await adapter.get(rel);
+    }
     return raw?.val?.$list ?? [];
   }
 }

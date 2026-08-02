@@ -24,6 +24,24 @@
  *      mail inbox from the SAME ThreadService, differing only by config -
  *      see THREAD_PRESETS), Favorites/Contacts (both built on
  *      StarredService), Directory visibility, and CMS pages.
+ *   7. Push: VAPID JWT signing/verification and RFC 8291 payload encryption.
+ *   8. The generic notification pipeline (ThreadService.notify() ->
+ *      @qu/relay's #deliverThreadPush() -> the recipient's own notifications
+ *      Thread) using the exact space convention apps/geochase/client.js's
+ *      invite flow uses, proving a non-Thread-native app gets a properly
+ *      labeled, deep-linked notification "for free" the same way Calendar's
+ *      invite flow already did.
+ *   9. Mounts and actions: actionsForMount()/resolveActionHref() (the
+ *      Contact List / Chat "contact-row" pattern).
+ *  10. Sync freshness/reconnect catch-up: a message posted while a peer
+ *      genuinely wasn't connected (transport closed, then reconnected) is
+ *      NOT delivered by subscribe() alone, but IS picked up by @qu/services'
+ *      background-refresh-on-reconnect mechanism (see
+ *      @qu/services/sync-freshness.js and @qu/sync's SyncEngine.getGeneration())
+ *      - this is the fix for "messages/events from while I was offline never
+ *      show up even after reconnecting", covering every Service built on
+ *      DocumentService/CollectionService/ThreadService (Chat, Calendar, Geo
+ *      Chase, Forum, Todo, ...), not just one app.
  *
  * NOT covered here (verified manually with Playwright during development,
  * not wired into this script to avoid adding a browser-automation
@@ -320,6 +338,166 @@ try {
     assert.equal(new TextDecoder().decode(decrypted), plaintext, 'decrypted push payload must match the original plaintext');
 
     console.log('    OK - VAPID JWT verifies, and RFC 8291 payload encryption round-trips (see @qu/push for what this does NOT prove - no live push service in this environment)');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Notification pipeline: ThreadService.notify() reaches the recipient (Geo Chase / Calendar pattern)');
+  // ---------------------------------------------------------------------
+  {
+    const { DocumentEngine, CollectionEngine, ThreadEngine } = await import('@qu/engines');
+    const { createServices } = await import('@qu/services');
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    // A real client of relayA (booted in step 1), same shape apps/shell's
+    // own boot() uses: `publishAllTo: 'relay'` so every local write syncs
+    // out unconditionally, `syncFetch` wired so ThreadService can backfill
+    // a not-yet-synced profile on demand.
+    async function connectClient() {
+      const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+      new DocumentEngine(rt.core);
+      new CollectionEngine(rt.core);
+      new ThreadEngine(rt.core);
+      const identity = new QuIdentityEngine(rt.core);
+      await identity.importMnemonic(identity.generateMnemonic());
+      const transport = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+      await transport.connect();
+      const sync = new SyncEngine(rt.core, transport, { publishAllTo: 'relay' });
+      const Qu = createServices(rt.core, { identityEngine: identity, syncFetch: (p) => sync.fetch(p) });
+      return { identity, sync, transport, Qu };
+    }
+
+    const aliceClient = await connectClient();
+    const bobClient = await connectClient();
+
+    await aliceClient.Qu.actors.publishMainProfile({ name: 'Alice-Notify' });
+    await bobClient.Qu.actors.publishMainProfile({ name: 'Bob-Notify' });
+    const bobPub = await bobClient.Qu.actors.whoAmI();
+    await new Promise((r) => setTimeout(r, 200)); // let both profiles reach relayA
+
+    // Mirrors apps/geochase/client.js's notifyInvitees(): space
+    // `geochase-<id>` is exactly what @qu/relay's #deliverThreadPush() now
+    // recognizes as a Geo Chase notice (see relay.js's `geochaseMatch`).
+    await aliceClient.Qu.threads.notify('geochase-testgame', bobPub, 'invited', { gameId: 'testgame' });
+    await new Promise((r) => setTimeout(r, 250)); // let the write sync to relayA and #deliverThreadPush() run
+
+    bobClient.sync.subscribe(`/store/notifications-${bobPub}`);
+    let notifMsgs = await bobClient.Qu.threads.listMessages(`notifications-${bobPub}`, 'notifications');
+    if (notifMsgs.length === 0) {
+      await bobClient.sync.fetch(`/store/notifications-${bobPub}`);
+      notifMsgs = await bobClient.Qu.threads.listMessages(`notifications-${bobPub}`, 'notifications');
+    }
+    assert.equal(notifMsgs.length, 1, 'Bob should have exactly one in-app notification');
+    assert.equal(notifMsgs[0].appId, 'geochase', 'notification should be attributed to the geochase app, not a raw spaceId');
+    assert.equal(notifMsgs[0].url, '#/geochase/testgame', 'notification should deep-link to the specific game');
+
+    aliceClient.sync.close();
+    aliceClient.transport.close();
+    bobClient.sync.close();
+    bobClient.transport.close();
+    console.log('    OK - a Geo Chase-style invite (ThreadService.notify()) reaches the recipient as a labeled, deep-linked notification');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Mounts and actions: actionsForMount()/resolveActionHref() (Contact List / Chat pattern)');
+  // ---------------------------------------------------------------------
+  {
+    const { actionsForMount, resolveActionHref } = await import('@qu/foundation');
+
+    // The real catalog shape @qu/relay's apps-catalog.js builds from
+    // manifest.quapp files - see apps/chat/manifest.quapp's `actions` and
+    // apps/contact-list/client.js, which consumes exactly this.
+    const apps = [
+      { name: 'chat', actions: [{ mount: 'contact-row', id: 'chat', label: 'Chat', icon: '💬', hrefTemplate: '#/chat/{pub}' }] },
+      { name: 'contact-list', actions: [] },
+      { name: 'notes' }, // no `actions` field at all - must be tolerated, not just an empty array
+    ];
+
+    const contactRowActions = actionsForMount(apps, 'contact-row');
+    assert.equal(contactRowActions.length, 1, 'only chat declared a contact-row action');
+    assert.equal(contactRowActions[0].appId, 'chat');
+    assert.equal(resolveActionHref(contactRowActions[0], { pub: 'AbC123-_' }), '#/chat/AbC123-_', 'base64url pubkeys must survive the template substitution unmangled');
+    assert.equal(actionsForMount(apps, 'no-such-mount').length, 0, 'an unknown mount id must yield an empty list, not throw');
+    assert.throws(() => resolveActionHref(contactRowActions[0], {}), /needs param "pub"/, 'a missing template param must fail loudly, not silently produce a broken href');
+
+    console.log('    OK - actionsForMount()/resolveActionHref() filter, sort and resolve declared actions correctly');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Sync freshness: a message missed while genuinely disconnected is picked up on reconnect, not just via subscribe()');
+  // ---------------------------------------------------------------------
+  {
+    const { DocumentEngine, CollectionEngine, ThreadEngine } = await import('@qu/engines');
+    const { createServices, THREAD_PRESETS } = await import('@qu/services');
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    async function connectClient() {
+      const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+      new DocumentEngine(rt.core);
+      new CollectionEngine(rt.core);
+      new ThreadEngine(rt.core);
+      const identity = new QuIdentityEngine(rt.core);
+      await identity.importMnemonic(identity.generateMnemonic());
+      const transport = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+      await transport.connect();
+      const sync = new SyncEngine(rt.core, transport, { publishAllTo: 'relay' });
+      const Qu = createServices(rt.core, {
+        identityEngine: identity,
+        syncFetch: (p) => sync.fetch(p),
+        getSyncGeneration: () => sync.getGeneration(),
+      });
+      return { identity, sync, transport, Qu };
+    }
+
+    const alice = await connectClient();
+    const bob = await connectClient();
+    await alice.Qu.actors.publishMainProfile({ name: 'Alice-Freshness' });
+    await bob.Qu.actors.publishMainProfile({ name: 'Bob-Freshness' });
+    const alicePub = await alice.Qu.actors.whoAmI();
+    const bobPub = await bob.Qu.actors.whoAmI();
+    await new Promise((r) => setTimeout(r, 200)); // let both profiles reach relayA
+
+    const spaceId = 'chat';
+    const threadId = 'smoke-freshness-room';
+    bob.sync.subscribe(`/store/${spaceId}`); // mirrors apps/chat/client.js's own unconditional subscribe()
+
+    await alice.Qu.threads.createThread(spaceId, threadId, THREAD_PRESETS.chat([alicePub, bobPub]));
+    await alice.Qu.threads.postMessage(spaceId, threadId, { body: 'first message, while Bob is live-connected' });
+    await new Promise((r) => setTimeout(r, 200));
+    const beforeDisconnect = await bob.Qu.threads.listMessages(spaceId, threadId);
+    assert.equal(beforeDisconnect.length, 1, 'Bob, still connected, should already have the first message via live subscribe()');
+
+    // Bob "goes offline": a deliberate close (not a network blip) so this
+    // test doesn't race real auto-reconnect timing - reconnect is driven
+    // explicitly below instead, same net effect.
+    bob.transport.close();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Alice posts a SECOND message while Bob is genuinely disconnected -
+    // nothing delivers this to Bob no matter how long he waits, per
+    // SyncEngine's own doc comment (subscribe() only ever covers writes
+    // made AFTER a live connection exists).
+    await alice.Qu.threads.postMessage(spaceId, threadId, { body: 'second message, sent while Bob was offline' });
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Bob reconnects (transport.connect() re-arms it - see
+    // WebSocketClientTransport's own doc comment). SyncEngine's onReconnect
+    // hook bumps the generation and replays Bob's subscription BEFORE this
+    // await resolves (see @qu/sync/sync-engine.js's constructor).
+    await bob.transport.connect();
+
+    const immediatelyAfterReconnect = await bob.Qu.threads.listMessages(spaceId, threadId);
+    assert.equal(immediatelyAfterReconnect.length, 1, 'the second message should NOT be visible yet - the background refresh this listMessages() call just triggered is fire-and-forget, not awaited');
+
+    await new Promise((r) => setTimeout(r, 400)); // let the background refresh's fetch() round-trip complete
+    const afterBackgroundRefresh = await bob.Qu.threads.listMessages(spaceId, threadId);
+    assert.equal(afterBackgroundRefresh.length, 2, 'both messages should now be visible - reconnecting triggered a background catch-up that subscribe() alone never would have delivered');
+    assert.equal(afterBackgroundRefresh[1].body, 'second message, sent while Bob was offline');
+
+    alice.sync.close();
+    alice.transport.close();
+    bob.sync.close();
+    bob.transport.close();
+    console.log('    OK - a message missed while genuinely disconnected self-corrects on reconnect via background refresh');
   }
 
   // ---------------------------------------------------------------------
