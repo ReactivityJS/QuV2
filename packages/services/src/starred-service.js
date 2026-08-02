@@ -1,5 +1,6 @@
 import { QuCrypto } from '@qu/core';
 import { getPrivate, putPrivate } from './private-storage.js';
+import { createFreshnessTracker } from './sync-freshness.js';
 
 /** @param {string} actorPub @param {string} namespace */
 function starredPath(actorPub, namespace) {
@@ -25,18 +26,48 @@ function starredPath(actorPub, namespace) {
  * matters more.
  */
 export class StarredService {
+  #backgroundRefresh;
+
   /**
    * @param {import('@qu/core').QuCore} qu
    * @param {import('@qu/identity').QuIdentityEngine} identityEngine
+   * @param {(path: string) => Promise<object|null>} [syncFetch] - Optional:
+   *   `SyncEngine.fetch()` (see @qu/sync) - backfills a starred list this
+   *   session has never seen locally (e.g. right after a cross-device
+   *   identity import - see @qu/identity's importSeedCode() - starts with
+   *   an empty local store even though this identity's real favorites/
+   *   contacts/starred calendars are sitting on the relay under this exact
+   *   actorPub) AND background-refreshes one that's already local but might
+   *   be stale (see sync-freshness.js). Without this, EVERY app built on
+   *   this Service (Favorites, Contacts, and every app's own "starred"
+   *   namespace - Calendar/Todo/Geo Chase's "My X" lists) silently stayed
+   *   empty forever on a freshly imported identity, no matter how long it
+   *   waited - this was the exact gap behind "Favoriten werden nicht
+   *   übertragen" (favorites don't transfer).
+   * @param {() => number} [getGeneration] - `SyncEngine.getGeneration()`, see sync-freshness.js.
    */
-  constructor(qu, identityEngine) {
+  constructor(qu, identityEngine, syncFetch = null, getGeneration = null) {
     this.qu = qu;
     this.identity = identityEngine;
+    this.syncFetch = syncFetch;
+    this.#backgroundRefresh = createFreshnessTracker(syncFetch, getGeneration);
   }
 
   async #myActorPub() {
     const mainKey = await this.identity.getMainKey();
     return QuCrypto.toBase64Url(mainKey.publicKey);
+  }
+
+  /** @param {string} namespace @returns {Promise<Array<object>>} */
+  async #readList(namespace) {
+    const path = starredPath(await this.#myActorPub(), namespace);
+    const local = await this.qu.get(path);
+    if (local) {
+      this.#backgroundRefresh(path);
+    } else if (this.syncFetch) {
+      await this.syncFetch(path).catch(() => {});
+    }
+    return (await getPrivate(this.qu, this.identity, path)) ?? [];
   }
 
   /**
@@ -48,11 +79,10 @@ export class StarredService {
    * @returns {Promise<Array<{id: string, starredAt: number}>>} The updated list.
    */
   async star(namespace, itemId, data = {}) {
-    const path = starredPath(await this.#myActorPub(), namespace);
-    const current = (await getPrivate(this.qu, this.identity, path)) ?? [];
+    const current = await this.#readList(namespace);
     if (current.some((item) => item.id === itemId)) return current;
     const updated = [...current, { id: itemId, starredAt: Date.now(), ...data }];
-    await putPrivate(this.qu, this.identity, path, updated);
+    await putPrivate(this.qu, this.identity, starredPath(await this.#myActorPub(), namespace), updated);
     return updated;
   }
 
@@ -62,17 +92,15 @@ export class StarredService {
    * @returns {Promise<Array<object>>} The updated list.
    */
   async unstar(namespace, itemId) {
-    const path = starredPath(await this.#myActorPub(), namespace);
-    const current = (await getPrivate(this.qu, this.identity, path)) ?? [];
+    const current = await this.#readList(namespace);
     const updated = current.filter((item) => item.id !== itemId);
-    await putPrivate(this.qu, this.identity, path, updated);
+    await putPrivate(this.qu, this.identity, starredPath(await this.#myActorPub(), namespace), updated);
     return updated;
   }
 
   /** @param {string} namespace @returns {Promise<Array<object>>} */
   async list(namespace) {
-    const path = starredPath(await this.#myActorPub(), namespace);
-    return (await getPrivate(this.qu, this.identity, path)) ?? [];
+    return this.#readList(namespace);
   }
 
   /** @param {string} namespace @param {string} itemId @returns {Promise<boolean>} */
