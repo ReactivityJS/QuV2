@@ -84,6 +84,8 @@ export class IndexedDBAdapter {
         cursor.continue();
       };
       request.onerror = () => reject(request.error);
+    });
+  }
    /* 
    * Permanently deletes this adapter's ENTIRE underlying IndexedDB database -
    * every QuBit ever stored under it, gone, unrecoverable. There is no
