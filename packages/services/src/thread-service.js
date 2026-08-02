@@ -3,6 +3,7 @@ import { threadMetaPath, threadMessagePath, threadMessagesCollectionId, threadRe
 import { applyFormatting } from './thread-formatting.js';
 import { putPrivate, getPrivate } from './private-storage.js';
 import { isEncryptedEnvelope, resolveReaderXKeys, decryptEnvelope } from './crypto-envelope.js';
+import { createFreshnessTracker } from './sync-freshness.js';
 
 /**
  * THREAD SERVICE — the Entity API for Threads (see @qu/engines/thread-engine.js
@@ -21,6 +22,8 @@ import { isEncryptedEnvelope, resolveReaderXKeys, decryptEnvelope } from './cryp
  * producing a `createThread()` config, nothing else app-specific.
  */
 export class ThreadService {
+  #backgroundRefresh;
+
   /**
    * @param {import('@qu/core').QuCore} qu
    * @param {import('@qu/identity').QuIdentityEngine} identityEngine
@@ -38,12 +41,21 @@ export class ThreadService {
    *   from the UI's perspective. Omit this (e.g. server-side/relay usage,
    *   which has no peer to fetch from in the same sense) and both methods
    *   simply behave as before - local-only, no fallback.
+   * @param {() => number} [getGeneration] - Optional: `SyncEngine.getGeneration()`
+   *   (see @qu/sync) - enables a background staleness re-check for a thread
+   *   config/messages collection/message that already exists locally (see
+   *   @qu/services/sync-freshness.js). Without this, `subscribe()`'s
+   *   "future writes only" gap meant a room this session had already
+   *   opened before going offline never caught up on what was posted while
+   *   it was away, even after reconnecting - the local-miss-only backfill
+   *   below never re-runs once something is cached.
    */
-  constructor(qu, identityEngine, collectionService, syncFetch = null) {
+  constructor(qu, identityEngine, collectionService, syncFetch = null, getGeneration = null) {
     this.qu = qu;
     this.identity = identityEngine;
     this.collections = collectionService;
     this.syncFetch = syncFetch;
+    this.#backgroundRefresh = createFreshnessTracker(syncFetch, getGeneration);
   }
 
   /** @returns {Promise<string>} base64url pubkey of this identity's main key. */
@@ -60,7 +72,11 @@ export class ThreadService {
    */
   async #getProfile(actorPub) {
     const local = await this.identity.getProfile(actorPub);
-    if (local || !this.syncFetch) return local;
+    if (local) {
+      this.#backgroundRefresh(`/store/actors/~${actorPub}/profile`); // e.g. a reader's key rotated while this session was offline
+      return local;
+    }
+    if (!this.syncFetch) return null;
     try {
       await this.syncFetch(`/store/actors/~${actorPub}/profile`);
     } catch {
@@ -117,7 +133,10 @@ export class ThreadService {
   async getConfig(spaceId, threadId) {
     const path = threadMetaPath(spaceId, threadId);
     const local = await this.qu.get(path);
-    if (local) return local.val;
+    if (local) {
+      this.#backgroundRefresh(path);
+      return local.val;
+    }
     if (!this.syncFetch) return null;
     await this.syncFetch(path).catch(() => {});
     const retried = await this.qu.get(path);
@@ -336,6 +355,19 @@ export class ThreadService {
    * messages were already exchanged (e.g. the other side messages first,
    * or this identity never subscribed to the thread's space before now)
    * would otherwise show up silently empty.
+   *
+   * A LOCAL HIT (the collection doc already exists) also gets a background
+   * staleness re-check (see sync-freshness.js), and so does every
+   * already-cached individual message - THIS is what actually fixes
+   * "a message from while I was offline never shows up even after
+   * reconnecting": the miss-only backfill above only ever helps a room
+   * opened for the very first time; a room this session had already synced
+   * SOME of before going offline previously had no way to notice it missed
+   * anything, because the collection document (and most/all message docs)
+   * were never actually "missing" locally, just stale. Re-checking an
+   * already-known MESSAGE path also catches an edit made while offline
+   * (`editMessage()` overwrites the same path, so a cached copy would
+   * otherwise show the pre-edit body forever).
    * @param {string|number} spaceId
    * @param {string} threadId
    * @returns {Promise<Array<object>>}
@@ -344,7 +376,9 @@ export class ThreadService {
     const collPath = collectionPath(spaceId, threadMessagesCollectionId(threadId));
     const { adapter, rel } = this.qu.resolveMount(collPath);
     let raw = await adapter.get(rel);
-    if (!raw && this.syncFetch) {
+    if (raw) {
+      this.#backgroundRefresh(collPath);
+    } else if (this.syncFetch) {
       await this.syncFetch(collPath).catch(() => {});
       raw = await adapter.get(rel);
     }
@@ -355,6 +389,7 @@ export class ThreadService {
       await Promise.all(paths.map((path, i) => (quBits[i] ? null : this.syncFetch(path).catch(() => {}))));
       quBits = await Promise.all(paths.map((path) => this.qu.get(path)));
     }
+    for (const path of paths) this.#backgroundRefresh(path);
 
     const messages = [];
     for (const quBit of quBits) {
