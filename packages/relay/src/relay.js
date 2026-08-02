@@ -17,8 +17,9 @@
  * brainstorming's "keep Qu small, evolve QUniverse" conclusion argued for.
  */
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { relative, sep } from 'node:path';
 import { WebSocketServer } from 'ws';
 
 import { QuCrypto } from '@qu/core';
@@ -80,6 +81,46 @@ const DEFAULT_RELAY_SETTINGS = Object.freeze({
  * @property {string} [vapidSubject='mailto:admin@example.com'] - Required by every push service
  *   (RFC 8292) so they have someone to contact about abuse - override this for a real deployment.
  */
+
+/**
+ * Recursively lists every `.json` file FsAdapter has ever written under
+ * `dir` (see ./adapters/fs-adapter.js - one file per stored QuBit, path
+ * structure mirrored 1:1 onto the filesystem). Used by Relay Admin's Data
+ * Explorer (`#handleAdminDataList()` below) to enumerate stored data -
+ * there is no in-store wildcard/prefix query anywhere in this codebase
+ * (see @qu/services/directory-service.js's own doc comment for the same
+ * limitation elsewhere), so listing has to walk the adapter's own files
+ * directly, one directory below the relay's own process.
+ * @param {string} dir
+ * @returns {Promise<string[]>} Absolute file paths.
+ */
+async function walkJsonFiles(dir) {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return []; // directory doesn't exist yet (e.g. blobDir on a relay that's never stored an asset) - nothing to list
+  }
+  const out = [];
+  for (const entry of entries) {
+    const full = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) out.push(...(await walkJsonFiles(full)));
+    // FsAdapter's atomic write leaves a `<path>.<uuid>.tmp` file briefly mid-rename - never a finished, readable QuBit.
+    else if (entry.name.endsWith('.json')) out.push(full);
+  }
+  return out;
+}
+
+/**
+ * @param {string} filePath - As returned by `walkJsonFiles()`.
+ * @param {string} baseDir - The adapter's own base directory.
+ * @param {string} mountPrefix - e.g. '/store' or '/blob'.
+ * @returns {string} The logical Qu path this file corresponds to.
+ */
+function fileToLogicalPath(filePath, baseDir, mountPrefix) {
+  const rel = relative(baseDir, filePath).split(sep).join('/');
+  return `${mountPrefix}/${rel.replace(/\.json$/, '')}`;
+}
 
 export class QuRelay {
   /** @param {QuRelayOptions} [options] */
@@ -300,12 +341,26 @@ export class QuRelay {
 
     const authorPub = quBit.pub ? QuCrypto.toBase64Url(QuCrypto.fromBase64(quBit.pub)) : null;
     const mentions = Array.isArray(quBit.val?.mentions) ? quBit.val.mentions : [];
-    const appId = spaceId === 'forum' ? 'forum' : spaceId === 'chat' ? 'chat' : String(spaceId).startsWith('inbox-') ? 'inbox' : String(spaceId);
+    // `calendar-<id>` is Calendar's per-calendar space (see
+    // apps/calendar/client.js's `activity`/`invite-<actorPub>` threads) -
+    // recognized generically like `inbox-<pub>` below so every shared
+    // calendar collapses into ONE 'calendar' row in notification settings
+    // instead of one per calendar id.
+    const calendarMatch = String(spaceId).match(/^calendar-(.+)$/);
+    // `geochase-<id>` is Geo Chase's per-game space (see
+    // @qu/services/geochase-service.js's `spaceFor()` and
+    // apps/geochase/client.js's `notifyInvitees()`) - recognized the same
+    // way `calendar-<id>` is above, so every game collapses into ONE
+    // 'geochase' row in notification settings instead of one per game id.
+    const geochaseMatch = String(spaceId).match(/^geochase-(.+)$/);
+    const appId = spaceId === 'forum' ? 'forum' : spaceId === 'chat' ? 'chat'
+      : String(spaceId).startsWith('inbox-') ? 'inbox' : calendarMatch ? 'calendar'
+      : geochaseMatch ? 'geochase' : String(spaceId);
 
     /** @type {Array<{actorPub: string, mention: boolean}>} */
     let candidates;
     if (Array.isArray(config.readers)) {
-      // A private thread (chat/mail): every OTHER reader gets a generic "new message" notice.
+      // A private thread (chat/mail/calendar activity+invites): every OTHER reader gets a notice.
       candidates = config.readers.filter((pub) => pub !== authorPub).map((actorPub) => ({ actorPub, mention: mentions.includes(actorPub) }));
     } else {
       // A public thread (forum): notifying every reader would mean notifying the entire
@@ -313,17 +368,75 @@ export class QuRelay {
       candidates = mentions.filter((pub) => pub !== authorPub).map((actorPub) => ({ actorPub, mention: true }));
     }
 
+    // Calendar has three distinct push-worthy actions (see its manifest's
+    // `pushActions`) distinguished by threadId, not by `mention`:
+    //   - `activity` - candidates are every OTHER current member of the
+    //     calendar (a growing reader list, see ThreadService.addReader()).
+    //   - `invite-<actorPub>` - only ever has that one invitee as a
+    //     candidate (see ThreadService's `mail` preset): a calendar-level share.
+    //   - `guest~<eventId>~<actorPub>` - same single-candidate shape, but
+    //     for inviting one person to one specific EVENT rather than the
+    //     whole calendar (see apps/calendar/client.js's `inviteGuest()`).
+    //     `~` is used as the separator (not `-`) because both a UUID event
+    //     id and a base64url actor pubkey can themselves contain `-`,
+    //     which would make splitting the threadId back apart ambiguous.
+    const calendarFunctionName = appId !== 'calendar' ? null
+      : threadId === 'activity' ? 'eventChange'
+      : threadId.startsWith('guest~') ? 'guestInvite'
+      : 'invite';
+    // Geo Chase only ever posts one kind of notice (an `invite-<pub>`
+    // thread on game creation - see apps/geochase/client.js's
+    // `notifyInvitees()`), so unlike Calendar there's no second threadId to
+    // branch on.
+    const geochaseFunctionName = appId === 'geochase' ? 'invite' : null;
+
     for (const { actorPub, mention } of candidates) {
       const prefs = await this.services.notificationPrefs.getPrefsFor(actorPub);
-      const functionName = mention ? 'mention' : 'newMessage';
+      const functionName = calendarFunctionName ?? geochaseFunctionName ?? (mention ? 'mention' : 'newMessage');
       if (!NotificationPrefsService.shouldNotify(prefs, { appId, mention, functionName })) continue;
 
-      const payload = {
-        title: mention ? `Mentioned in ${appId}` : `New message in ${appId}`,
-        body: `~${(authorPub ?? 'someone').slice(0, 10)}… sent a message`,
-        appId,
-        url: `#/${appId}`,
-      };
+      // Content-blind by design (see this method's own doc comment) - even
+      // for Calendar/Geo Chase, the relay never decrypts the activity/
+      // invite body, so wording stays generic. The one thing it CAN safely
+      // add is the calendar/game id itself: that's the storage path
+      // (`spaceId`), not encrypted content, so the notification can
+      // deep-link straight to the specific calendar/game instead of just
+      // the app root.
+      // Chat deep-links to the SPECIFIC room, not just `#/chat` (the room
+      // list) - see apps/chat/client.js's own doc comment for its route
+      // scheme (`#/chat/<peerActorPub>` for 1:1, `#/chat/g/<groupId>` for a
+      // group). A group room's `threadId` IS its groupId (see
+      // THREAD_PRESETS.group), so that's directly usable; a 1:1 room's
+      // `threadId` is a one-way hash of both members' pubkeys (see
+      // apps/chat/client.js's `roomId()`) and can't be reversed back into a
+      // pubkey - but it doesn't need to be: a 1:1 room has EXACTLY two
+      // readers, so from THIS candidate's point of view the "other side" of
+      // the conversation is simply whoever authored this message (`authorPub`
+      // is already excluded from `candidates` above, so it's never the
+      // recipient themselves).
+      const chatUrl = appId === 'chat'
+        ? (config.kind === 'group' ? `#/chat/g/${threadId}` : `#/chat/${authorPub}`)
+        : null;
+
+      const payload = calendarFunctionName === 'invite'
+        ? { title: 'Calendar invitation', body: 'You were invited to a shared calendar.', appId, url: `#/calendar/${calendarMatch[1]}` }
+        : calendarFunctionName === 'eventChange'
+        ? { title: 'Calendar updated', body: 'A shared calendar you belong to has new activity.', appId, url: `#/calendar/${calendarMatch[1]}` }
+        : calendarFunctionName === 'guestInvite'
+        // threadId is `guest~<eventId>~<actorPub>` - the middle segment is
+        // the event id, safe to surface (routing metadata, not decrypted
+        // content) so the notification deep-links straight to the event.
+        ? { title: 'Event invitation', body: 'You were invited to an event.', appId, url: `#/calendar/${calendarMatch[1]}/${threadId.split('~')[1]}` }
+        : geochaseFunctionName === 'invite'
+        ? { title: 'Geo Chase invitation', body: 'You were invited to a Geo Chase game.', appId, url: `#/geochase/${geochaseMatch[1]}` }
+        : chatUrl
+        ? { title: mention ? 'Mentioned in Chat' : 'New message in Chat', body: `~${(authorPub ?? 'someone').slice(0, 10)}… sent a message`, appId, url: chatUrl }
+        : {
+            title: mention ? `Mentioned in ${appId}` : `New message in ${appId}`,
+            body: `~${(authorPub ?? 'someone').slice(0, 10)}… sent a message`,
+            appId,
+            url: `#/${appId}`,
+          };
 
       try {
         await this.#writeInAppNotification(actorPub, payload);
@@ -373,21 +486,57 @@ export class QuRelay {
 
   /**
    * @param {import('node:http').IncomingMessage} req
+   * @param {number} [maxBytes=64KiB] - A settings payload is tiny; a Data
+   *   Explorer import (see `#handleAdminDataImport()`) is a bulk restore of
+   *   potentially many QuBits, so callers with genuinely larger bodies pass
+   *   a bigger cap explicitly rather than this default growing for everyone.
    * @returns {Promise<object>} Parsed JSON body.
-   * @throws {Error} On a body over 64KiB (a settings payload is tiny;
-   *   anything bigger is either a bug or abuse, not worth streaming) or
-   *   malformed JSON.
+   * @throws {Error} On a body over `maxBytes` or malformed JSON.
    */
-  async #readJsonBody(req) {
-    const MAX_BYTES = 64 * 1024;
+  async #readJsonBody(req, maxBytes = 64 * 1024) {
     const chunks = [];
     let size = 0;
     for await (const chunk of req) {
       size += chunk.length;
-      if (size > MAX_BYTES) throw new Error('request body too large');
+      if (size > maxBytes) throw new Error('request body too large');
       chunks.push(chunk);
     }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  }
+
+  /**
+   * Shared gate for every admin-only HTTP action (`POST /admin/...`):
+   * `actorPub` must be in `adminPubs` AND `signature` must actually verify
+   * over `JSON.stringify(signedPayload)` - a request merely CLAIMING to be
+   * from an admin pubkey proves nothing on its own. Writes a 403 response
+   * and returns `false` itself on any failure, so a call site only needs
+   * to check the return value.
+   * @param {import('node:http').ServerResponse} res
+   * @param {string} actorPub
+   * @param {string} signature
+   * @param {*} signedPayload - Must match exactly what the client signed.
+   * @returns {Promise<boolean>}
+   */
+  async #verifyAdmin(res, actorPub, signature, signedPayload) {
+    if (!this.options.adminPubs.includes(actorPub)) {
+      res.writeHead(403, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'not a configured relay admin' }));
+      return false;
+    }
+    let verified = false;
+    try {
+      verified = await QuCrypto.verify(
+        new TextEncoder().encode(JSON.stringify(signedPayload)),
+        QuCrypto.fromBase64Url(signature),
+        QuCrypto.fromBase64Url(actorPub)
+      );
+    } catch {
+      verified = false; // malformed base64/signature - treat exactly like "did not verify"
+    }
+    if (!verified) {
+      res.writeHead(403, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'signature does not verify' }));
+      return false;
+    }
+    return true;
   }
 
   /** @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res */
@@ -405,25 +554,7 @@ export class QuRelay {
       res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'expected { actorPub, settings, signature }' }));
       return;
     }
-    if (!this.options.adminPubs.includes(actorPub)) {
-      res.writeHead(403, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'not a configured relay admin' }));
-      return;
-    }
-
-    let verified = false;
-    try {
-      verified = await QuCrypto.verify(
-        new TextEncoder().encode(JSON.stringify(settings)),
-        QuCrypto.fromBase64Url(signature),
-        QuCrypto.fromBase64Url(actorPub)
-      );
-    } catch {
-      verified = false; // malformed base64/signature - treat exactly like "did not verify"
-    }
-    if (!verified) {
-      res.writeHead(403, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'signature does not verify' }));
-      return;
-    }
+    if (!(await this.#verifyAdmin(res, actorPub, signature, settings))) return;
 
     const merged = await this.#saveSettings(settings);
     // Applied live - an admin changing the rate limit shouldn't require
@@ -432,6 +563,110 @@ export class QuRelay {
     if (settings.rateLimits) this.transport.setRateLimit(merged.rateLimits.maxMessagesPerMinute);
 
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(merged));
+  }
+
+  /**
+   * Relay Admin's Data Explorer (see apps/relay-admin/client.js): lists
+   * every stored QuBit whose logical path starts with `query.prefix`
+   * (default `/store`, the same mount `paths.js`'s helpers all write
+   * under - `/blob` is included too if explicitly asked for, since asset
+   * chunks live there under the exact same FsAdapter/JSON-file shape).
+   * Debugging tool, not a Service - there is no in-store wildcard query
+   * anywhere else in this codebase (see `walkJsonFiles()`'s own doc
+   * comment), so this walks the adapters' files directly.
+   * @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res
+   */
+  async #handleAdminDataList(req, res) {
+    let body;
+    try {
+      body = await this.#readJsonBody(req);
+    } catch (err) {
+      res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: err.message }));
+      return;
+    }
+
+    const { actorPub, query, signature } = body ?? {};
+    if (typeof actorPub !== 'string' || typeof signature !== 'string' || typeof query !== 'object' || query === null) {
+      res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'expected { actorPub, query, signature }' }));
+      return;
+    }
+    if (!(await this.#verifyAdmin(res, actorPub, signature, query))) return;
+
+    const prefix = typeof query.prefix === 'string' && query.prefix ? query.prefix : '/store';
+    const limit = Math.min(Math.max(Number(query.limit) || 200, 1), 1000);
+
+    const candidates = [
+      ...(await walkJsonFiles(this.options.storeDir)).map((file) => fileToLogicalPath(file, this.options.storeDir, '/store')),
+      ...(await walkJsonFiles(this.options.blobDir)).map((file) => fileToLogicalPath(file, this.options.blobDir, '/blob')),
+    ]
+      .filter((path) => path.startsWith(prefix))
+      .sort();
+
+    const MAX_VALUE_BYTES = 200 * 1024; // a debug preview, not a bulk export - see #handleAdminDataImport for the real bulk path
+    const entries = [];
+    for (const path of candidates.slice(0, limit)) {
+      const { adapter, rel } = this.core.resolveMount(path);
+      let raw;
+      try {
+        raw = await adapter.get(rel);
+      } catch {
+        entries.push({ path, error: 'unreadable on disk' });
+        continue;
+      }
+      const size = raw ? JSON.stringify(raw).length : 0;
+      if (size > MAX_VALUE_BYTES) entries.push({ path, truncated: true, byteLength: size });
+      else entries.push({ path, value: raw });
+    }
+
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ entries, total: candidates.length, hasMore: candidates.length > limit }));
+  }
+
+  /**
+   * The write half of the Data Explorer: restores previously-exported
+   * QuBits EXACTLY as they were (original signature/encryption/timestamp
+   * intact) via `QuStore.putSealed()` - never through the normal
+   * Engine-mediated `qu.put()` pipeline, which would re-stamp/re-sign
+   * everything under THIS admin's own identity instead of preserving
+   * original authorship (see `putSealed()`'s own doc comment on @qu/core's
+   * QuStore). Deliberately not restricted to any path prefix: an admin
+   * restoring their own relay's data is already trusted with its entire
+   * disk.
+   * @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res
+   */
+  async #handleAdminDataImport(req, res) {
+    let body;
+    try {
+      body = await this.#readJsonBody(req, 20 * 1024 * 1024); // a bulk restore, not a settings tweak - see #readJsonBody's own doc comment
+    } catch (err) {
+      res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: err.message }));
+      return;
+    }
+
+    const { actorPub, entries, signature } = body ?? {};
+    if (typeof actorPub !== 'string' || typeof signature !== 'string' || !Array.isArray(entries)) {
+      res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'expected { actorPub, entries, signature }' }));
+      return;
+    }
+    if (!(await this.#verifyAdmin(res, actorPub, signature, entries))) return;
+
+    let imported = 0;
+    let skipped = 0;
+    for (const entry of entries) {
+      const path = entry?.path;
+      const value = entry?.value;
+      if (typeof path !== 'string' || !path.startsWith('/') || value === null || typeof value !== 'object') {
+        skipped++;
+        continue;
+      }
+      try {
+        await this.core.putSealed(path, value);
+        imported++;
+      } catch {
+        skipped++;
+      }
+    }
+
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ imported, skipped, total: entries.length }));
   }
 
   async #handleHttp(req, res) {
@@ -483,6 +718,24 @@ export class QuRelay {
       // own.
       if (req.url === '/admin/settings' && req.method === 'POST') {
         await this.#handleAdminSettings(req, res);
+        return;
+      }
+
+      // Relay Admin's Data Explorer (see apps/relay-admin/client.js) -
+      // list/restore raw QuBits straight off disk, for debugging. Both
+      // POST-only and admin-signature-gated exactly like `/admin/settings`
+      // above (see `#verifyAdmin()`), since this is by far the most
+      // sensitive admin action this relay exposes: bulk read/write of
+      // everything it stores, encrypted content included (still ciphertext
+      // to anyone who isn't a listed reader - see `#handleAdminDataList()`'s
+      // own doc comment - but that's a property of the DATA, not of who may
+      // ask for it).
+      if (req.url === '/admin/data/list' && req.method === 'POST') {
+        await this.#handleAdminDataList(req, res);
+        return;
+      }
+      if (req.url === '/admin/data/import' && req.method === 'POST') {
+        await this.#handleAdminDataImport(req, res);
         return;
       }
 

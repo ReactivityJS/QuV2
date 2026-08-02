@@ -11,5 +11,8 @@
   "pushActions": [
     { "id": "newMessage", "label": "New messages" },
     { "id": "mention", "label": "Mentions" }
+  ],
+  "actions": [
+    { "mount": "contact-row", "id": "chat", "label": "Chat", "icon": "💬", "hrefTemplate": "#/chat/{pub}" }
   ]
 }

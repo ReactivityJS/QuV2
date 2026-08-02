@@ -22,10 +22,14 @@
        the body, which every OTHER app keeps working with unchanged - a
        page whose content is taller than the available space still
        scrolls exactly as before, just with the header staying pinned
-       instead of scrolling away with it. */
+       instead of scrolling away with it. The header's own position:
+       sticky (from the header-pinning feature) is harmless-but-inert
+       now that body itself no longer scrolls - kept anyway since
+       screenEl's padding could theoretically still let content run
+       under it in edge cases, and it costs nothing when idle. */
     html, body { height: 100%; }
     body { font-family: system-ui, sans-serif; margin: 0; display: flex; flex-direction: column; }
-    .qu-shell-header { display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1rem; border-bottom: 1px solid #8884; flex-shrink: 0; }
+    .qu-shell-header { display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1rem; border-bottom: 1px solid #8884; flex-shrink: 0; position: sticky; top: 0; z-index: 20; background: canvas; color: canvastext; }
     .qu-shell-history-btn { background: none; border: 1px solid #8884; border-radius: 0.3rem; cursor: pointer; font: inherit; line-height: 1; padding: 0.3rem 0.5rem; color: inherit; }
     .qu-shell-brand { display: inline-flex; text-decoration: none; color: inherit; }
     .qu-shell-spacer { flex: 1; }

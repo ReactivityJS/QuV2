@@ -8,7 +8,8 @@
     ".": "./src/index.js",
     "./registry": "./src/registry.js",
     "./dependency-resolver": "./src/dependency-resolver.js",
-    "./manifest": "./src/manifest.js"
+    "./manifest": "./src/manifest.js",
+    "./actions": "./src/actions.js"
   },
   "dependencies": {
     "@qu/core": "^2.0.0"

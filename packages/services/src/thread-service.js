@@ -3,6 +3,7 @@ import { threadMetaPath, threadMessagePath, threadMessagesCollectionId, threadRe
 import { applyFormatting } from './thread-formatting.js';
 import { putPrivate, getPrivate } from './private-storage.js';
 import { isEncryptedEnvelope, resolveReaderXKeys, decryptEnvelope } from './crypto-envelope.js';
+import { createFreshnessTracker } from './sync-freshness.js';
 
 /**
  * THREAD SERVICE — the Entity API for Threads (see @qu/engines/thread-engine.js
@@ -21,6 +22,8 @@ import { isEncryptedEnvelope, resolveReaderXKeys, decryptEnvelope } from './cryp
  * producing a `createThread()` config, nothing else app-specific.
  */
 export class ThreadService {
+  #backgroundRefresh;
+
   /**
    * @param {import('@qu/core').QuCore} qu
    * @param {import('@qu/identity').QuIdentityEngine} identityEngine
@@ -38,12 +41,21 @@ export class ThreadService {
    *   from the UI's perspective. Omit this (e.g. server-side/relay usage,
    *   which has no peer to fetch from in the same sense) and both methods
    *   simply behave as before - local-only, no fallback.
+   * @param {() => number} [getGeneration] - Optional: `SyncEngine.getGeneration()`
+   *   (see @qu/sync) - enables a background staleness re-check for a thread
+   *   config/messages collection/message that already exists locally (see
+   *   @qu/services/sync-freshness.js). Without this, `subscribe()`'s
+   *   "future writes only" gap meant a room this session had already
+   *   opened before going offline never caught up on what was posted while
+   *   it was away, even after reconnecting - the local-miss-only backfill
+   *   below never re-runs once something is cached.
    */
-  constructor(qu, identityEngine, collectionService, syncFetch = null) {
+  constructor(qu, identityEngine, collectionService, syncFetch = null, getGeneration = null) {
     this.qu = qu;
     this.identity = identityEngine;
     this.collections = collectionService;
     this.syncFetch = syncFetch;
+    this.#backgroundRefresh = createFreshnessTracker(syncFetch, getGeneration);
   }
 
   /** @returns {Promise<string>} base64url pubkey of this identity's main key. */
@@ -60,7 +72,11 @@ export class ThreadService {
    */
   async #getProfile(actorPub) {
     const local = await this.identity.getProfile(actorPub);
-    if (local || !this.syncFetch) return local;
+    if (local) {
+      this.#backgroundRefresh(`/store/actors/~${actorPub}/profile`); // e.g. a reader's key rotated while this session was offline
+      return local;
+    }
+    if (!this.syncFetch) return null;
     try {
       await this.syncFetch(`/store/actors/~${actorPub}/profile`);
     } catch {
@@ -117,11 +133,56 @@ export class ThreadService {
   async getConfig(spaceId, threadId) {
     const path = threadMetaPath(spaceId, threadId);
     const local = await this.qu.get(path);
-    if (local) return local.val;
+    if (local) {
+      this.#backgroundRefresh(path);
+      return local.val;
+    }
     if (!this.syncFetch) return null;
     await this.syncFetch(path).catch(() => {});
     const retried = await this.qu.get(path);
     return retried?.val ?? null;
+  }
+
+  /**
+   * Grows a thread's reader list in place - the missing piece
+   * THREAD_PRESETS.chat/group's own doc comment flags as future work
+   * ("membership fixed at creation... real future work, not implemented
+   * here"). Needed for a thread whose membership is expected to change
+   * over time (e.g. a shared calendar gaining a new invitee) WITHOUT
+   * re-keying history: only messages posted AFTER this call are
+   * encrypted for (and so visible to) the newly added reader - exactly
+   * the same "can't see history from before you joined" trade-off most
+   * messengers accept for group membership changes.
+   *
+   * A no-op (not an error) for an already-public thread (`readers: '*'`)
+   * or a reader already present - safe to call unconditionally.
+   * @param {string|number} spaceId @param {string} threadId @param {string} actorPub
+   * @returns {Promise<object>} The thread's (possibly updated) config.
+   */
+  async addReader(spaceId, threadId, actorPub) {
+    const config = await this.getConfig(spaceId, threadId);
+    if (!config) throw new Error(`ThreadService.addReader: no thread "${threadId}" in space "${spaceId}" - call createThread() first`);
+    if (!Array.isArray(config.readers) || config.readers.includes(actorPub)) return config;
+    const updated = { ...config, readers: [...config.readers, actorPub] };
+    await this.qu.put(threadMetaPath(spaceId, threadId), updated);
+    return updated;
+  }
+
+  /**
+   * The inverse of `addReader()` - stops a former member from being
+   * resolved as an encryption target or push candidate for future
+   * messages (past messages remain readable to them; this isn't
+   * retroactive, same caveat as `addReader()`).
+   * @param {string|number} spaceId @param {string} threadId @param {string} actorPub
+   * @returns {Promise<object>} The thread's (possibly updated) config.
+   */
+  async removeReader(spaceId, threadId, actorPub) {
+    const config = await this.getConfig(spaceId, threadId);
+    if (!config) throw new Error(`ThreadService.removeReader: no thread "${threadId}" in space "${spaceId}"`);
+    if (!Array.isArray(config.readers)) return config;
+    const updated = { ...config, readers: config.readers.filter((pub) => pub !== actorPub) };
+    await this.qu.put(threadMetaPath(spaceId, threadId), updated);
+    return updated;
   }
 
   /**
@@ -194,6 +255,42 @@ export class ThreadService {
   }
 
   /**
+   * Convenience for "tell one other actor something happened" - creates
+   * (if needed) a single-reader mail thread for them and posts one message
+   * into it, which is exactly what @qu/relay's `#deliverThreadPush()`
+   * pipeline needs to notify them (in-app notification + push), gated by
+   * THEIR OWN notification prefs for whichever app `spaceId` resolves to.
+   * This is the one-shot equivalent of createThread()+postMessage() that
+   * Calendar's invite flow (see apps/calendar/client.js) originally did by
+   * hand - any app can reach the same generic notification pipeline this
+   * way instead of re-deriving it, as long as it uses ThreadService at all
+   * (an app that never touches Threads still gets nothing "for free" - see
+   * this repo's README for that limitation).
+   *
+   * @param {string|number} spaceId - The calling app's own space (or
+   *   sub-space, e.g. `geochase-<gameId>`) - this is what @qu/relay derives
+   *   the notification's `appId` from, so it should match (or start with)
+   *   the app's manifest `name` for its `pushActions` prefs to apply.
+   * @param {string} recipientPub
+   * @param {string} body - Plain text; content-blind by design downstream
+   *   (the relay never decrypts this to build a push payload - see
+   *   `#deliverThreadPush()`), so keep it human-readable for the in-app
+   *   feed, not machine-parsed.
+   * @param {object} [extra] - Merged into the stored message as-is, same as
+   *   `postMessage()`'s own `extra` - e.g. `{gameId}` for a deep-link.
+   * @returns {Promise<object>} The stored message (plain value).
+   * @throws {Error} If the recipient has no resolvable encryption key yet
+   *   (no published profile that's synced to this session) - same
+   *   fail-closed behavior `postMessage()` already has for any private
+   *   thread, see `#resolveReaderXKeys()`.
+   */
+  async notify(spaceId, recipientPub, body, extra = {}) {
+    const threadId = `invite-${recipientPub}`;
+    await this.createThread(spaceId, threadId, THREAD_PRESETS.mail(recipientPub));
+    return this.postMessage(spaceId, threadId, { body, extra });
+  }
+
+  /**
    * Overwrites an existing message's body in place (same path, same
    * `_id`/`replyTo`), re-applying the thread's formatters and re-encrypting
    * for its readers exactly like `postMessage()` - editing is really just
@@ -258,6 +355,19 @@ export class ThreadService {
    * messages were already exchanged (e.g. the other side messages first,
    * or this identity never subscribed to the thread's space before now)
    * would otherwise show up silently empty.
+   *
+   * A LOCAL HIT (the collection doc already exists) also gets a background
+   * staleness re-check (see sync-freshness.js), and so does every
+   * already-cached individual message - THIS is what actually fixes
+   * "a message from while I was offline never shows up even after
+   * reconnecting": the miss-only backfill above only ever helps a room
+   * opened for the very first time; a room this session had already synced
+   * SOME of before going offline previously had no way to notice it missed
+   * anything, because the collection document (and most/all message docs)
+   * were never actually "missing" locally, just stale. Re-checking an
+   * already-known MESSAGE path also catches an edit made while offline
+   * (`editMessage()` overwrites the same path, so a cached copy would
+   * otherwise show the pre-edit body forever).
    * @param {string|number} spaceId
    * @param {string} threadId
    * @returns {Promise<Array<object>>}
@@ -266,7 +376,9 @@ export class ThreadService {
     const collPath = collectionPath(spaceId, threadMessagesCollectionId(threadId));
     const { adapter, rel } = this.qu.resolveMount(collPath);
     let raw = await adapter.get(rel);
-    if (!raw && this.syncFetch) {
+    if (raw) {
+      this.#backgroundRefresh(collPath);
+    } else if (this.syncFetch) {
       await this.syncFetch(collPath).catch(() => {});
       raw = await adapter.get(rel);
     }
@@ -277,6 +389,7 @@ export class ThreadService {
       await Promise.all(paths.map((path, i) => (quBits[i] ? null : this.syncFetch(path).catch(() => {}))));
       quBits = await Promise.all(paths.map((path) => this.qu.get(path)));
     }
+    for (const path of paths) this.#backgroundRefresh(path);
 
     const messages = [];
     for (const quBit of quBits) {
@@ -553,4 +666,15 @@ export const THREAD_PRESETS = {
 
   /** System/app-generated notices, visible only to the owner, no formatting. */
   notifications: (ownerPub) => ({ writers: '*', readers: [ownerPub], replyMode: 'flat', formatting: [] }),
+
+  /**
+   * A membership list that GROWS over time (via `addReader()`/
+   * `removeReader()`, unlike `chat`/`group`'s fixed list) - e.g. Calendar's
+   * `activity` thread, whose readers must track a shared calendar's current
+   * member list as people are invited or removed. `writers: '*'` because
+   * only the owning app's own code posts into it (a system activity feed,
+   * not open user content), so there's no separate writer allowlist to
+   * maintain in lockstep with `readers`.
+   */
+  activity: (memberPubs) => ({ writers: '*', readers: memberPubs, replyMode: 'flat', formatting: [] }),
 };

@@ -170,14 +170,36 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       if (!name) return;
       const myActorPub = await services.actors.whoAmI();
       const newGameId = crypto.randomUUID();
-      await services.geochase.createGame(newGameId, {
-        huntedPubs: [myActorPub, ...huntedList.selected()],
-        hunterPubs: huntersList.selected(),
-      });
+      const huntedPubs = [myActorPub, ...huntedList.selected()];
+      const hunterPubs = huntersList.selected();
+      await services.geochase.createGame(newGameId, { huntedPubs, hunterPubs });
       await services.starred.star(NAMESPACE, newGameId, { name });
+      await notifyInvitees(newGameId, [...new Set([...huntedPubs, ...hunterPubs])].filter((pub) => pub !== myActorPub));
       location.hash = `#/geochase/${newGameId}`;
     });
     container.appendChild(form);
+  }
+
+  /**
+   * Tells every pre-selected hunter/hunted (besides the creator) that this
+   * game exists, via ThreadService's generic `notify()` (see
+   * @qu/services/thread-service.js) - the same primitive Calendar's invite
+   * flow uses. Space `geochase-<gameId>` matches GeoChaseService's own
+   * `spaceFor()` convention, which is what lets @qu/relay's
+   * `#deliverThreadPush()` recognize it as a Geo Chase notification and
+   * deep-link straight to `#/geochase/<gameId>` instead of falling back to
+   * a generic "new message" notice. Best-effort per recipient: one
+   * unreachable/not-yet-synced profile shouldn't stop the others (or the
+   * game itself, already created) from going through - they can still find
+   * the game via the raw share link, same fallback GeoChaseService's own
+   * `joinAsHunter()` already documents.
+   * @param {string} gameId @param {string[]} invitedPubs
+   */
+  async function notifyInvitees(gameId, invitedPubs) {
+    const spaceId = `geochase-${gameId}`;
+    await Promise.all(invitedPubs.map((pub) =>
+      services.threads.notify(spaceId, pub, 'invited', { gameId }).catch(() => {})
+    ));
   }
 
   function checklist(contacts) {
@@ -238,6 +260,16 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
 
     const isHunted = (config.huntedPubs ?? []).includes(myActorPub);
     const isHunter = (config.hunterPubs ?? []).includes(myActorPub);
+
+    // A hunter/hunted pre-selected at CREATION time (as opposed to
+    // self-service joinAsHunter()) never called starred.star() themselves -
+    // only the creator's own render...Games() form does that (see above),
+    // and a star is a private per-identity write nobody else can make on
+    // their behalf. Without this, following the invite notification's link
+    // would land here fine, but the game would still be invisible in "My
+    // Games" afterward. star() is idempotent (a no-op past the first visit
+    // as a participant), so unconditional here is safe.
+    if (isHunted || isHunter) services.starred.star(NAMESPACE, id, {}).catch(() => {});
 
     const statusEl = document.createElement('div');
     statusEl.className = 'qu-geochase-status';
