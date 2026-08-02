@@ -47,6 +47,7 @@
 import { THREAD_PRESETS, ChatService, paths } from '@qu/services';
 import { watch } from '@qu/reactive';
 import { createI18n } from '@qu/i18n';
+import { renderAvatar as renderQuAvatar } from '@qu/ui';
 
 const SPACE = 'chat';
 const REACTION_CHOICES = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '✅'];
@@ -67,7 +68,6 @@ const EXTENDED_EMOJI_SET = [
   '❣️', '💕', '💞', '💓', '💗', '💖', '💘', '💝', '💯', '✅', '❌', '⭐', '🌟', '✨', '🔥', '🎉',
   '🎊', '🎈', '🎁', '🏆', '⚡', '☀️', '🌈', '☕', '🍕', '🍔', '🍎', '🍺', '🎂', '📌', '🔗', '📎',
 ];
-const AVATAR_PALETTE = ['#e17076', '#faa774', '#a695e7', '#7bc862', '#6ec9cb', '#65aadd', '#ee7aae', '#f2c94c'];
 const PRESENCE_STALE_MS = 15_000;
 const PRESENCE_HEARTBEAT_MS = 5_000;
 const READ_RECEIPT_POLL_MS = 4_000;
@@ -163,10 +163,6 @@ const STYLE = `
   .qu-chat-room-bottom { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
   .qu-chat-room-preview { font-size: 0.85em; opacity: 0.65; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qu-chat-unread-badge { background: #3390ec; color: #fff; font-size: 0.72em; border-radius: 1rem; min-width: 1.3rem; height: 1.3rem; display: flex; align-items: center; justify-content: center; padding: 0 0.35rem; flex-shrink: 0; }
-
-  .qu-chat-avatar { flex-shrink: 0; width: 2.7rem; height: 2.7rem; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 600; font-size: 1.05em; overflow: hidden; user-select: none; }
-  .qu-chat-avatar img { width: 100%; height: 100%; object-fit: cover; }
-  .qu-chat-avatar-sm { width: 1.8rem; height: 1.8rem; font-size: 0.8em; }
 
   .qu-chat-room-view { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .qu-chat-header { display: flex; align-items: center; gap: 0.6rem; padding-bottom: 0.5rem; border-bottom: 1px solid #8883; margin-bottom: 0.4rem; flex-shrink: 0; }
@@ -388,32 +384,9 @@ function fmtTime(ts) {
   return `${day} ${time}`;
 }
 
-function colorFor(seed) {
-  let hash = 0;
-  for (let i = 0; i < seed.length; i++) hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
-  return AVATAR_PALETTE[hash % AVATAR_PALETTE.length];
-}
-
-function initialsOf(name) {
-  return (name || '?').trim().slice(0, 1).toUpperCase();
-}
-
 /** @param {string} seed - Stable identity for color (a pub, or a groupId). @param {string} label - Display name/alias to derive initials from. @param {string|null} [avatarValue] - Profile `avatar` field: an emoji/short string, or an image URL. */
 function renderAvatar(seed, label, avatarValue, { small = false } = {}) {
-  const el = document.createElement('div');
-  el.className = small ? 'qu-chat-avatar qu-chat-avatar-sm' : 'qu-chat-avatar';
-  el.style.background = colorFor(seed);
-  if (avatarValue && /^https?:\/\//.test(avatarValue)) {
-    const img = document.createElement('img');
-    img.src = avatarValue;
-    img.alt = '';
-    el.appendChild(img);
-  } else if (avatarValue) {
-    el.textContent = avatarValue;
-  } else {
-    el.textContent = initialsOf(label);
-  }
-  return el;
+  return renderQuAvatar(seed, label, avatarValue, { size: small ? '1.8rem' : '2.7rem' });
 }
 
 function attachmentPreviewLabel(attachment) {

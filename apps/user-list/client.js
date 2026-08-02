@@ -32,6 +32,7 @@
 import { createI18n } from '@qu/i18n';
 import { watch } from '@qu/reactive';
 import { paths } from '@qu/services';
+import { renderAvatar } from '@qu/ui';
 
 const DICT = {
   en: {
@@ -62,7 +63,6 @@ const STYLE = `
   .qu-user-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
   .qu-user-list li { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.7rem; border: 1px solid #8884; border-radius: 0.4rem; }
   .qu-user-list li.qu-user-unlisted { border-style: dashed; }
-  .qu-user-list .qu-user-avatar { font-size: 1.3em; width: 1.6rem; text-align: center; flex-shrink: 0; }
   .qu-user-list .qu-user-info { flex: 1; min-width: 0; display: flex; flex-direction: column; text-decoration: none; color: inherit; }
   .qu-user-list .qu-user-info:hover .qu-user-alias { text-decoration: underline; }
   .qu-user-list .qu-user-alias-row { display: flex; align-items: center; gap: 0.4rem; }
@@ -203,19 +203,18 @@ function row(actorPub, profile, isContact, services, isUnlisted) {
   const li = document.createElement('li');
   if (isUnlisted) li.classList.add('qu-user-unlisted');
 
-  const avatar = document.createElement('span');
-  avatar.className = 'qu-user-avatar';
-  avatar.textContent = profile?.avatar || '👤';
+  const alias = profile?.alias || `~${actorPub.slice(0, 16)}…`;
+  const avatar = renderAvatar(actorPub, alias, profile?.avatar, { size: '2.2rem' });
 
   const info = document.createElement('a');
   info.className = 'qu-user-info';
   info.href = `#/~${actorPub}`;
   const aliasRow = document.createElement('span');
   aliasRow.className = 'qu-user-alias-row';
-  const alias = document.createElement('span');
-  alias.className = 'qu-user-alias';
-  alias.textContent = profile?.alias || `~${actorPub.slice(0, 16)}…`;
-  aliasRow.appendChild(alias);
+  const aliasEl = document.createElement('span');
+  aliasEl.className = 'qu-user-alias';
+  aliasEl.textContent = alias;
+  aliasRow.appendChild(aliasEl);
   if (isUnlisted) {
     const badge = document.createElement('span');
     badge.className = 'qu-user-badge';
