@@ -57,6 +57,33 @@ export class IndexedDBAdapter {
   }
 
   /**
+   * Lists every stored QuBit whose key starts with `relPrefix`, via an
+   * IDBKeyRange bound rather than a full-store scan+filter - see
+   * FsAdapter.getAll()'s doc comment for what this enables (reciprocal
+   * sync catch-up, outbox replay). `'￿'` is a standard idiom for a
+   * string-prefix upper bound: it sorts after any realistic single-codepoint
+   * suffix a real path segment would have.
+   * @param {string} relPrefix
+   * @returns {Promise<Array<{rel: string, quBit: object}>>}
+   */
+  async getAll(relPrefix) {
+    const db = await this.#open();
+    const range = IDBKeyRange.bound(relPrefix, relPrefix + '￿', false, false);
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('qubits', 'readonly');
+      const store = tx.objectStore('qubits');
+      const out = [];
+      const request = store.openCursor(range);
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) {
+          resolve(out);
+          return;
+        }
+        out.push({ rel: cursor.key, quBit: cursor.value });
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error);
    * Permanently deletes this adapter's ENTIRE underlying IndexedDB database -
    * every QuBit ever stored under it, gone, unrecoverable. There is no
    * finer-grained delete anywhere in this stack (QuStore itself has no
