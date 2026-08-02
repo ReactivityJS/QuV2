@@ -53,6 +53,14 @@
  *      real payload-shaped string (the exact shape exportSeedCode()
  *      produces) through actual QR encoding/decoding - no browser/DOM
  *      needed, see that package's own doc comment for why.
+ *  13. Cross-device data recovery: a SECOND client that imports device A's
+ *      backup code (see #11) must not just derive the same keypair - its
+ *      OWN alias/avatar/epub (ProfileService.getOwnProfile()) and starred
+ *      items (StarredService, e.g. Favorites) must actually show up too,
+ *      by backfilling from the relay rather than starting blank. Both had
+ *      NO backfill at all before this section existed (found from a real
+ *      user report after #11 shipped: "epub and alias/favorites don't
+ *      transfer") - this is the regression test for that fix.
  *
  * NOT covered here (verified manually with Playwright during development,
  * not wired into this script to avoid adding a browser-automation
@@ -576,6 +584,76 @@ try {
     const decoded = decodeFromImageData(data, width, height);
     assert.equal(decoded, payload, 'a QR-encoded identity backup code must decode back to the exact original string');
     console.log('    OK - a full-size identity backup code survives a real QR encode/decode round trip');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Cross-device data recovery: own profile + favorites backfill after importSeedCode()');
+  // ---------------------------------------------------------------------
+  {
+    const { DocumentEngine, CollectionEngine, ThreadEngine } = await import('@qu/engines');
+    const { createServices } = await import('@qu/services');
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    async function connectClient(identitySeedCode) {
+      const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+      new DocumentEngine(rt.core);
+      new CollectionEngine(rt.core);
+      new ThreadEngine(rt.core);
+      const identity = new QuIdentityEngine(rt.core);
+      if (identitySeedCode) await identity.importSeedCode(identitySeedCode);
+      else await identity.importMnemonic(identity.generateMnemonic());
+      const transport = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+      await transport.connect();
+      const sync = new SyncEngine(rt.core, transport, { publishAllTo: 'relay' });
+      const Qu = createServices(rt.core, {
+        identityEngine: identity,
+        syncFetch: (p) => sync.fetch(p),
+        getSyncGeneration: () => sync.getGeneration(),
+      });
+      return { identity, sync, transport, Qu };
+    }
+
+    // "Device A": a real identity with an alias, a custom private field, and a favorited app.
+    const deviceA = await connectClient();
+    await deviceA.Qu.profile.saveProfile({
+      alias: 'CrossDeviceAlias',
+      avatar: '🚀',
+      fields: [{ key: 'note', value: 'secret-note', visibility: 'private' }],
+    });
+    const ownProfileA = await deviceA.Qu.profile.getOwnProfile();
+    await deviceA.Qu.favorites.add('chat');
+    await new Promise((r) => setTimeout(r, 200)); // let it all reach relayA
+
+    const backupCode = await deviceA.identity.exportSeedCode();
+
+    // "Device B": a FRESH, empty store importing that same backup code -
+    // exactly apps/profile/client.js's "Use a different identity" flow.
+    const deviceB = await connectClient(backupCode);
+    const mainPubA = QuCrypto.toBase64Url((await deviceA.identity.getMainKey()).publicKey);
+    const mainPubB = QuCrypto.toBase64Url((await deviceB.identity.getMainKey()).publicKey);
+    assert.equal(mainPubB, mainPubA, 'importing the backup code must derive the identical identity');
+
+    // First read may still be pre-backfill (fire-and-forget) - same
+    // "flash of empty, then self-corrects" shape as section 10's message
+    // backfill. Poll briefly rather than assuming a single fixed wait.
+    let ownProfileB = await deviceB.Qu.profile.getOwnProfile();
+    let favoritesB = await deviceB.Qu.favorites.list();
+    for (let i = 0; i < 10 && (ownProfileB.alias !== 'CrossDeviceAlias' || favoritesB.length === 0); i++) {
+      await new Promise((r) => setTimeout(r, 300));
+      ownProfileB = await deviceB.Qu.profile.getOwnProfile();
+      favoritesB = await deviceB.Qu.favorites.list();
+    }
+
+    assert.equal(ownProfileB.alias, 'CrossDeviceAlias', 'alias must backfill on the newly-imported device');
+    assert.equal(ownProfileB.avatar, '🚀', 'avatar must backfill on the newly-imported device');
+    assert.equal(ownProfileB.epub, ownProfileA.epub, 'epub must backfill on the newly-imported device (it comes from the same published profile document, not local re-derivation)');
+    assert.deepEqual(favoritesB, ['chat'], 'starred/favorited items must backfill on the newly-imported device');
+    const privateField = ownProfileB.fields.find((f) => f.key === 'note');
+    assert.equal(privateField?.value, 'secret-note', 'private profile fields (self-encrypted) must backfill and still decrypt correctly on the newly-imported device');
+
+    deviceA.sync.close(); deviceA.transport.close();
+    deviceB.sync.close(); deviceB.transport.close();
+    console.log('    OK - alias, avatar, epub, private fields, and favorites all backfill onto a freshly-imported identity');
   }
 
   // ---------------------------------------------------------------------

@@ -66,7 +66,7 @@ export { unwrap, unwrapAll } from './unwrap.js';
  */
 export function createServices(qu, { assetEngine, identityEngine, syncFetch, getSyncGeneration }) {
   const collections = new CollectionService(qu, syncFetch, getSyncGeneration);
-  const starred = new StarredService(qu, identityEngine);
+  const starred = new StarredService(qu, identityEngine, syncFetch, getSyncGeneration);
   const documents = new DocumentService(qu, syncFetch, getSyncGeneration);
   const threads = new ThreadService(qu, identityEngine, collections, syncFetch, getSyncGeneration);
   return {
