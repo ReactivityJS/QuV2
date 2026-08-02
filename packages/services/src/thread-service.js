@@ -122,6 +122,31 @@ export class ThreadService {
   }
 
   /**
+   * Resets a thread's history back to empty - same threadId, same config/
+   * members, only the messages and pins lists are cleared. Deliberately a
+   * ThreadService method, not something any one app (Chat, Forum, Inbox -
+   * all built on this same class) should reimplement by poking
+   * CollectionService directly: "delete/recreate a chat" is a thread-level
+   * operation, not a Chat-specific one.
+   *
+   * There is no delete primitive anywhere in Qu's storage layer - every
+   * write is an overwrite, never a removal (see @qu/core's QuStore) - so
+   * this does NOT erase the old message documents themselves, only the
+   * COLLECTIONS that list them (same "unlinked, not erased" shape as
+   * CollectionService.removeItem() - see its own doc comment). A thread
+   * with non-'*' readers is encrypted for every member, not just the
+   * caller: resetting its collections is a normal write like any other in
+   * this thread, so it is visible to - and syncs to - every member, not
+   * just this device. Callers should treat this as destructive and confirm
+   * with the user first.
+   * @param {string|number} spaceId @param {string} threadId
+   */
+  async clearMessages(spaceId, threadId) {
+    await this.collections.create(spaceId, threadMessagesCollectionId(threadId), []);
+    await this.collections.create(spaceId, threadPinsCollectionId(threadId), []);
+  }
+
+  /**
    * Backfills via `syncFetch` (if provided) on a local miss - see
    * `createThread()`'s doc comment for why this matters even for a caller
    * that only wants to READ a config (e.g. Chat's group room view uses
@@ -469,20 +494,21 @@ export class ThreadService {
    */
   async getReactions(spaceId, threadId, messageId) {
     const collectionId = threadReactionsCollectionId(threadId, messageId);
-    let paths = await this.collections.listRawPaths(spaceId, collectionId);
-    // A length-0 result here means EITHER "no reactions" OR "this
-    // session hasn't synced this message's reactions collection yet" -
-    // listRawPaths() can't tell the two apart (unlike getConfig()'s
-    // null-vs-value distinction), so an empty result always gets one
-    // backfill attempt. Harmless when genuinely empty (syncFetch just
-    // finds nothing new); without it, a room opened after reactions
-    // already existed showed messages correctly but reactions stayed
-    // permanently empty until someone reacted again while this peer
-    // was present.
-    if (paths.length === 0 && this.syncFetch) {
-      await this.syncFetch(collectionPath(spaceId, collectionId)).catch(() => {});
-      paths = await this.collections.listRawPaths(spaceId, collectionId);
-    }
+    // listRawPaths() ALREADY backfills correctly on its own (see
+    // CollectionService.listRawPaths()'s own doc comment): a blocking
+    // syncFetch when this collection has genuinely never been seen
+    // locally, or a gated (once-per-generation) background-refresh when
+    // it has - a length-0 RESULT here can't tell those two cases apart
+    // (unlike getConfig()'s null-vs-value distinction), so a second,
+    // ungated "still empty? fetch again" attempt on top used to refetch
+    // on EVERY call once this collection was confirmed genuinely empty -
+    // each fetch re-persisting the same already-known QuBit (same or
+    // older `ts`, never newer - see SyncEngine#persistDirectly's
+    // never-regress check, which only skips a STRICTLY older write) fired
+    // a fresh `storage:put`, which re-triggered every `watch()` on this
+    // path, which called back in here - a self-sustaining loop with
+    // nothing left to converge on. Trust listRawPaths()'s own backfill.
+    const paths = await this.collections.listRawPaths(spaceId, collectionId);
     const byEmoji = {};
     for (const path of paths) {
       const quBit = await this.qu.get(path);
@@ -511,14 +537,16 @@ export class ThreadService {
     else await this.collections.removeItem(spaceId, collectionId, path, putOptions);
   }
 
-  /** @param {string|number} spaceId @param {string} threadId @returns {Promise<string[]>} Currently pinned message ids. */
+  /**
+   * @param {string|number} spaceId @param {string} threadId
+   * @returns {Promise<string[]>} Currently pinned message ids. See
+   *   getReactions()'s doc comment for why this relies entirely on
+   *   listRawPaths()'s own (correctly gated) backfill rather than adding
+   *   a second, ungated "still empty? fetch again" attempt on top.
+   */
   async listPinned(spaceId, threadId) {
     const collectionId = threadPinsCollectionId(threadId);
-    let paths = await this.collections.listRawPaths(spaceId, collectionId);
-    if (paths.length === 0 && this.syncFetch) { // see getReactions()'s identical backfill for why an empty result still gets one attempt
-      await this.syncFetch(collectionPath(spaceId, collectionId)).catch(() => {});
-      paths = await this.collections.listRawPaths(spaceId, collectionId);
-    }
+    const paths = await this.collections.listRawPaths(spaceId, collectionId);
     return paths.map((path) => path.slice(path.lastIndexOf('/') + 1));
   }
 
