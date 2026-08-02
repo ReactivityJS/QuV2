@@ -74,20 +74,28 @@ export class AssetEngine {
     // its default seal+persist for the metadata write.
     if (ctx.path.endsWith('/meta')) return;
 
+    // `onProgress` is consumed here, never forwarded to a chunk/meta
+    // put() - those go through the normal seal pipeline, which only reads
+    // the signing/encryption keys it recognises and would otherwise just
+    // ignore this anyway, but stripping it keeps `putOptions` an honest
+    // reflection of what actually gets signed/encrypted.
+    const { onProgress, ...putOptions } = ctx.options ?? {};
+
     const file = await normalizeFileInput(ctx.val);
     const blobPath = toBlobPath(ctx.path);
 
     const chunks = chunkData(file.data, this.chunkSize);
     // Content hash per chunk, over the PLAINTEXT bytes (before any
-    // encryption `ctx.options` applies below) - stored in meta so
+    // encryption `putOptions` applies below) - stored in meta so
     // getAsset() can verify what it reassembles actually matches what was
     // uploaded (see that method), and reused here for RESUME: retrying an
     // interrupted upload of the same file (same chunkSize -> same
     // boundaries -> same hashes) should only re-send chunks that aren't
     // already there, not start over.
     const chunkHashes = await Promise.all(chunks.map((chunk) => hashChunk(chunk)));
-    const isEncrypted = !!ctx.options?.encryptWith;
+    const isEncrypted = !!putOptions.encryptWith;
 
+    let completedChunks = 0;
     await Promise.all(
       chunks.map(async (chunk, i) => {
         const chunkPath = `${blobPath}/chunk_${i}`;
@@ -101,15 +109,25 @@ export class AssetEngine {
           const existing = await this.qu.get(chunkPath);
           if (existing && !isEncryptedEnvelope(existing.val)) {
             const existingHash = await hashChunk(QuCrypto.fromBase64(existing.val));
-            if (existingHash === chunkHashes[i]) return; // already present, byte-identical - nothing to resend
+            if (existingHash === chunkHashes[i]) {
+              completedChunks++;
+              onProgress?.(completedChunks / chunks.length);
+              return; // already present, byte-identical - nothing to resend
+            }
           }
         }
-        await this.qu.put(chunkPath, QuCrypto.toBase64(chunk), ctx.options);
+        await this.qu.put(chunkPath, QuCrypto.toBase64(chunk), putOptions);
+        completedChunks++;
+        // A chunk-count proxy for progress, not byte-exact (chunks write
+        // concurrently, not necessarily in order) - see AssetService's own
+        // doc comment on `onProgress`. Good enough for a UI progress bar on
+        // a multi-chunk upload; a 1-chunk file just jumps straight to 1.
+        onProgress?.(completedChunks / chunks.length);
       })
     );
 
     const meta = { name: file.name, mime: file.mime, size: file.size, chunkCount: chunks.length, chunkHashes, blobPath };
-    const metaQuBit = await this.qu.put(`${ctx.path}/meta`, meta, ctx.options);
+    const metaQuBit = await this.qu.put(`${ctx.path}/meta`, meta, putOptions);
 
     return { handled: true, result: metaQuBit };
   }

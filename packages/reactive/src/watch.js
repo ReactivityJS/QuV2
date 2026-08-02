@@ -36,11 +36,27 @@
  * @param {import('@qu/core').QuCore} qu
  * @param {string} path
  * @param {(value: *) => void} callback
- * @param {{initial?: boolean}} [options] - `initial: false` skips the
- *   immediate current-value call, delivering only future changes.
+ * @param {{initial?: boolean, syncFetch?: (path: string) => Promise<object|null>}} [options] -
+ *   `initial: false` skips the immediate current-value call, delivering
+ *   only future changes. `syncFetch` (typically `(path) => sync.fetch(path)`,
+ *   see @qu/sync): if given, fired once when `watch()` is first attached to
+ *   ask a peer for this path's CURRENT value, not just the initial LOCAL
+ *   one above. Without this, watching a path only ever shows what's already
+ *   on disk plus whatever a broad `subscribe()` happens to push AFTER this
+ *   moment (see SyncEngine's own doc comment: subscribing only delivers
+ *   FUTURE writes) - a value a peer wrote before this session subscribed,
+ *   or while this session was offline/hadn't opened this exact view yet,
+ *   would otherwise sit unnoticed until something UNRELATED happens to
+ *   trigger a re-read of the same path. No second code path needed to
+ *   apply the result: whatever `syncFetch` finds is written through the
+ *   normal sync pipeline (`SyncEngine.fetch()` -> `qu.putSealed()`, see
+ *   sync-engine.js), which fires the SAME `onStorageChange` notify this
+ *   function already listens to below - a fresher value simply triggers
+ *   the ordinary refetch. Fire-and-forget: a slow/failing peer request
+ *   must never delay or break the local `initial` delivery above.
  * @returns {() => void} Unsubscribe function.
  */
-export function watch(qu, path, callback, { initial = true } = {}) {
+export function watch(qu, path, callback, { initial = true, syncFetch = null } = {}) {
   // `qu.get(path)` races the next write to the same path by design - two
   // overlapping re-fetches can resolve in EITHER order. Tracking the
   // highest `ts` delivered so far and dropping anything older prevents
@@ -61,6 +77,7 @@ export function watch(qu, path, callback, { initial = true } = {}) {
   });
 
   if (initial) refetch();
+  if (syncFetch) syncFetch(path).catch(() => {});
 
   return off;
 }

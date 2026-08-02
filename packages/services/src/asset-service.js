@@ -80,17 +80,22 @@ export class AssetService {
    * @param {string|number} spaceId
    * @param {string} assetId
    * @param {Blob|Uint8Array|ArrayBuffer|{name: string, mime: string, data: *}} file
-   * @param {{readerPubs?: string[], asSpaceId?: string|number}} [options]
+   * @param {{readerPubs?: string[], asSpaceId?: string|number, onProgress?: (fraction: number) => void}} [options]
    *   `readerPubs` - base64url actor pubkeys to encrypt for (same shape as
    *   a thread's `config.readers`); omitted/empty means unencrypted,
    *   readable by anyone syncing the space - the caller (e.g. Chat) decides
    *   this per-upload from the thread it's attaching to, same as
    *   `postMessage()` decides per-message from `config.readers`.
+   *   `onProgress` - called with a 0..1 fraction as chunks finish writing
+   *   to the LOCAL store (see @qu/engines' AssetEngine) - a chunk-count
+   *   proxy for progress, not byte-exact, but enough for a UI progress
+   *   indicator on a large attachment. Never called for a 1-chunk file's
+   *   trivial case beyond the final `1`.
    * @returns {Promise<{name: string, mime: string, size: number}>} The stored metadata.
    */
-  async upload(spaceId, assetId, file, { readerPubs = null, asSpaceId = null } = {}) {
+  async upload(spaceId, assetId, file, { readerPubs = null, asSpaceId = null, onProgress = null } = {}) {
     const signKey = asSpaceId ? await this.identity.getSpaceKey(asSpaceId) : await this.identity.getMainKey();
-    const putOptions = { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey };
+    const putOptions = { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey, onProgress };
 
     if (readerPubs && readerPubs.length > 0) {
       const xKey = asSpaceId ? await this.identity.getSpaceXKey(asSpaceId) : await this.identity.getMainXKey();

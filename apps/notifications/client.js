@@ -97,7 +97,7 @@ function ensureStyle() {
   document.head.appendChild(style);
 }
 
-export function mount(container, { qu, services, segments, subscribe }) {
+export function mount(container, { qu, services, segments, subscribe, fetch: syncFetch }) {
   ensureStyle();
   let stopped = false;
   let stopWatch = null;
@@ -116,7 +116,13 @@ export function mount(container, { qu, services, segments, subscribe }) {
     subscribe(`/store/${spaceId}`); // live updates for a relay-authored notice arriving while this feed is open
 
     const listPath = paths.collectionPath(spaceId, paths.threadMessagesCollectionId('notifications'));
-    stopWatch = watch(qu, listPath, () => renderFeed(container, services, spaceId, () => stopped));
+    // `syncFetch` here (see @qu/reactive's watch() own doc comment) closes
+    // the same "opened this view before a peer-authored notice/read-state
+    // had synced in" gap the header bell badge now also closes - without
+    // it, this feed only ever showed what was already local plus whatever
+    // arrived AFTER `subscribe()` above, same one-reload-behind symptom a
+    // real multi-device test found for read receipts/reactions elsewhere.
+    stopWatch = watch(qu, listPath, () => renderFeed(container, services, spaceId, () => stopped), { syncFetch });
   })();
 
   return () => { stopped = true; stopWatch?.(); };

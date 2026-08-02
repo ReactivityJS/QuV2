@@ -45,3 +45,15 @@ export function threadReactionsCollectionId(threadId, messageId) {
 export function threadPinsCollectionId(threadId) {
   return `thread-${threadId}-pins`;
 }
+
+/**
+ * @param {string|number} spaceId @param {string} threadId @param {string} actorPub
+ * @returns {string} This actor's PRIVATE (self-encrypted) "read up to" marker
+ *   for a thread - see ThreadService's `markRead()`/`getLastReadAt()`.
+ *   Exported (unlike most of this file's callers, which stay inside
+ *   @qu/services) so apps/shell's notification badge can `watch()` this
+ *   exact path directly - see that file's `_watchNotifBadge()` for why.
+ */
+export function threadReadMarkerPath(spaceId, threadId, actorPub) {
+  return `/store/actors/~${actorPub}/private/thread-read/${spaceId}/${threadId}`;
+}

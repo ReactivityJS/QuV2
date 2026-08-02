@@ -57,24 +57,33 @@
  *      corrupted/tampered chunk instead of silently reassembling it, and
  *      re-uploading an unchanged file resumes by skipping chunks already
  *      present with matching content (see AssetEngine's chunkHashes).
- *  14. Identity backup/transfer: QuIdentityEngine.exportSeedCode() ->
+ *  14. ThreadService freshness: read receipts, reactions, and the private
+ *      per-identity read-marker (markRead/getLastReadAt) each now
+ *      self-correct via syncFetch-on-miss/backgroundRefresh-on-hit, closing
+ *      a real multi-device bug report where these three specifically never
+ *      synced to a second device/session without several manual reloads.
+ *  15. SyncEngine.waitForAck(): resolves once a peer's `sync-ack` confirms a
+ *      specific write was durably persisted (including the race where the
+ *      ack arrives before the call), and times out - rather than hanging or
+ *      resolving incorrectly - for a write that was never acknowledged.
+ *  16. Identity backup/transfer: QuIdentityEngine.exportSeedCode() ->
  *      importSeedCode() reconstructs the SAME identity (same derived main
  *      keypair) in a fresh store, the cross-device mechanism
  *      apps/profile/client.js's backup section and apps/shell's onboarding
  *      screen both build their UI around - plus the overwrite guard
  *      (rejects a conflicting import without { overwrite: true }) and
  *      malformed-code rejection.
- *  15. @qu/qr: encodeToImageData() -> decodeFromImageData() round-trips a
+ *  17. @qu/qr: encodeToImageData() -> decodeFromImageData() round-trips a
  *      real payload-shaped string (the exact shape exportSeedCode()
  *      produces) through actual QR encoding/decoding - no browser/DOM
  *      needed, see that package's own doc comment for why.
- *  16. Cross-device data recovery: a SECOND client that imports device A's
- *      backup code (see #11) must not just derive the same keypair - its
+ *  18. Cross-device data recovery: a SECOND client that imports device A's
+ *      backup code must not just derive the same keypair - its
  *      OWN alias/avatar/epub (ProfileService.getOwnProfile()) and starred
  *      items (StarredService, e.g. Favorites) must actually show up too,
  *      by backfilling from the relay rather than starting blank. Both had
  *      NO backfill at all before this section existed (found from a real
- *      user report after #11 shipped: "epub and alias/favorites don't
+ *      user report after #16 shipped: "epub and alias/favorites don't
  *      transfer") - this is the regression test for that fix.
  *
  * NOT covered here (verified manually with Playwright during development,
@@ -87,7 +96,7 @@
  * (camera-based QR scanning in particular - `getUserMedia`/`<video>` have
  * no meaningful Node equivalent), and IndexedDBAdapter.destroy() (there is
  * no `indexedDB` global in Node) - the identity/QR *logic* those UIs are
- * built on is what sections 11-12 above actually verify.
+ * built on is what sections 16-17 above actually verify.
  */
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -676,7 +685,175 @@ try {
     const result = await assetEngine.getAsset('/store/files/assets/doc1');
     assert.equal(result, null, 'a corrupted/tampered chunk must be rejected, never silently reassembled into the returned data');
 
-    console.log('    OK - chunk content hashes are verified on read, corrupted chunks are rejected, and an identical re-upload resumes by skipping unchanged chunks');
+    // onProgress (see AssetService.upload()'s own doc comment, and the
+    // chat app's upload-progress indicator built on it): fires once per
+    // chunk, ending at exactly 1.
+    const progressUpdates = [];
+    await rt.core.put(
+      '/store/files/assets/doc2',
+      { name: 'doc2.txt', mime: 'text/plain', data: original },
+      { onProgress: (fraction) => progressUpdates.push(fraction) }
+    );
+    assert.equal(progressUpdates.length, 4, 'onProgress should fire once per chunk (4 chunks here)');
+    assert.equal(progressUpdates[progressUpdates.length - 1], 1, 'the final onProgress call should report completion (fraction === 1)');
+
+    console.log('    OK - chunk content hashes are verified on read, corrupted chunks are rejected, an identical re-upload resumes by skipping unchanged chunks, and upload progress is reported per chunk');
+  }
+
+  // ---------------------------------------------------------------------
+  section('ThreadService freshness: read receipts, reactions, and the private read-marker self-correct on next read (no subscribe(), no reconnect)');
+  // ---------------------------------------------------------------------
+  {
+    const { DocumentEngine, CollectionEngine, ThreadEngine } = await import('@qu/engines');
+    const { createServices, THREAD_PRESETS } = await import('@qu/services');
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    async function connectClient() {
+      const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+      new DocumentEngine(rt.core);
+      new CollectionEngine(rt.core);
+      new ThreadEngine(rt.core);
+      const identity = new QuIdentityEngine(rt.core);
+      await identity.importMnemonic(identity.generateMnemonic());
+      const transport = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+      await transport.connect();
+      const sync = new SyncEngine(rt.core, transport, { publishAllTo: 'relay' });
+      const Qu = createServices(rt.core, {
+        identityEngine: identity,
+        syncFetch: (p) => sync.fetch(p),
+        getSyncGeneration: () => sync.getGeneration(),
+      });
+      return { identity, sync, transport, Qu };
+    }
+
+    const alice = await connectClient();
+    const bob = await connectClient();
+    await alice.Qu.actors.publishMainProfile({ name: 'Alice-ReadState' });
+    await bob.Qu.actors.publishMainProfile({ name: 'Bob-ReadState' });
+    const alicePub = await alice.Qu.actors.whoAmI();
+    const bobPub = await bob.Qu.actors.whoAmI();
+    await new Promise((r) => setTimeout(r, 200));
+
+    const spaceId = 'chat';
+    const threadId = 'smoke-readstate-room';
+    // Deliberately NO subscribe() on bob's side anywhere in this block -
+    // proves this recovers purely via the syncFetch-on-miss/
+    // backgroundRefresh-on-hit fallback just added to getReadReceipts()/
+    // getReactions(), not via live push or SyncEngine's reconnect catch-up.
+    await alice.Qu.threads.createThread(spaceId, threadId, THREAD_PRESETS.chat([alicePub, bobPub]));
+    const posted = await alice.Qu.threads.postMessage(spaceId, threadId, { body: 'hi bob' });
+    await new Promise((r) => setTimeout(r, 100));
+
+    await alice.Qu.threads.publishReadReceipt(spaceId, threadId, posted.ts);
+    await alice.Qu.threads.setReaction(spaceId, threadId, posted.id, '👍');
+    await new Promise((r) => setTimeout(r, 150)); // let alice's writes reach relayA
+
+    const receipts = await bob.Qu.threads.getReadReceipts(spaceId, threadId, [alicePub]);
+    assert.equal(receipts[alicePub], posted.ts, "bob should see alice's read receipt via syncFetch-on-miss, with no subscribe() and no reconnect");
+
+    const reactions = await bob.Qu.threads.getReactions(spaceId, threadId, posted.id);
+    assert.deepEqual(reactions['👍'], [alicePub], "bob should see alice's reaction via the same per-document backgroundRefresh/miss fallback");
+
+    // A SECOND reaction from alice, changing her existing one - same fixed
+    // per-actor path, so no NEW collection entry is created (see
+    // getReactions()'s own doc comment on why the collection-empty backfill
+    // alone can't catch this) - only the per-document backgroundRefresh
+    // (generation-gated, so it needs a fresh generation to re-fire) can.
+    await bob.sync.close(); // force a fresh generation on bob's next connect, so the per-path backgroundRefresh below is eligible to re-fire
+    await bob.transport.connect();
+    await alice.Qu.threads.setReaction(spaceId, threadId, posted.id, '🔥');
+    await new Promise((r) => setTimeout(r, 150));
+    await bob.Qu.threads.getReactions(spaceId, threadId, posted.id); // first read in the new generation queues the background refresh
+    await new Promise((r) => setTimeout(r, 250));
+    const updatedReactions = await bob.Qu.threads.getReactions(spaceId, threadId, posted.id);
+    assert.deepEqual(updatedReactions['🔥'], [alicePub], "bob should see alice's CHANGED reaction after a background refresh, not just her first one");
+
+    alice.sync.close();
+    alice.transport.close();
+    bob.sync.close();
+    bob.transport.close();
+
+    console.log('    OK - a read receipt and a changed reaction both sync to a second session via syncFetch-on-miss/backgroundRefresh, with no subscribe() and no reconnect');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Private read-marker (markRead) syncs across two "devices" sharing one identity, without subscribe()');
+  // ---------------------------------------------------------------------
+  {
+    const { DocumentEngine, CollectionEngine, ThreadEngine } = await import('@qu/engines');
+    const { createServices, THREAD_PRESETS } = await import('@qu/services');
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    async function connectDevice(mnemonic) {
+      const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+      new DocumentEngine(rt.core);
+      new CollectionEngine(rt.core);
+      new ThreadEngine(rt.core);
+      const identity = new QuIdentityEngine(rt.core);
+      const usedMnemonic = mnemonic ?? identity.generateMnemonic();
+      await identity.importMnemonic(usedMnemonic);
+      const transport = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+      await transport.connect();
+      const sync = new SyncEngine(rt.core, transport, { publishAllTo: 'relay' });
+      const Qu = createServices(rt.core, {
+        identityEngine: identity,
+        syncFetch: (p) => sync.fetch(p),
+        getSyncGeneration: () => sync.getGeneration(),
+      });
+      return { mnemonic: usedMnemonic, identity, sync, transport, Qu };
+    }
+
+    const deviceA = await connectDevice();
+    const spaceId = 'chat';
+    const threadId = 'smoke-two-device-room';
+    const myPub = await deviceA.Qu.actors.whoAmI();
+    await deviceA.Qu.threads.createThread(spaceId, threadId, THREAD_PRESETS.chat([myPub]));
+    await deviceA.Qu.threads.markRead(spaceId, threadId);
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Second "device": SAME identity (same mnemonic -> same derived keys,
+    // so it can decrypt the self-encrypted marker deviceA published), but
+    // a completely fresh, never-subscribed local store.
+    const deviceB = await connectDevice(deviceA.mnemonic);
+    const lastReadAt = await deviceB.Qu.threads.getLastReadAt(spaceId, threadId);
+    assert.ok(lastReadAt > 0, 'device B should see the read-marker device A published, via syncFetch-on-miss - no subscribe(), no reconnect');
+
+    deviceA.sync.close();
+    deviceA.transport.close();
+    deviceB.sync.close();
+    deviceB.transport.close();
+    console.log('    OK - a private read-marker (markRead) published on one device is visible on a second device sharing the same identity, via syncFetch-on-miss');
+  }
+
+  // ---------------------------------------------------------------------
+  section("SyncEngine.waitForAck(): resolves once the relay durably persists a specific write, handles the already-acked race, and times out otherwise");
+  // ---------------------------------------------------------------------
+  {
+    const { MemoryAdapter } = await import('@qu/runtime');
+    const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+    const transport = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+    await transport.connect();
+    const sync = new SyncEngine(rt.core, transport, { publishAllTo: 'relay' });
+
+    const quBit = await rt.core.put('/store/waitforack-space/notes/one', { title: 'ack me' }, {});
+    await sync.waitForAck('/store/waitforack-space/notes/one', quBit.ts, 5000);
+
+    // Race: an ack that already arrived BEFORE waitForAck() is called must
+    // still resolve immediately (from SyncEngine's own #lastAckedTs), not
+    // register a waiter for a message that already came and went.
+    await new Promise((r) => setTimeout(r, 100)); // make sure the ack has long since arrived
+    await sync.waitForAck('/store/waitforack-space/notes/one', quBit.ts, 1000);
+
+    // A path that's never written/acked should time out, not hang forever.
+    await assert.rejects(
+      () => sync.waitForAck('/store/waitforack-space/notes/never-written', Date.now(), 300),
+      /timed out/,
+      'waitForAck should time out for a path that was never written/acked'
+    );
+
+    sync.close();
+    transport.close();
+    console.log('    OK - waitForAck() resolves once acknowledged (including a call made after the ack already arrived) and times out otherwise');
   }
 
   // ---------------------------------------------------------------------

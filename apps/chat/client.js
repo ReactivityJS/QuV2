@@ -32,11 +32,12 @@
  * same workaround many messengers' own encrypted-group implementations
  * reach for too).
  *
- * READ TICKS are simplified from the V1 reference's three states
- * (pending/sent/read) to two (✓ sent, ✓✓ read): this app awaits
- * `postMessage()` before ever rendering the message, so there's no
- * optimistic "still sending" window to visualize - "sent" is true the
- * instant it appears at all. "Read" is a real, separate signal:
+ * READ TICKS model three states: ✓ + spinner (locally posted, not yet
+ * confirmed durably persisted on the relay - see confirmSync()/
+ * SyncEngine.waitForAck()), ✓✓ (relay-confirmed), ✓✓ BLUE (a recipient's
+ * read receipt covers it). This app awaits `postMessage()` before ever
+ * rendering the message, so there's no separate "still sending" state
+ * before the first tick appears. "Read" is a real, separate signal:
  * `ThreadService.publishReadReceipt()` (distinct from the pre-existing
  * PRIVATE `markRead()`/`getLastReadAt()`, which only drive this
  * identity's own unread badge and are invisible to other members).
@@ -293,6 +294,9 @@ const STYLE = `
   .qu-chat-send-btn { background: #3390ec; color: #fff; }
   .qu-chat-send-btn:hover { background: #2b7cd3; }
   .qu-chat-pending-attachment { font-size: 0.8em; opacity: 0.8; display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.3rem; flex-shrink: 0; }
+  .qu-chat-upload-progress { display: inline-flex; align-items: center; gap: 0.35rem; }
+  .qu-chat-upload-progress-bar { width: 5rem; height: 0.35rem; border-radius: 999px; background: #8883; overflow: hidden; flex-shrink: 0; }
+  .qu-chat-upload-progress-fill { height: 100%; background: var(--qu-chat-own-color, #3390ec); transition: width 0.15s ease; }
 
   .qu-chat-voice-bar { display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0; flex-shrink: 0; position: sticky; bottom: 0; background: canvas; }
   .qu-chat-voice-status { display: flex; align-items: center; gap: 0.4rem; flex: 1; font-variant-numeric: tabular-nums; }
@@ -372,6 +376,30 @@ function fmtSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * Replaces the pending-attachment chip's content with a filename + progress
+ * bar while `services.assets.upload()` is in flight - see its call site's
+ * own doc comment for why (a large attachment previously gave no feedback
+ * at all during upload). `fraction` is 0..1 (see AssetService.upload()'s
+ * `onProgress` doc comment for why it's chunk-count-based, not byte-exact).
+ */
+function renderUploadProgress(pendingAttachmentEl, file, fraction) {
+  pendingAttachmentEl.hidden = false;
+  pendingAttachmentEl.textContent = '';
+  const wrap = document.createElement('span');
+  wrap.className = 'qu-chat-upload-progress';
+  const label = document.createElement('span');
+  label.textContent = `📎 ${file.name} (${fmtSize(file.size)}) ${Math.round(fraction * 100)}%`;
+  const bar = document.createElement('span');
+  bar.className = 'qu-chat-upload-progress-bar';
+  const fill = document.createElement('span');
+  fill.className = 'qu-chat-upload-progress-fill';
+  fill.style.width = `${Math.round(fraction * 100)}%`;
+  bar.appendChild(fill);
+  wrap.append(label, bar);
+  pendingAttachmentEl.appendChild(wrap);
 }
 
 function fmtTime(ts) {
@@ -546,7 +574,7 @@ function buildLinkPreview(text) {
   return a;
 }
 
-export function mount(container, { qu, services, segments, subscribe, fetch: syncFetch }) {
+export function mount(container, { qu, services, segments, subscribe, fetch: syncFetch, waitForAck, onReconnect }) {
   ensureStyle();
   let stopped = false;
   let unwatch = null;
@@ -1666,7 +1694,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
           const posted = await services.threads.postMessage(spaceId, threadId, { body: buildLocationUrl(latitude.toFixed(5), longitude.toFixed(5)) });
           pendingSyncIds.add(posted.id);
           await reload({ forceScrollBottom: true });
-          confirmSync(posted.id, paths.threadMessagePath(spaceId, threadId, posted.id));
+          confirmSync(posted.id, paths.threadMessagePath(spaceId, threadId, posted.id), posted.ts);
         },
         () => { locationBtn.disabled = false; pendingAttachmentEl.hidden = false; pendingAttachmentEl.textContent = t('locationFailed'); },
         { enableHighAccuracy: false, timeout: 10_000 }
@@ -1829,7 +1857,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
         const posted = await services.threads.postMessage(spaceId, threadId, { body: '', extra: { attachment: { assetId, name: meta.name, mime: meta.mime, size: meta.size } } });
         pendingSyncIds.add(posted.id);
         await reload({ forceScrollBottom: true });
-        confirmSync(posted.id, paths.threadMessagePath(spaceId, threadId, posted.id));
+        confirmSync(posted.id, paths.threadMessagePath(spaceId, threadId, posted.id), posted.ts);
       });
       voiceBar.appendChild(sendVoiceBtn);
       const discardBtn = document.createElement('button');
@@ -2052,7 +2080,13 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       for (const message of messages) {
         if (reactionUnwatches.has(message.id)) continue;
         const path = paths.collectionPath(spaceId, paths.threadReactionsCollectionId(threadId, message.id));
-        reactionUnwatches.set(message.id, watch(qu, path, reload, { initial: false }));
+        // `syncFetch` (see @qu/reactive's watch() own doc comment): a
+        // message opened here for the first time this session should show
+        // a reaction another member already added, not just ones added
+        // WHILE this view is open - without this, reactions on older
+        // messages only appeared after 1-2 reloads (found via real
+        // multi-device testing).
+        reactionUnwatches.set(message.id, watch(qu, path, reload, { initial: false, syncFetch }));
       }
     }
 
@@ -2092,26 +2126,55 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     }
 
     /**
-     * There's no server ACK for "the relay received your broadcast" in this
-     * sync protocol (writes are fire-and-forget broadcast - see
-     * SyncEngine's own doc comment). fetch()ing the same path back FROM the
-     * relay is the closest available proxy: a non-null response proves the
-     * relay's copy exists, upgrading the tick from pending to synced. Only
-     * called right after THIS device posts a message - re-checking the
-     * whole history on every reload() would mean an unbounded burst of
-     * fetch() calls on every mount, for no user-facing benefit (an old
-     * message's sync state isn't something anyone is watching).
+     * `waitForAck` (see SyncEngine's own doc comment) resolves once the
+     * relay has DURABLY PERSISTED this exact write, which is what "1 tick"
+     * -> "2 ticks" is actually meant to represent. Only called right after
+     * THIS device posts a message - re-checking the whole history on every
+     * reload() would mean an unbounded burst of network calls on every
+     * mount, for no user-facing benefit (an old message's sync state isn't
+     * something anyone is watching).
+     *
+     * PREVIOUSLY this made a single `syncFetch()` round-trip and gave up
+     * silently on any failure/timeout, which left a message's tick stuck on
+     * "syncing…" forever if that one attempt happened to lose a race with a
+     * busy relay or a brief disconnect (found via real multi-device
+     * testing - the video-attachment case in particular, where a slow
+     * upload made the one confirmation attempt likelier to time out). This
+     * version retries once per reconnect (via `onReconnect`, unsubscribed
+     * the moment it succeeds or this view unmounts) instead of giving up
+     * after one attempt - the underlying write itself is never actually
+     * lost (it's already durably local, and re-sent from the outbox on
+     * reconnect if this device was offline - see @qu/sync/outbox.js), so
+     * retrying the confirmation on the same signal is exactly the right
+     * amount of work, not a blind polling loop.
      */
-    async function confirmSync(messageId, path) {
-      if (!syncFetch) { pendingSyncIds.delete(messageId); const el = tickEls.get(messageId); if (el) renderTickState(el, tickStateFor(messageId, el.dataset.read === 'true')); return; }
-      try {
-        const quBit = await syncFetch(path);
-        if (quBit) pendingSyncIds.delete(messageId);
-      } catch {
-        // timed out / relay unreachable - leave marked pending, matches reality
+    function confirmSync(messageId, path, ts) {
+      const renderCurrent = () => {
+        const el = tickEls.get(messageId);
+        if (el) renderTickState(el, tickStateFor(messageId, el.dataset.read === 'true'));
+      };
+      if (!waitForAck || typeof ts !== 'number') {
+        pendingSyncIds.delete(messageId);
+        renderCurrent();
+        return;
       }
-      const el = tickEls.get(messageId);
-      if (el) renderTickState(el, tickStateFor(messageId, el.dataset.read === 'true'));
+      let stopReconnectRetry = null;
+      const attempt = async () => {
+        try {
+          await waitForAck(path, ts, 8000);
+          pendingSyncIds.delete(messageId);
+          stopReconnectRetry?.();
+        } catch {
+          // Still unconfirmed - stays 'pending' (spinner) until the next
+          // reconnect retries, or a read receipt supersedes it below.
+        }
+        renderCurrent();
+      };
+      attempt().then(() => {
+        if (pendingSyncIds.has(messageId) && onReconnect) {
+          stopReconnectRetry = onReconnect(() => { attempt(); });
+        }
+      });
     }
 
     async function refreshTicks(messages) {
@@ -2488,21 +2551,38 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
         // comment for how this closes the "attachment is the one
         // unencrypted part of an E2E thread" gap.
         const assetId = crypto.randomUUID();
-        const meta = await services.assets.upload(spaceId, assetId, pendingFile, { readerPubs: readerPubsForEncryption });
+        // Progress while chunks write to the LOCAL QuStore (see
+        // AssetService.upload()'s `onProgress` doc comment) - without this,
+        // a large attachment (e.g. a video) left the pending-attachment
+        // chip sitting there unchanged for however long the upload took,
+        // with no feedback that anything was happening at all.
+        renderUploadProgress(pendingAttachmentEl, pendingFile, 0);
+        const meta = await services.assets.upload(spaceId, assetId, pendingFile, {
+          readerPubs: readerPubsForEncryption,
+          onProgress: (fraction) => renderUploadProgress(pendingAttachmentEl, pendingFile, fraction),
+        });
         extra.attachment = { assetId, name: meta.name, mime: meta.mime, size: meta.size };
+        // The file is now durably in the LOCAL QuStore (per the user's own
+        // spec: dismiss the pending-upload chip once THAT'S true, not once
+        // the whole message - including relay confirmation - is done) -
+        // clear it here, before postMessage() below, rather than after.
+        pendingFile = null;
+        fileInput.value = '';
+        pendingAttachmentEl.hidden = true;
       }
 
+      // pendingFile/fileInput/pendingAttachmentEl are already cleared above
+      // when there WAS an attachment (dismissed the moment the upload
+      // confirmed into the local QuStore); when there wasn't one, they're
+      // already at their default cleared state - nothing left to reset here.
       const replyToId = replyTo?.id ?? null;
-      pendingFile = null;
-      fileInput.value = '';
-      pendingAttachmentEl.hidden = true;
       replyTo = null;
       renderComposerBanner();
 
       const posted = await services.threads.postMessage(spaceId, threadId, { body, replyTo: replyToId, extra });
       pendingSyncIds.add(posted.id);
       await reload({ forceScrollBottom: true });
-      confirmSync(posted.id, paths.threadMessagePath(spaceId, threadId, posted.id));
+      confirmSync(posted.id, paths.threadMessagePath(spaceId, threadId, posted.id), posted.ts);
     });
 
     input.addEventListener('keydown', (event) => {
