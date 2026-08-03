@@ -12,7 +12,7 @@
  * button has something to talk to.
  */
 import { QuRuntime, IndexedDBAdapter } from '@qu/runtime';
-import { DocumentEngine, CollectionEngine, AssetEngine } from '@qu/engines';
+import { DocumentEngine, CollectionEngine, AssetEngine, AccessEngine } from '@qu/engines';
 import { QuIdentityEngine } from '@qu/identity';
 import { SyncEngine, WebSocketClientTransport } from '@qu/sync';
 import { createServices, paths } from '@qu/services';
@@ -24,6 +24,7 @@ const runtime = new QuRuntime({ storeAdapter: new IndexedDBAdapter('qu-demo-stor
 const qu = runtime.core;
 qu.mount('blob', new IndexedDBAdapter('qu-demo-blob'));
 
+new AccessEngine(qu);
 new DocumentEngine(qu);
 new CollectionEngine(qu);
 const assetEngine = new AssetEngine(qu);
