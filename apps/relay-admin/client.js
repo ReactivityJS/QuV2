@@ -45,6 +45,16 @@ const DICT = {
     defaultLocale: 'Default language for new visitors',
     rateLimit: 'Max messages per connection per minute (0 = unlimited)',
     disabledApps: 'Apps',
+    flagTypes: 'Flag types',
+    flagTypeId: 'Id',
+    flagTypeLabel: 'Label',
+    flagTypeIcon: 'Icon',
+    flagTypeMode: 'Mode',
+    flagTypeModePrivate: 'Private list',
+    flagTypeModePublic: 'Public counter',
+    flagTypeEntityKinds: 'Applies to (comma-separated)',
+    addFlagType: '+ Add flag type',
+    removeFlagType: 'Remove',
     save: 'Save',
     saved: 'Saved',
     saveError: 'Could not save: {message}',
@@ -79,6 +89,16 @@ const DICT = {
     defaultLocale: 'Standardsprache für neue Besucher',
     rateLimit: 'Max. Nachrichten pro Verbindung pro Minute (0 = unbegrenzt)',
     disabledApps: 'Apps',
+    flagTypes: 'Flag-Typen',
+    flagTypeId: 'Id',
+    flagTypeLabel: 'Label',
+    flagTypeIcon: 'Icon',
+    flagTypeMode: 'Modus',
+    flagTypeModePrivate: 'Private Liste',
+    flagTypeModePublic: 'Öffentlicher Zähler',
+    flagTypeEntityKinds: 'Gilt für (Komma-getrennt)',
+    addFlagType: '+ Flag-Typ hinzufügen',
+    removeFlagType: 'Entfernen',
     save: 'Speichern',
     saved: 'Gespeichert',
     saveError: 'Konnte nicht gespeichert werden: {message}',
@@ -118,6 +138,13 @@ const STYLE = `
   .qu-admin-form input, .qu-admin-form select { padding: 0.3rem; }
   .qu-admin-app-toggles { display: flex; flex-direction: column; gap: 0.3rem; }
   .qu-admin-app-toggles label { flex-direction: row; align-items: center; gap: 0.5rem; }
+  .qu-admin-flag-types { display: flex; flex-direction: column; gap: 0.5rem; max-width: none; }
+  .qu-admin-flag-type-row { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+  .qu-admin-flag-type-row input { padding: 0.3rem; }
+  .qu-admin-flag-type-row input[data-field="id"], .qu-admin-flag-type-row input[data-field="label"] { width: 7rem; }
+  .qu-admin-flag-type-row input[data-field="icon"] { width: 3rem; }
+  .qu-admin-flag-type-row input[data-field="entityKinds"] { flex: 1; min-width: 10rem; }
+  .qu-admin-flag-type-row select { padding: 0.3rem; }
   .qu-admin-status { opacity: 0.7; font-size: 0.85em; }
   .qu-admin-error { color: #c00; font-size: 0.9em; }
   .qu-admin-controls { display: flex; gap: 0.6rem; align-items: flex-end; flex-wrap: wrap; margin-bottom: 0.5rem; }
@@ -172,7 +199,7 @@ export function mount(container, { services }) {
 /**
  * @param {ReturnType<import('@qu/services').createServices>} services
  * @param {Array<object>} apps - from `/apps.json` (see apps-catalog.js) - every LOADED app, `enabled: false` for ones already disabled.
- * @param {{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[]}} settings
+ * @param {{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>}} settings
  */
 function settingsForm(services, apps, settings) {
   const form = document.createElement('form');
@@ -219,6 +246,74 @@ function settingsForm(services, apps, settings) {
   }
   form.append(appsHeading, appsEl);
 
+  // Flag types (see @qu/services' FlagService) - a free-form, add/remove
+  // row editor rather than a fixed form: unlike locale/rate-limit/app-
+  // toggles (all bounded by an already-known catalog), the SET of flag
+  // types itself is exactly what's being edited here, so the UI has to let
+  // an admin add/remove rows, not just fill in fixed fields.
+  const flagTypesHeading = document.createElement('span');
+  flagTypesHeading.textContent = t('flagTypes');
+  const flagTypesEl = document.createElement('div');
+  flagTypesEl.className = 'qu-admin-flag-types';
+  const flagTypeRows = []; // [{id, label, icon, mode, entityKinds}: HTMLInputElement/HTMLSelectElement]
+
+  function flagTypeRow(entry) {
+    const row = document.createElement('div');
+    row.className = 'qu-admin-flag-type-row';
+
+    const idInput = document.createElement('input');
+    idInput.dataset.field = 'id';
+    idInput.placeholder = t('flagTypeId');
+    idInput.value = entry?.id ?? '';
+
+    const labelInput = document.createElement('input');
+    labelInput.dataset.field = 'label';
+    labelInput.placeholder = t('flagTypeLabel');
+    labelInput.value = entry?.label ?? '';
+
+    const iconInput = document.createElement('input');
+    iconInput.dataset.field = 'icon';
+    iconInput.placeholder = t('flagTypeIcon');
+    iconInput.value = entry?.icon ?? '';
+
+    const modeSelect = document.createElement('select');
+    modeSelect.dataset.field = 'mode';
+    for (const [value, labelKey] of [['private', 'flagTypeModePrivate'], ['public', 'flagTypeModePublic']]) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = t(labelKey);
+      if ((entry?.mode ?? 'private') === value) option.selected = true;
+      modeSelect.appendChild(option);
+    }
+
+    const entityKindsInput = document.createElement('input');
+    entityKindsInput.dataset.field = 'entityKinds';
+    entityKindsInput.placeholder = t('flagTypeEntityKinds');
+    entityKindsInput.value = (entry?.entityKinds ?? []).join(', ');
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.textContent = t('removeFlagType');
+    removeBtn.addEventListener('click', () => {
+      row.remove();
+      flagTypeRows.splice(flagTypeRows.indexOf(rowRefs), 1);
+    });
+
+    row.append(idInput, labelInput, iconInput, modeSelect, entityKindsInput, removeBtn);
+    const rowRefs = { id: idInput, label: labelInput, icon: iconInput, mode: modeSelect, entityKinds: entityKindsInput };
+    flagTypeRows.push(rowRefs);
+    flagTypesEl.appendChild(row);
+  }
+
+  for (const entry of settings.flagTypes ?? []) flagTypeRow(entry);
+
+  const addFlagTypeBtn = document.createElement('button');
+  addFlagTypeBtn.type = 'button';
+  addFlagTypeBtn.textContent = t('addFlagType');
+  addFlagTypeBtn.addEventListener('click', () => flagTypeRow(null));
+
+  form.append(flagTypesHeading, flagTypesEl, addFlagTypeBtn);
+
   const saveBtn = document.createElement('button');
   saveBtn.type = 'submit';
   saveBtn.textContent = t('save');
@@ -236,6 +331,15 @@ function settingsForm(services, apps, settings) {
       defaultLocale: localeSelect.value,
       rateLimits: { maxMessagesPerMinute: Number(rateInput.value) || 0 },
       disabledApps: [...appToggles.entries()].filter(([, checkbox]) => !checkbox.checked).map(([name]) => name),
+      flagTypes: flagTypeRows
+        .map((r) => ({
+          id: r.id.value.trim(),
+          label: r.label.value.trim(),
+          icon: r.icon.value.trim(),
+          mode: r.mode.value,
+          entityKinds: r.entityKinds.value.split(',').map((k) => k.trim()).filter(Boolean),
+        }))
+        .filter((ft) => ft.id), // a row left blank (e.g. added then not filled in) is just dropped, not saved as a broken entry
     };
     try {
       const { actorPub, signature } = await services.actors.signPayload(newSettings);

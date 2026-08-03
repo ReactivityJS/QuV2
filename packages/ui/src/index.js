@@ -3,3 +3,4 @@ export { QuViewElement, QuBindElement, QuListElement, QuKeyElement, QuIfElement,
 export { renderSubpage } from './subpage.js';
 export { renderAvatar } from './avatar.js';
 export { injectStyle } from './style.js';
+export { renderFlagToggle } from './flag-toggle.js';

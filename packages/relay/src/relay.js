@@ -53,6 +53,20 @@ const DEFAULT_RELAY_SETTINGS = Object.freeze({
   defaultLocale: 'en',
   rateLimits: Object.freeze({ maxMessagesPerMinute: 0 }), // 0 = unlimited
   disabledApps: Object.freeze([]),
+  // Admin-editable Flag TYPE catalog (see @qu/services' FlagService) - what
+  // a "flag" even IS (Like/Bookmark/Favorite, which entity kinds it applies
+  // to, whether it's a private list or a public counter) is data, not code,
+  // same reasoning as `disabledApps`. Shipped with sane defaults so
+  // bookmarking/favoriting works out of the box with zero admin action;
+  // `favorite` here is descriptive only (FavoritesService/ContactsService
+  // already implement it, unconditionally, regardless of this list - see
+  // FlagService's own doc comment for why removing it here wouldn't
+  // actually disable app/user favoriting).
+  flagTypes: Object.freeze([
+    Object.freeze({ id: 'favorite', label: 'Favorite', icon: '⭐', mode: 'private', entityKinds: Object.freeze(['app', 'user']) }),
+    Object.freeze({ id: 'bookmark', label: 'Bookmark', icon: '🔖', mode: 'private', entityKinds: Object.freeze(['forum-thread', 'user']) }),
+    Object.freeze({ id: 'like', label: 'Like', icon: '👍', mode: 'public', entityKinds: Object.freeze(['thread-message']) }),
+  ]),
 });
 
 /**
@@ -260,7 +274,7 @@ export class QuRelay {
     return this;
   }
 
-  /** @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[]}>} Always fully populated - missing fields fall back to DEFAULT_RELAY_SETTINGS. */
+  /** @returns {Promise<{defaultLocale: string, rateLimits: {maxMessagesPerMinute: number}, disabledApps: string[], flagTypes: Array<{id: string, label: string, icon: string, mode: string, entityKinds: string[]}>}>} Always fully populated - missing fields fall back to DEFAULT_RELAY_SETTINGS. */
   async #getSettings() {
     const stored = await this.core.get(RELAY_SETTINGS_PATH);
     const val = stored?.val ?? {};

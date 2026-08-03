@@ -23,7 +23,7 @@
 import { createI18n, getStoredLocale, setLocale, AVAILABLE_LOCALES } from '@qu/i18n';
 import { watch } from '@qu/reactive';
 import { actorPath, QuIdentityEngine } from '@qu/identity';
-import { renderAvatar, injectStyle } from '@qu/ui';
+import { renderAvatar, injectStyle, renderFlagToggle } from '@qu/ui';
 import { renderQrCode, startCamera, scanQrFromVideo } from '@qu/qr';
 
 const DICT = {
@@ -50,6 +50,8 @@ const DICT = {
     notificationSettings: 'Notification settings →',
     addContact: 'Add contact',
     removeContact: 'Remove contact',
+    bookmark: 'Bookmark this profile',
+    bookmarked: 'Bookmarked — click to remove',
     message: '💬 Message',
     backupTitle: 'Identity backup & devices',
     backupIntro: 'Use this to set up the SAME identity on another device, back it up, or remove it from this one.',
@@ -98,6 +100,8 @@ const DICT = {
     notificationSettings: 'Benachrichtigungseinstellungen →',
     addContact: 'Kontakt hinzufügen',
     removeContact: 'Kontakt entfernen',
+    bookmark: 'Profil merken',
+    bookmarked: 'Gemerkt — Klick zum Entfernen',
     message: '💬 Nachricht',
     backupTitle: 'Identitätssicherung & Geräte',
     backupIntro: 'Damit richtest du dieselbe Identität auf einem anderen Gerät ein, sicherst sie, oder entfernst sie von diesem Gerät.',
@@ -607,6 +611,10 @@ async function renderPublicProfile(container, services, targetPub, isStopped) {
     renderContactBtn();
   });
   actions.appendChild(contactBtn);
+  actions.appendChild(renderFlagToggle({
+    flags: services.flags, flagType: 'bookmark', entityKind: 'user', entityRef: targetPub,
+    icon: '🔖', title: t('bookmark'), activeTitle: t('bookmarked'),
+  }));
   container.appendChild(actions);
 }
 
