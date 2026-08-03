@@ -88,6 +88,9 @@ export function flagPath(spaceId, flagType, entityKind, entityRef, actorPub) {
  */
 export function flagCollectionId(flagType, entityKind, entityRef) {
   return `flag-${flagType}-${entityKind}-${entityRef}`;
+}
+
+/**
  * The ACL descriptor path for a resource - deliberately a SIBLING of the
  * resource's own path (`acl/<kind>/<id>`), not nested inside it, so
  * @qu/engines' AccessEngine can gate a write without knowing anything about

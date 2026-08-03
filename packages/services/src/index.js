@@ -67,8 +67,7 @@ export { formatActorLabel, matchesActorQuery } from './actor-format.js';
  *   Omitting it (but providing `syncFetch`) still gets the miss-only
  *   backfill every Service already had; omitting both is the old,
  *   local-only behavior.
- * @returns {{documents: DocumentService, collections: CollectionService, assets: AssetService, actors: ActorService, starred: StarredService, flags: FlagService, threads: ThreadService, favorites: FavoritesService, contacts: ContactsService, directory: DirectoryService, cms: CmsService, profile: ProfileService}}
- * @returns {{documents: DocumentService, collections: CollectionService, assets: AssetService, actors: ActorService, starred: StarredService, access: AccessService, threads: ThreadService, favorites: FavoritesService, contacts: ContactsService, directory: DirectoryService, cms: CmsService, profile: ProfileService}}
+ * @returns {{documents: DocumentService, collections: CollectionService, assets: AssetService, actors: ActorService, starred: StarredService, flags: FlagService, access: AccessService, threads: ThreadService, favorites: FavoritesService, contacts: ContactsService, directory: DirectoryService, cms: CmsService, profile: ProfileService}}
  */
 export function createServices(qu, { assetEngine, identityEngine, syncFetch, getSyncGeneration }) {
   const collections = new CollectionService(qu, syncFetch, getSyncGeneration);

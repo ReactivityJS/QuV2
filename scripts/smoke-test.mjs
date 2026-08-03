@@ -24,16 +24,24 @@
  *      mail inbox from the SAME ThreadService, differing only by config -
  *      see THREAD_PRESETS), Favorites/Contacts (both built on
  *      StarredService), Directory visibility, and CMS pages.
- *   7. Push: VAPID JWT signing/verification and RFC 8291 payload encryption.
- *   8. The generic notification pipeline (ThreadService.notify() ->
+ *   7. Access control: @qu/engines' AccessEngine - a single, engine-agnostic
+ *      write-ACL enforced at the QuStore pipeline level for Documents,
+ *      Collections and Threads alike (a resource's ACL lives at a sibling
+ *      `acl/<kind>/<id>` path, see @qu/services' `paths.aclPath()`), plus
+ *      ThreadService mirroring `writers`/`readers` into this same
+ *      convention on createThread()/addReader()/removeReader() so an
+ *      already-deployed thread with no mirrored entry yet still falls back
+ *      correctly to its own `meta` document.
+ *   8. Push: VAPID JWT signing/verification and RFC 8291 payload encryption.
+ *   9. The generic notification pipeline (ThreadService.notify() ->
  *      @qu/relay's #deliverThreadPush() -> the recipient's own notifications
  *      Thread) using the exact space convention apps/geochase/client.js's
  *      invite flow uses, proving a non-Thread-native app gets a properly
  *      labeled, deep-linked notification "for free" the same way Calendar's
  *      invite flow already did.
- *   9. Mounts and actions: actionsForMount()/resolveActionHref() (the
+ *  10. Mounts and actions: actionsForMount()/resolveActionHref() (the
  *      Contact List / Chat "contact-row" pattern).
- *  10. Sync freshness/reconnect catch-up: a message posted while a peer
+ *  11. Sync freshness/reconnect catch-up: a message posted while a peer
  *      genuinely wasn't connected (transport closed, then reconnected) is
  *      NOT delivered by subscribe() alone, but IS picked up by @qu/services'
  *      background-refresh-on-reconnect mechanism (see
@@ -42,60 +50,60 @@
  *      show up even after reconnecting", covering every Service built on
  *      DocumentService/CollectionService/ThreadService (Chat, Calendar, Geo
  *      Chase, Forum, Todo, ...), not just one app.
- *  11. Sync outbox: a write made while genuinely offline (not just a
+ *  12. Sync outbox: a write made while genuinely offline (not just a
  *      mid-session drop - a full "reload", i.e. the old SyncEngine/transport
  *      pair and its in-memory send queue are discarded) is still delivered
  *      to the relay once a new connection is established, and the outbox
  *      entry is cleared once the relay acknowledges it (see @qu/sync's
  *      outbox.js and SyncEngine's `sync-ack` handling).
- *  12. Reciprocal prefix catch-up AT THE SyncEngine LEVEL (not via any
- *      Service-level freshness tracker, unlike #10): SyncEngine's own
+ *  13. Reciprocal prefix catch-up AT THE SyncEngine LEVEL (not via any
+ *      Service-level freshness tracker, unlike #11): SyncEngine's own
  *      reconnect hook asks the relay for everything under each subscribed
  *      prefix and merges it, so a plain `qu.get()` (no Service, no
  *      backgroundRefresh call) already sees a write missed while offline.
- *  13. Assets: per-chunk content-hash verification rejects a
+ *  14. Assets: per-chunk content-hash verification rejects a
  *      corrupted/tampered chunk instead of silently reassembling it, and
  *      re-uploading an unchanged file resumes by skipping chunks already
  *      present with matching content (see AssetEngine's chunkHashes).
- *  14. ThreadService freshness: read receipts, reactions, and the private
+ *  15. ThreadService freshness: read receipts, reactions, and the private
  *      per-identity read-marker (markRead/getLastReadAt) each now
  *      self-correct via syncFetch-on-miss/backgroundRefresh-on-hit, closing
  *      a real multi-device bug report where these three specifically never
  *      synced to a second device/session without several manual reloads.
- *  15. Private read-marker (markRead) syncs across two "devices" SHARING ONE
- *      IDENTITY (unlike #14, which is two different identities), without
+ *  16. Private read-marker (markRead) syncs across two "devices" SHARING ONE
+ *      IDENTITY (unlike #15, which is two different identities), without
  *      subscribe() - the same private-per-actor path, but the read side
  *      this time is a second session logged into the identical identity.
- *  16. SyncEngine.waitForAck(): resolves once a peer's `sync-ack` confirms a
+ *  17. SyncEngine.waitForAck(): resolves once a peer's `sync-ack` confirms a
  *      specific write was durably persisted (including the race where the
  *      ack arrives before the call), and times out - rather than hanging or
  *      resolving incorrectly - for a write that was never acknowledged.
- *  17. Identity backup/transfer: QuIdentityEngine.exportSeedCode() ->
+ *  18. Identity backup/transfer: QuIdentityEngine.exportSeedCode() ->
  *      importSeedCode() reconstructs the SAME identity (same derived main
  *      keypair) in a fresh store, the cross-device mechanism
  *      apps/profile/client.js's backup section and apps/shell's onboarding
  *      screen both build their UI around - plus the overwrite guard
  *      (rejects a conflicting import without { overwrite: true }) and
  *      malformed-code rejection.
- *  18. @qu/qr: encodeToImageData() -> decodeFromImageData() round-trips a
+ *  19. @qu/qr: encodeToImageData() -> decodeFromImageData() round-trips a
  *      real payload-shaped string (the exact shape exportSeedCode()
  *      produces) through actual QR encoding/decoding - no browser/DOM
  *      needed, see that package's own doc comment for why.
- *  19. Cross-device data recovery: a SECOND client that imports device A's
+ *  20. Cross-device data recovery: a SECOND client that imports device A's
  *      backup code must not just derive the same keypair - its
  *      OWN alias/avatar/epub (ProfileService.getOwnProfile()) and starred
  *      items (StarredService, e.g. Favorites) must actually show up too,
  *      by backfilling from the relay rather than starting blank. Both had
  *      NO backfill at all before this section existed (found from a real
- *      user report after #17 shipped: "epub and alias/favorites don't
+ *      user report after #18 shipped: "epub and alias/favorites don't
  *      transfer") - this is the regression test for that fix.
- *  20. Hooks: @qu/foundation's HookBus - run() sequentially transforms a
+ *  21. Hooks: @qu/foundation's HookBus - run() sequentially transforms a
  *      payload through every registered handler (the contract
  *      @qu/thread-ui's mountThreadView() relies on for
  *      'thread.beforePostMessage'), notify() fires side-effect listeners
  *      in parallel without one throwing handler blocking the others (the
  *      contract 'thread.afterPostMessage' relies on).
- *  21. Flags: @qu/services' FlagService - private mode stays isolated per
+ *  22. Flags: @qu/services' FlagService - private mode stays isolated per
  *      entity kind for the SAME flagType/entityRef (proving
  *      `paths.flagPath()`'s namespacing actually separates them), with the
  *      pre-existing 'apps'/'contacts' StarredService namespaces preserved
@@ -115,7 +123,7 @@
  * (camera-based QR scanning in particular - `getUserMedia`/`<video>` have
  * no meaningful Node equivalent), and IndexedDBAdapter.destroy() (there is
  * no `indexedDB` global in Node) - the identity/QR *logic* those UIs are
- * built on is what sections 17-18 above actually verify.
+ * built on is what sections 18-19 above actually verify.
  */
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
