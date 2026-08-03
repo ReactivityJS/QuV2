@@ -1,20 +1,25 @@
-const NAMESPACE = 'contacts';
+const FLAG_TYPE = 'favorite';
+const ENTITY_KIND = 'user';
 
 /**
- * CONTACTS SERVICE — "people I know", the exact same starred-list shape
- * FavoritesService uses, just namespaced for actor pubkeys instead of app
- * ids, with each entry resolved against its public profile for display.
- * Mirrors the real Qu's `modules/contacts.js`, documented there as "a thin
- * wrapper over starred.js's generic mechanism, the exact same shape
- * favorited apps need" - this is that same reuse, one layer up.
+ * CONTACTS SERVICE — "people I know", flagType `'favorite'` on entityKind
+ * `'user'` over the universal `FlagService` (see that file's own doc
+ * comment) - the same "favoriting a user" concept `FavoritesService` is
+ * for apps, one layer up, with each entry resolved against its public
+ * profile for display. Mirrors the real Qu's `modules/contacts.js`,
+ * documented there as "a thin wrapper over starred.js's generic mechanism,
+ * the exact same shape favorited apps need" - `FlagService`'s
+ * legacy-namespace mapping keeps this on StarredService's original
+ * `'contacts'` namespace, so existing users' contacts are unaffected by
+ * this being a facade now rather than a direct `StarredService` wrapper.
  */
 export class ContactsService {
   /**
-   * @param {import('./starred-service.js').StarredService} starredService
+   * @param {import('./flag-service.js').FlagService} flagService
    * @param {import('@qu/identity').QuIdentityEngine} identityEngine
    */
-  constructor(starredService, identityEngine) {
-    this.starred = starredService;
+  constructor(flagService, identityEngine) {
+    this.flags = flagService;
     this.identity = identityEngine;
   }
 
@@ -24,12 +29,12 @@ export class ContactsService {
    * @returns {Promise<Array<object>>}
    */
   async addContact(actorPub, data = {}) {
-    return this.starred.star(NAMESPACE, actorPub, data);
+    return this.flags.setPrivate(FLAG_TYPE, ENTITY_KIND, actorPub, true, data);
   }
 
   /** @param {string} actorPub @returns {Promise<Array<object>>} */
   async removeContact(actorPub) {
-    return this.starred.unstar(NAMESPACE, actorPub);
+    return this.flags.setPrivate(FLAG_TYPE, ENTITY_KIND, actorPub, false);
   }
 
   /**
@@ -38,7 +43,7 @@ export class ContactsService {
    *   they haven't published one, or it no longer verifies).
    */
   async listContacts() {
-    const starred = await this.starred.list(NAMESPACE);
+    const starred = await this.flags.listPrivate(FLAG_TYPE, ENTITY_KIND);
     return Promise.all(
       starred.map(async ({ id, starredAt, ...data }) => ({
         actorPub: id,
@@ -51,6 +56,6 @@ export class ContactsService {
 
   /** @param {string} actorPub @returns {Promise<boolean>} */
   async isContact(actorPub) {
-    return this.starred.isStarred(NAMESPACE, actorPub);
+    return this.flags.hasPrivate(FLAG_TYPE, ENTITY_KIND, actorPub);
   }
 }

@@ -69,3 +69,23 @@ export function threadPinsCollectionId(threadId) {
 export function threadReadMarkerPath(spaceId, threadId, actorPub) {
   return `/store/actors/~${actorPub}/private/thread-read/${spaceId}/${threadId}`;
 }
+
+/**
+ * @param {string|number} spaceId @param {string} flagType @param {string} entityKind
+ * @param {string} entityRef @param {string} actorPub
+ * @returns {string} One actor's own signed slot for a PUBLIC flag (see
+ *   FlagService) - same "own path per actor" shape as
+ *   `threadReactionsCollectionId()`'s reaction slots, generalized beyond
+ *   threads to any entity kind.
+ */
+export function flagPath(spaceId, flagType, entityKind, entityRef, actorPub) {
+  return `/store/${spaceId}/flags/${flagType}/${entityKind}/${entityRef}/${actorPub}`;
+}
+
+/**
+ * @param {string} flagType @param {string} entityKind @param {string} entityRef
+ * @returns {string} The CollectionService collectionId enumerating every actor's flagPath() for one entity.
+ */
+export function flagCollectionId(flagType, entityKind, entityRef) {
+  return `flag-${flagType}-${entityKind}-${entityRef}`;
+}
