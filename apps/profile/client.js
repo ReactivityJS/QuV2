@@ -23,7 +23,7 @@
 import { createI18n, getStoredLocale, setLocale } from '@qu/i18n';
 import { watch } from '@qu/reactive';
 import { actorPath, QuIdentityEngine } from '@qu/identity';
-import { renderAvatar } from '@qu/ui';
+import { renderAvatar, injectStyle } from '@qu/ui';
 import { renderQrCode, startCamera, scanQrFromVideo } from '@qu/qr';
 
 /** Locales every app's dictionary in this codebase actually ships - see @qu/i18n's own doc comment for why this is a device preference, not per-identity. */
@@ -167,16 +167,9 @@ const STYLE = `
   .qu-profile-backup-danger { color: #c0392b; border-color: #c0392b88; }
 `;
 
-function ensureStyle() {
-  if (document.getElementById(STYLE_ID)) return;
-  const style = document.createElement('style');
-  style.id = STYLE_ID;
-  style.textContent = STYLE;
-  document.head.appendChild(style);
-}
 
 export function mount(container, { qu, services, segments, wipeIdentity }) {
-  ensureStyle();
+  injectStyle(STYLE_ID, STYLE);
   let stopped = false;
   let stopWatch = null;
 

@@ -32,6 +32,7 @@
  * signatures/encryption untouched), the same shape a fresh export produces.
  */
 import { createI18n } from '@qu/i18n';
+import { injectStyle } from '@qu/ui';
 
 const DICT = {
   en: {
@@ -137,16 +138,9 @@ const STYLE = `
   .qu-admin-entry-decrypted { border-left: 3px solid #3ea05e; }
 `;
 
-function ensureStyle() {
-  if (document.getElementById(STYLE_ID)) return;
-  const style = document.createElement('style');
-  style.id = STYLE_ID;
-  style.textContent = STYLE;
-  document.head.appendChild(style);
-}
 
 export function mount(container, { services }) {
-  ensureStyle();
+  injectStyle(STYLE_ID, STYLE);
   let stopped = false;
 
   (async () => {

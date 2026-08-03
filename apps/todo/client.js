@@ -21,6 +21,7 @@
 import { paths } from '@qu/services';
 import { watch } from '@qu/reactive';
 import { createI18n } from '@qu/i18n';
+import { injectStyle } from '@qu/ui';
 
 const NAMESPACE = 'todo-lists';
 
@@ -69,16 +70,9 @@ const STYLE = `
   .qu-todo-items li button { background: none; border: none; cursor: pointer; opacity: 0.6; }
 `;
 
-function ensureStyle() {
-  if (document.getElementById(STYLE_ID)) return;
-  const style = document.createElement('style');
-  style.id = STYLE_ID;
-  style.textContent = STYLE;
-  document.head.appendChild(style);
-}
 
 export function mount(container, { qu, services, segments, subscribe }) {
-  ensureStyle();
+  injectStyle(STYLE_ID, STYLE);
   let stopped = false;
   let unwatch = null;
 
@@ -143,7 +137,7 @@ export function mount(container, { qu, services, segments, subscribe }) {
 
   async function renderList(id) {
     const spaceId = `todo-${id}`;
-    subscribe(`/store/${spaceId}`);
+    subscribe(paths.spacePath(spaceId));
     let autoStarChecked = false;
 
     container.textContent = '';

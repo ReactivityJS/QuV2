@@ -43,7 +43,7 @@ import { paths, THREAD_PRESETS } from '@qu/services';
 import { mountThreadView } from '@qu/thread-ui';
 import { createI18n } from '@qu/i18n';
 import { watch } from '@qu/reactive';
-import { renderSubpage, renderAvatar } from '@qu/ui';
+import { renderSubpage, renderAvatar, injectStyle } from '@qu/ui';
 
 const SPACE = 'forum';
 const TOPICS_COLLECTION = 'topics';
@@ -122,14 +122,6 @@ const STYLE = `
   .qu-forum-app .qu-subpage-back:hover { opacity: 1; }
 `;
 
-function ensureStyle() {
-  if (document.getElementById(STYLE_ID)) return;
-  const style = document.createElement('style');
-  style.id = STYLE_ID;
-  style.textContent = STYLE;
-  document.head.appendChild(style);
-}
-
 // Default channel swatch color when none is picked - same hash-to-palette
 // approach as @qu/ui's own avatar coloring, kept local (not exported by
 // @qu/ui) since a channel id isn't a profile avatar.
@@ -151,7 +143,7 @@ function fmtTime(ts) {
 }
 
 export function mount(container, { qu, services, segments, subscribe, fetch: syncFetch }) {
-  ensureStyle();
+  injectStyle(STYLE_ID, STYLE);
   container.classList.add('qu-forum-app');
   let stopped = false;
   let stopThreadView = null;
@@ -162,7 +154,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
   // a topic someone else posted to) need this - the shell's own default
   // subscriptions (see apps/shell/src/main.js) only cover its own chrome
   // needs, not any individual app's space.
-  subscribe(`/store/${SPACE}`);
+  subscribe(paths.spacePath(SPACE));
 
   const route = parseRoute(segments);
 

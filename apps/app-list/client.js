@@ -7,6 +7,7 @@
  * FavoritesService, neither owns the favorite list.
  */
 import { createI18n } from '@qu/i18n';
+import { injectStyle } from '@qu/ui';
 
 const DICT = {
   en: { title: 'App List', empty: 'No mountable apps loaded on this relay yet.' },
@@ -22,13 +23,6 @@ const STYLE = `
   .qu-app-list button { background: none; border: none; cursor: pointer; font-size: 1.1em; }
 `;
 
-function ensureStyle() {
-  if (document.getElementById(STYLE_ID)) return;
-  const style = document.createElement('style');
-  style.id = STYLE_ID;
-  style.textContent = STYLE;
-  document.head.appendChild(style);
-}
 
 /** Same "mountable, not explicitly disabled" filter + navOrder sort the shell's own nav uses (see apps/shell/src/nav.js) - small enough to keep local rather than importing across an app boundary. */
 function mountableApps(manifests) {
@@ -38,7 +32,7 @@ function mountableApps(manifests) {
 }
 
 export function mount(container, { services }) {
-  ensureStyle();
+  injectStyle(STYLE_ID, STYLE);
   let stopped = false;
 
   (async () => {

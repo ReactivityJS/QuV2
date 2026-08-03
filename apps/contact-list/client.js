@@ -24,7 +24,8 @@
  */
 import { createI18n } from '@qu/i18n';
 import { actionsForMount, resolveActionHref } from '@qu/foundation';
-import { renderAvatar } from '@qu/ui';
+import { renderAvatar, injectStyle } from '@qu/ui';
+import { formatActorLabel, matchesActorQuery } from '@qu/services';
 
 const DICT = {
   en: {
@@ -55,18 +56,11 @@ const STYLE = `
   .qu-contact-list .qu-contact-action { text-decoration: none; font-size: 1.1em; }
 `;
 
-function ensureStyle() {
-  if (document.getElementById(STYLE_ID)) return;
-  const style = document.createElement('style');
-  style.id = STYLE_ID;
-  style.textContent = STYLE;
-  document.head.appendChild(style);
-}
 
 const CONTACT_ROW_MOUNT = 'contact-row';
 
 export function mount(container, { services, apps }) {
-  ensureStyle();
+  injectStyle(STYLE_ID, STYLE);
   let stopped = false;
   let filterText = '';
   let contacts = [];
@@ -88,9 +82,7 @@ export function mount(container, { services, apps }) {
   container.append(heading, search, resultsEl);
 
   function matches({ actorPub, profile }) {
-    const q = filterText.trim().toLowerCase();
-    if (!q) return true;
-    return (profile?.alias || '').toLowerCase().includes(q) || actorPub.toLowerCase().includes(q);
+    return matchesActorQuery(actorPub, profile, filterText);
   }
 
   function renderResults() {
@@ -138,7 +130,7 @@ export function mount(container, { services, apps }) {
 
 function row({ actorPub, profile }, services, refresh, rowActions) {
   const li = document.createElement('li');
-  const alias = profile?.alias ?? `~${actorPub.slice(0, 16)}…`;
+  const alias = formatActorLabel(actorPub, profile);
   li.appendChild(renderAvatar(actorPub, alias, profile?.avatar, { size: '2.2rem' }));
   const name = document.createElement('a');
   name.className = 'qu-contact-name';
