@@ -9,8 +9,8 @@
   "navOrder": 14,
   "requires": ["document-service", "collection-service", "thread-service"],
   "pushActions": [
-    { "id": "invite", "label": "Calendar invitations" },
-    { "id": "eventChange", "label": "Shared calendar changes" },
-    { "id": "guestInvite", "label": "Event invitations" }
+    { "id": "invite", "label": "Calendar invitations", "type": "create" },
+    { "id": "eventChange", "label": "Shared calendar changes", "type": "update" },
+    { "id": "guestInvite", "label": "Event invitations", "type": "create" }
   ]
 }

@@ -9,8 +9,8 @@
   "navOrder": 11,
   "requires": ["document-service", "collection-service", "thread-service"],
   "pushActions": [
-    { "id": "newMessage", "label": "New messages" },
-    { "id": "mention", "label": "Mentions" }
+    { "id": "newMessage", "label": "New messages", "type": "create" },
+    { "id": "mention", "label": "Mentions", "type": "mention" }
   ],
   "actions": [
     { "mount": "contact-row", "id": "chat", "label": "Chat", "icon": "💬", "hrefTemplate": "#/chat/{pub}" }

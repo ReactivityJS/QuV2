@@ -112,6 +112,17 @@
  *      mode's signed per-actor counter (Like) backfills its count and actor
  *      list to a session that never subscribed, the same syncFetch-on-miss
  *      pattern ThreadService's reactions already use.
+ *  23. Content formatting: @qu/services' formatMarkdown() (via the real
+ *      ThreadService.postMessage() pipeline) - code blocks/inline code,
+ *      spoilers, hashtags, mention rendering, and bare-URL auto-linking,
+ *      standalone and combined, plus a regression check that the
+ *      pre-existing bold/italic/markdown-link cases still render correctly.
+ *  24. Presence-aware push suppression: @qu/relay's #deliverThreadPush() -
+ *      an actor whose signed write the relay just verified is recorded as
+ *      "recently online" (SyncEngine's onPeerIdentified callback) and gets
+ *      no redundant web push for a subsequent @mention (in-app notification
+ *      still arrives), while a never-connected actor still gets the regular
+ *      web-push path - proving "online" doesn't accidentally suppress ALL pushes.
  *
  * NOT covered here (verified manually with Playwright during development,
  * not wired into this script to avoid adding a browser-automation
@@ -1251,6 +1262,195 @@ try {
     bob.sync.close(); bob.transport.close();
     carol.sync.close(); carol.transport.close();
     console.log('    OK - private flags stay isolated per entity kind (with legacy favorite/app compatibility preserved), and a public flag\'s signed count/actor list backfill correctly to a session that never subscribed');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Content formatting: formatMarkdown() pluggable transforms (code, spoiler, hashtag, mention, auto-link) via the real ThreadService pipeline');
+  // ---------------------------------------------------------------------
+  {
+    const { DocumentEngine, CollectionEngine, ThreadEngine } = await import('@qu/engines');
+    const { createServices, THREAD_PRESETS } = await import('@qu/services');
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    // Fully local, no relay needed - formatMarkdown() itself isn't part of
+    // @qu/services' public export surface (see thread-formatting.js's own
+    // doc comment: it's "the ONE place text becomes HTML"), so it's
+    // exercised the same way every real caller reaches it - through
+    // ThreadService.postMessage() on a 'markdown'-formatted thread, exactly
+    // like the existing QUniverse services section already does for the
+    // pre-existing bold/italic/markdown-link cases.
+    const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+    new DocumentEngine(rt.core);
+    new CollectionEngine(rt.core);
+    new ThreadEngine(rt.core);
+    const identity = new QuIdentityEngine(rt.core);
+    await identity.importMnemonic(identity.generateMnemonic());
+    const Qu = createServices(rt.core, { identityEngine: identity });
+
+    await Qu.threads.createThread('formatting-board', 'general', THREAD_PRESETS.forum());
+    async function render(body) {
+      const message = await Qu.threads.postMessage('formatting-board', 'general', { body });
+      return message.formattedHtml;
+    }
+
+    // Regression: the pre-existing bold/italic/markdown-link cases must still work.
+    assert.equal(await render('hi **all**'), 'hi <strong>all</strong>', 'bold must still render (regression)');
+    assert.equal(await render('a *word* here'), 'a <em>word</em> here', 'italic must still render (regression)');
+    assert.equal(
+      await render('[docs](https://example.com/docs)'),
+      '<a href="https://example.com/docs" rel="noopener noreferrer">docs</a>',
+      'markdown links must still render (regression)'
+    );
+
+    // New: fenced + inline code blocks, protected from every later transform.
+    assert.equal(
+      await render('```\nconst x = 1;\n```'),
+      '<pre class="qu-code-block"><code>const x = 1;\n</code></pre>',
+      'a fenced code block must render as <pre><code>'
+    );
+    assert.equal(
+      await render('check `a*b*c` here'),
+      'check <code class="qu-inline-code">a*b*c</code> here',
+      'inline code must render, and its `*` must NOT be reinterpreted as italic'
+    );
+
+    // New: spoiler.
+    assert.equal(
+      await render('the ending is ||he was dead all along||'),
+      'the ending is <span class="qu-spoiler">he was dead all along</span>',
+      'a spoiler must render as a marked span (click-to-reveal is UI, verified separately with Playwright)'
+    );
+
+    // New: hashtag, including the "not inside a URL fragment" guard.
+    assert.equal(
+      await render('great #news today'),
+      'great <span class="qu-hashtag">#news</span> today',
+      'a hashtag must render as a styled span'
+    );
+    assert.equal(
+      await render('see http://example.com/page#section'),
+      'see <a href="http://example.com/page#section" rel="noopener noreferrer">http://example.com/page#section</a>',
+      'a URL fragment must NOT be mistaken for a hashtag'
+    );
+
+    // New: mention rendering (extraction into `mentions` already existed - this is the new visual rendering).
+    const fakePub = 'testMentionPub1234567890AB';
+    assert.equal(
+      await render(`hey @${fakePub} check this out`),
+      `hey <a href="#/~${fakePub}" class="qu-mention">@${fakePub.slice(0, 10)}…</a> check this out`,
+      "a mention must render as a link to the actor's profile route"
+    );
+
+    // New: bare URL auto-linking (the same detectLinks() apps/chat now shares - see link-detect.js).
+    assert.equal(
+      await render('visit http://example.com now'),
+      'visit <a href="http://example.com" rel="noopener noreferrer">http://example.com</a> now',
+      'a bare URL must be auto-linked'
+    );
+
+    // Combination: everything at once, proving the fixed processing order
+    // doesn't let any one transform corrupt another's output.
+    const combo = await render(`\`\`\`\ncode\n\`\`\`\n||spoiler|| #tag @${fakePub} http://example.com **bold**`);
+    assert.ok(combo.includes('<pre class="qu-code-block"><code>code\n</code></pre>'), 'combo: code block survives alongside other formatting');
+    assert.ok(combo.includes('<span class="qu-spoiler">spoiler</span>'), 'combo: spoiler survives alongside other formatting');
+    assert.ok(combo.includes('<span class="qu-hashtag">#tag</span>'), 'combo: hashtag survives alongside other formatting');
+    assert.ok(combo.includes(`class="qu-mention">@${fakePub.slice(0, 10)}`), 'combo: mention survives alongside other formatting');
+    assert.ok(combo.includes('<a href="http://example.com" rel="noopener noreferrer">http://example.com</a>'), 'combo: auto-link survives alongside other formatting');
+    assert.ok(combo.includes('<strong>bold</strong>'), 'combo: bold survives alongside other formatting');
+
+    console.log('    OK - formatMarkdown() code/spoiler/hashtag/mention/auto-link all render correctly, standalone and combined, with no regression to the pre-existing bold/italic/markdown-link cases');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Presence-aware push suppression: a visibly online actor is skipped for redundant web push (in-app notification still arrives), a never-connected actor still gets the regular push path');
+  // ---------------------------------------------------------------------
+  {
+    const { DocumentEngine, CollectionEngine, ThreadEngine } = await import('@qu/engines');
+    const { createServices, THREAD_PRESETS } = await import('@qu/services');
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    async function connectClient() {
+      const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+      new DocumentEngine(rt.core);
+      new CollectionEngine(rt.core);
+      new ThreadEngine(rt.core);
+      const identity = new QuIdentityEngine(rt.core);
+      await identity.importMnemonic(identity.generateMnemonic());
+      const transport = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+      await transport.connect();
+      const sync = new SyncEngine(rt.core, transport, { publishAllTo: 'relay' });
+      const Qu = createServices(rt.core, { identityEngine: identity, syncFetch: (p) => sync.fetch(p) });
+      return { identity, sync, transport, Qu };
+    }
+
+    const onlineClient = await connectClient();
+    const onlinePub = await onlineClient.Qu.actors.whoAmI();
+    // A published profile is required for @qu/relay's #writeInAppNotification()
+    // to be able to encrypt the in-app notification FOR this recipient (see
+    // its own "resolveReaderXKeys...no published profile" failure otherwise)
+    // - unrelated to presence itself, just a prerequisite for the in-app
+    // notification assertion below to be reachable at all.
+    await onlineClient.Qu.actors.publishMainProfile({ name: 'OnlineActor' });
+    // NOTE: publishMainProfile() deliberately does NOT use `signWith` at the
+    // QuBit level (see identity.js's #publishProfileWithKeys - the signature
+    // lives inside `val.signature` instead, verified by readers by hand),
+    // so a synced profile write never has `quBit.sig`/`quBit.pub` and can
+    // never identify a peer via SyncEngine's onPeerIdentified callback. A
+    // real QuBit-level signed write (ThreadService.postMessage(), same as
+    // any real presence heartbeat) is what actually identifies a peer.
+    await onlineClient.Qu.threads.createThread('presence-check', 'general', THREAD_PRESETS.forum());
+    await onlineClient.Qu.threads.postMessage('presence-check', 'general', { body: 'hello from the online actor' });
+    await new Promise((r) => setTimeout(r, 200)); // let the signed write actually reach relayA and identify the peer
+
+    assert.ok(relayA.presenceByActor.has(onlinePub), "relayA should have passively recorded presence for an actor whose signed write it just verified (SyncEngine's onPeerIdentified callback)");
+    assert.ok(Date.now() - relayA.presenceByActor.get(onlinePub) < 5000, 'the recorded presence timestamp should be fresh');
+
+    // A "never connected" actor: a real identity, but relayA has never
+    // received a single signed write from it - relayA has no way to know
+    // it exists, let alone that it is online.
+    const offlineRt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+    const offlineIdentity = new QuIdentityEngine(offlineRt.core);
+    await offlineIdentity.importMnemonic(offlineIdentity.generateMnemonic());
+    const offlinePub = QuCrypto.toBase64Url((await offlineIdentity.getMainKey()).publicKey);
+    assert.equal(relayA.presenceByActor.has(offlinePub), false, 'relayA must not know about an actor it has never received a write from');
+
+    // Spy on listSubscriptionsFor(): #deliverThreadPush() only reaches it
+    // AFTER the presence check (`if (this.#isRecentlyOnline(actorPub))
+    // continue;` runs first - see relay.js), so which actorPubs it gets
+    // called for is a direct, observable proxy for "would a web push have
+    // been attempted", without needing to mock sendWebPush() or stand up a
+    // fake push endpoint.
+    const calledFor = [];
+    const originalListSubscriptionsFor = relayA.services.pushSubscriptions.listSubscriptionsFor.bind(relayA.services.pushSubscriptions);
+    relayA.services.pushSubscriptions.listSubscriptionsFor = async (actorPub) => {
+      calledFor.push(actorPub);
+      return originalListSubscriptionsFor(actorPub);
+    };
+
+    const posterClient = await connectClient();
+    await posterClient.Qu.threads.createThread('forum', 'presence-test', THREAD_PRESETS.forum());
+    await posterClient.Qu.threads.postMessage('forum', 'presence-test', { body: `hey @${onlinePub} and @${offlinePub} check this out` });
+    await new Promise((r) => setTimeout(r, 300)); // let the write sync to relayA and #deliverThreadPush() run
+
+    relayA.services.pushSubscriptions.listSubscriptionsFor = originalListSubscriptionsFor;
+
+    assert.ok(!calledFor.includes(onlinePub), 'a still-online actor must NOT reach the web-push subscription lookup at all - presence suppression must skip it');
+    assert.ok(calledFor.includes(offlinePub), 'a never-connected actor must still reach the regular web-push path - presence must not accidentally suppress ALL pushes');
+
+    // The in-app notification (the badge/header) must arrive for the online
+    // actor regardless - "online" only means "skip the redundant push",
+    // never "skip the notification itself".
+    onlineClient.sync.subscribe(`/store/notifications-${onlinePub}`);
+    let inAppMsgs = await onlineClient.Qu.threads.listMessages(`notifications-${onlinePub}`, 'notifications');
+    if (inAppMsgs.length === 0) {
+      await onlineClient.sync.fetch(`/store/notifications-${onlinePub}`);
+      inAppMsgs = await onlineClient.Qu.threads.listMessages(`notifications-${onlinePub}`, 'notifications');
+    }
+    assert.equal(inAppMsgs.length, 1, 'the online actor must still get the in-app notification even though the redundant web push was suppressed');
+
+    onlineClient.sync.close(); onlineClient.transport.close();
+    posterClient.sync.close(); posterClient.transport.close();
+    console.log('    OK - a visibly online actor is skipped for redundant web push (in-app notification still arrives), while a never-connected actor still gets the regular push path');
   }
 
   // ---------------------------------------------------------------------

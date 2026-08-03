@@ -49,6 +49,7 @@ export {
 export * as paths from './paths.js';
 export { unwrap, unwrapAll } from './unwrap.js';
 export { formatActorLabel, matchesActorQuery } from './actor-format.js';
+export { detectLinks } from './link-detect.js';
 
 /**
  * @param {import('@qu/core').QuCore} qu

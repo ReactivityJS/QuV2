@@ -9,6 +9,6 @@
   "navOrder": 12,
   "requires": ["document-service", "collection-service", "thread-service"],
   "pushActions": [
-    { "id": "newMessage", "label": "New mail" }
+    { "id": "newMessage", "label": "New mail", "type": "create" }
   ]
 }

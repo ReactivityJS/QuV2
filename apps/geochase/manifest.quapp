@@ -9,6 +9,6 @@
   "navOrder": 14,
   "requires": ["document-service", "collection-service", "thread-service"],
   "pushActions": [
-    { "id": "invite", "label": "Game invites" }
+    { "id": "invite", "label": "Game invites", "type": "create" }
   ]
 }
