@@ -31,7 +31,7 @@
  * exactly as exported (`QuStore.putSealed()` server-side - original
  * signatures/encryption untouched), the same shape a fresh export produces.
  */
-import { createI18n } from '@qu/i18n';
+import { createI18n, AVAILABLE_LOCALES } from '@qu/i18n';
 import { injectStyle } from '@qu/ui';
 
 const DICT = {
@@ -105,11 +105,6 @@ const DICT = {
   },
 };
 const { t } = createI18n(DICT);
-
-const AVAILABLE_LOCALES = [
-  { code: 'en', label: 'English' },
-  { code: 'de', label: 'Deutsch' },
-];
 
 const STYLE_ID = 'qu-relay-admin-style';
 const STYLE = `

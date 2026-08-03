@@ -40,8 +40,8 @@ import { registerServiceWorker, onUpdateAvailable, applyUpdate } from './pwa.js'
 import { listenForNotificationClicks } from '@qu/push-client';
 import { createDisclosureMenu, menuItem } from './menu.js';
 import { buildAppContextMenu } from './context-menu.js';
-import { t } from './i18n.js';
-import { getStoredLocale, setLocale } from '@qu/i18n';
+import { t, locale } from './i18n.js';
+import { getStoredLocale, setLocale, AVAILABLE_LOCALES } from '@qu/i18n';
 import { renderOnboarding } from './onboarding.js';
 
 const STORE_DB_NAME = 'quniverse-store';
@@ -225,6 +225,30 @@ class Shell {
     });
     onUpdateAvailable(() => { updateBtn.hidden = false; });
 
+    // Available everywhere, not just buried in Profile's settings section
+    // (see apps/profile/client.js's identical picker) - a first-run
+    // visitor's language choice shouldn't require finding their own
+    // profile page first. Same reload-on-change tradeoff as Profile's:
+    // @qu/i18n resolves each `createI18n()` call once per page load (see
+    // that package's own doc comment), so there's no live-retranslation
+    // mechanism to hook into instead.
+    const langSelect = document.createElement('select');
+    langSelect.className = 'qu-shell-lang';
+    langSelect.title = t('nav.language');
+    langSelect.setAttribute('aria-label', t('nav.language'));
+    const currentLocale = getStoredLocale() ?? locale;
+    for (const { code, label } of AVAILABLE_LOCALES) {
+      const option = document.createElement('option');
+      option.value = code;
+      option.textContent = label;
+      if (code === currentLocale) option.selected = true;
+      langSelect.appendChild(option);
+    }
+    langSelect.addEventListener('change', () => {
+      setLocale(langSelect.value);
+      location.reload();
+    });
+
     // Standalone bell - deliberately NOT inside headerMenu (the user wants
     // new-notification visibility at a glance, not one tap deep in a
     // hamburger menu). Links straight to the notification feed (Task #38);
@@ -266,7 +290,7 @@ class Shell {
       idAvatarEl = nextAvatar;
     });
 
-    header.append(brand, backBtn, forwardBtn, spacer, updateBtn, this.headerMenu.el, bellBtn, idLink);
+    header.append(brand, backBtn, forwardBtn, spacer, updateBtn, langSelect, this.headerMenu.el, bellBtn, idLink);
 
     this.toolbarEl = document.createElement('div');
     this.toolbarEl.className = 'qu-shell-toolbar';

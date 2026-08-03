@@ -40,6 +40,12 @@ export function detectLocale(supportedLocales, fallback = 'en') {
   return supportedLocales.includes(fallback) ? fallback : (supportedLocales[0] ?? fallback);
 }
 
+/** Locales every app's dictionary in this codebase actually ships - the one list a language picker (shell header, Profile, Relay Admin) iterates over. */
+export const AVAILABLE_LOCALES = [
+  { code: 'en', label: 'English' },
+  { code: 'de', label: 'Deutsch' },
+];
+
 const LOCALE_STORAGE_KEY = 'qu-locale';
 
 /**

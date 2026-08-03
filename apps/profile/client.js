@@ -20,17 +20,11 @@
  * place a user needs to read/copy the whole thing (verifying a contact's
  * key out of band, etc).
  */
-import { createI18n, getStoredLocale, setLocale } from '@qu/i18n';
+import { createI18n, getStoredLocale, setLocale, AVAILABLE_LOCALES } from '@qu/i18n';
 import { watch } from '@qu/reactive';
 import { actorPath, QuIdentityEngine } from '@qu/identity';
 import { renderAvatar, injectStyle } from '@qu/ui';
 import { renderQrCode, startCamera, scanQrFromVideo } from '@qu/qr';
-
-/** Locales every app's dictionary in this codebase actually ships - see @qu/i18n's own doc comment for why this is a device preference, not per-identity. */
-const AVAILABLE_LOCALES = [
-  { code: 'en', label: 'English' },
-  { code: 'de', label: 'Deutsch' },
-];
 
 const DICT = {
   en: {
