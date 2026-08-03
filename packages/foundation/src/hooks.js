@@ -70,7 +70,20 @@ export class HookBus {
    */
   async notify(name, payload) {
     await Promise.all(
-      (this.#handlers.get(name) ?? []).map(({ handler }) => Promise.resolve(handler(payload)).catch(() => {}))
+      // The try/catch has to be INSIDE the async callback: a handler that
+      // throws SYNCHRONOUSLY throws while `handler(payload)` is still being
+      // evaluated as a plain argument expression, before there's any
+      // Promise to attach a `.catch()` to - it would escape `.map()`
+      // itself as an uncaught exception instead of becoming a rejection.
+      // Wrapping the call in an async function turns that same synchronous
+      // throw into a rejected Promise like everything else here.
+      (this.#handlers.get(name) ?? []).map(async ({ handler }) => {
+        try {
+          await handler(payload);
+        } catch {
+          // swallowed - a side-effect hook's failure is not the caller's concern, see this method's own doc comment
+        }
+      })
     );
   }
 }

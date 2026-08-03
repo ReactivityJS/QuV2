@@ -11,6 +11,7 @@ import { CollectionService } from './collection-service.js';
 import { AssetService } from './asset-service.js';
 import { ActorService } from './actor-service.js';
 import { StarredService } from './starred-service.js';
+import { FlagService } from './flag-service.js';
 import { AccessService } from './access-service.js';
 import { ThreadService, THREAD_PRESETS } from './thread-service.js';
 import { ChatService } from './chat-service.js';
@@ -29,6 +30,7 @@ export {
   AssetService,
   ActorService,
   StarredService,
+  FlagService,
   AccessService,
   ThreadService,
   THREAD_PRESETS,
@@ -65,11 +67,16 @@ export { formatActorLabel, matchesActorQuery } from './actor-format.js';
  *   Omitting it (but providing `syncFetch`) still gets the miss-only
  *   backfill every Service already had; omitting both is the old,
  *   local-only behavior.
- * @returns {{documents: DocumentService, collections: CollectionService, assets: AssetService, actors: ActorService, starred: StarredService, access: AccessService, threads: ThreadService, favorites: FavoritesService, contacts: ContactsService, directory: DirectoryService, cms: CmsService, profile: ProfileService}}
+ * @returns {{documents: DocumentService, collections: CollectionService, assets: AssetService, actors: ActorService, starred: StarredService, flags: FlagService, access: AccessService, threads: ThreadService, favorites: FavoritesService, contacts: ContactsService, directory: DirectoryService, cms: CmsService, profile: ProfileService}}
  */
 export function createServices(qu, { assetEngine, identityEngine, syncFetch, getSyncGeneration }) {
   const collections = new CollectionService(qu, syncFetch, getSyncGeneration);
   const starred = new StarredService(qu, identityEngine, syncFetch, getSyncGeneration);
+  // The universal Flag mechanism (Like/Bookmark/Favorite on any entity
+  // kind - see flag-service.js's own doc comment). FavoritesService/
+  // ContactsService below are themselves now just two named flagTypes over
+  // THIS instance, not separate storage.
+  const flags = new FlagService(qu, identityEngine, starred, collections, syncFetch, getSyncGeneration);
   const documents = new DocumentService(qu, syncFetch, getSyncGeneration);
   const access = new AccessService(qu, identityEngine, syncFetch, getSyncGeneration);
   const threads = new ThreadService(qu, identityEngine, collections, access, syncFetch, getSyncGeneration);
@@ -79,11 +86,12 @@ export function createServices(qu, { assetEngine, identityEngine, syncFetch, get
     assets: new AssetService(qu, assetEngine, identityEngine, syncFetch),
     actors: new ActorService(identityEngine),
     starred,
+    flags,
     access,
     threads,
     chat: new ChatService(threads, identityEngine),
-    favorites: new FavoritesService(starred),
-    contacts: new ContactsService(starred, identityEngine),
+    favorites: new FavoritesService(flags),
+    contacts: new ContactsService(flags, identityEngine),
     directory: new DirectoryService(documents, collections, identityEngine, syncFetch),
     cms: new CmsService(documents, collections),
     profile: new ProfileService(qu, identityEngine, syncFetch, getSyncGeneration),

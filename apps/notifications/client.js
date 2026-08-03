@@ -154,8 +154,8 @@ async function renderFeed(container, services, spaceId, isStopped) {
   // apps/shell/src/main.js's `_watchNotifBadge()`), which this write does
   // NOT touch (markRead() is a private, separate path - see
   // ThreadService), so the badge needs an explicit nudge: the same
-  // cross-app window-event convention `qu:favorites-changed` already
-  // established for favorites.
+  // cross-app window-event convention `qu:flag-changed` already
+  // established for flags (favorites, bookmarks, ...).
   await services.threads.markRead(spaceId, 'notifications');
   window.dispatchEvent(new CustomEvent('qu:notifications-read'));
 }

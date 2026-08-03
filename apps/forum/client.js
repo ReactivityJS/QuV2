@@ -57,7 +57,7 @@ import { paths, THREAD_PRESETS } from '@qu/services';
 import { mountThreadView } from '@qu/thread-ui';
 import { createI18n } from '@qu/i18n';
 import { watch } from '@qu/reactive';
-import { renderSubpage, renderAvatar, injectStyle } from '@qu/ui';
+import { renderSubpage, renderAvatar, injectStyle, renderFlagToggle } from '@qu/ui';
 
 const SPACE = 'forum';
 const TOPICS_COLLECTION = 'topics';
@@ -81,6 +81,8 @@ const DICT = {
     selectChannel: 'Channel',
     back: '← All topics',
     backToChannel: '← {channel}',
+    bookmark: 'Bookmark this topic',
+    bookmarked: 'Bookmarked — click to remove',
     restrictedChannel: 'Restricted (invite-only)',
     restrictedTitle: 'Restricted - only members can read/post',
   },
@@ -101,6 +103,8 @@ const DICT = {
     selectChannel: 'Kanal',
     back: '← Alle Themen',
     backToChannel: '← {channel}',
+    bookmark: 'Thema merken',
+    bookmarked: 'Gemerkt — Klick zum Entfernen',
     restrictedChannel: 'Eingeschränkt (nur auf Einladung)',
     restrictedTitle: 'Eingeschränkt - nur Mitglieder können lesen/schreiben',
   },
@@ -114,6 +118,8 @@ const STYLE = `
   .qu-forum-sidebar { width: 15rem; flex-shrink: 0; display: flex; flex-direction: column; gap: 1rem; }
   .qu-forum-main { flex: 1; min-width: 18rem; }
   .qu-forum-main-header h1 { margin: 0 0 0.6rem; }
+  .qu-forum-topic-heading-row { display: flex; align-items: center; gap: 0.5rem; }
+  .qu-forum-topic-heading-row h1 { margin: 0; }
   .qu-forum-section-heading { font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.6; margin: 0 0 0.3rem; }
   .qu-forum-channel-list { display: flex; flex-direction: column; gap: 0.1rem; }
   .qu-forum-channel-link { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.5rem; border-radius: 0.4rem; text-decoration: none; color: inherit; }
@@ -582,9 +588,16 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       backHref,
       backLabel,
       render(content) {
+        const headingRow = document.createElement('div');
+        headingRow.className = 'qu-forum-topic-heading-row';
         const heading = document.createElement('h1');
         heading.textContent = topic?.title ?? topicId;
-        content.appendChild(heading);
+        headingRow.appendChild(heading);
+        headingRow.appendChild(renderFlagToggle({
+          flags: services.flags, flagType: 'bookmark', entityKind: 'forum-thread', entityRef: topicId,
+          icon: '🔖', title: t('bookmark'), activeTitle: t('bookmarked'),
+        }));
+        content.appendChild(headingRow);
 
         const threadEl = document.createElement('div');
         content.appendChild(threadEl);

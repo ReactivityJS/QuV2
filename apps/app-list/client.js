@@ -76,10 +76,10 @@ function row(app, isFavorite, services) {
     else await services.favorites.add(app.name);
     toggle.textContent = nowFavorite ? '☆' : '★';
     // Notifies the shell's header menu (and any other app) to refresh - see
-    // apps/shell/src/main.js's "qu:favorites-changed" listener doc comment
+    // apps/shell/src/main.js's "qu:flag-changed" listener doc comment
     // for why this is a window event rather than a direct call: this app
     // has no reference to the Shell instance, it's mounted independently.
-    window.dispatchEvent(new CustomEvent('qu:favorites-changed'));
+    window.dispatchEvent(new CustomEvent('qu:flag-changed', { detail: { flagType: 'favorite', entityKind: 'app', entityRef: app.name, on: !nowFavorite } }));
   });
 
   li.append(link, toggle);

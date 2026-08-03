@@ -310,13 +310,18 @@ class Shell {
 
     window.addEventListener('hashchange', () => this._renderRoute());
     // The one cross-app notification convention this shell defines: ANY
-    // favorite mutation, from ANYWHERE (the header menu below, the per-app
+    // flag mutation, from ANYWHERE (the header menu below, the per-app
     // context menu, or a fully independent app like App-List/apps/app-list -
     // each mounted as its own bundle with no reference back to this Shell
     // instance) dispatches this instead of calling a render method directly,
-    // so every place favorites are shown stays in sync no matter which of
-    // them made the change.
-    window.addEventListener('qu:favorites-changed', () => {
+    // so every place a flag is shown stays in sync no matter which of them
+    // made the change. Started as app-favoriting-only (`qu:favorites-
+    // changed`); generalized to any flagType/entityKind (see
+    // @qu/services' FlagService) once Forum-thread/Profile bookmarking
+    // needed the exact same "rebuild whatever displays this" broadcast -
+    // the shell menu/toolbar below only ever cared about app favorites, so
+    // it doesn't need to inspect `detail` to decide whether to rebuild.
+    window.addEventListener('qu:flag-changed', () => {
       this._renderHeaderMenu();
       this._renderAppToolbar(this._currentAppId());
     });
@@ -362,7 +367,7 @@ class Shell {
    *     write's own notify fires before this method's watch() has had a
    *     chance to register in some mount orderings, so the explicit event
    *     stays as a belt-and-braces trigger. Same cross-app window-event
-   *     convention `qu:favorites-changed` already uses.
+   *     convention `qu:flag-changed` already uses.
    */
   _watchNotifBadge() {
     const spaceId = `notifications-${this.actorPub}`;
@@ -488,7 +493,7 @@ class Shell {
       e.preventDefault();
       if (isFavorite) await this.Qu.favorites.remove(appId);
       else await this.Qu.favorites.add(appId);
-      window.dispatchEvent(new CustomEvent('qu:favorites-changed'));
+      window.dispatchEvent(new CustomEvent('qu:flag-changed', { detail: { flagType: 'favorite', entityKind: 'app', entityRef: appId, on: !isFavorite } }));
     });
     return btn;
   }
@@ -628,7 +633,7 @@ class Shell {
       onToggleFavorite: async () => {
         if (isFavorite) await this.Qu.favorites.remove(appId);
         else await this.Qu.favorites.add(appId);
-        window.dispatchEvent(new CustomEvent('qu:favorites-changed')); // triggers the listener in mount(), which rebuilds this same toolbar with the new label
+        window.dispatchEvent(new CustomEvent('qu:flag-changed', { detail: { flagType: 'favorite', entityKind: 'app', entityRef: appId, on: !isFavorite } })); // triggers the listener in mount(), which rebuilds this same toolbar with the new label
       },
     });
     this.toolbarEl.appendChild(this.appMenu.el);
