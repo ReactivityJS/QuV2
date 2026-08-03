@@ -69,3 +69,19 @@ export function threadPinsCollectionId(threadId) {
 export function threadReadMarkerPath(spaceId, threadId, actorPub) {
   return `/store/actors/~${actorPub}/private/thread-read/${spaceId}/${threadId}`;
 }
+
+/**
+ * The ACL descriptor path for a resource - deliberately a SIBLING of the
+ * resource's own path (`acl/<kind>/<id>`), not nested inside it, so
+ * @qu/engines' AccessEngine can gate a write without knowing anything about
+ * how that resource's own data is shaped. `kind` lives in the PATH (not the
+ * ACL document's own content) so a doc and a collection that happen to
+ * share the same id never collide on the same ACL entry.
+ * @param {string|number} spaceId
+ * @param {'docs'|'collections'|'assets'|'threads'} kind
+ * @param {string} resourceId
+ * @returns {string}
+ */
+export function aclPath(spaceId, kind, resourceId) {
+  return `/store/${spaceId}/acl/${kind}/${resourceId}`;
+}

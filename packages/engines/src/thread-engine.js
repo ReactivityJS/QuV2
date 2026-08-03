@@ -30,6 +30,19 @@
  * the network today. Enforcing this ACL against SYNCED data too would need
  * an equivalent check in SyncEngine's incoming-write path - real, valuable
  * future work, not implemented here.
+ *
+ * RELATIONSHIP TO AccessEngine: write-ACL enforcement is no longer unique
+ * to Threads - @qu/engines' AccessEngine (`segment: null, order: 0`) runs
+ * BEFORE this Engine on every put(), recognizes this same message-path
+ * shape, and reaches the identical allow/deny decision (falling back to
+ * this same `meta` document when a thread predates the newer, generic
+ * `acl/<kind>/<id>` convention ThreadService now also writes - see its own
+ * doc comment). This Engine's own check below is therefore now a redundant
+ * safety net, not the sole enforcement point - kept in place deliberately
+ * (cheap: one extra read) rather than removed, so a latent bug in the newer
+ * generic path can't silently open every thread. Its removal is real,
+ * separate future work once the mirrored ACL data has had time to reach
+ * effectively every peer, not bundled into this change.
  */
 import { QuCrypto } from '@qu/core';
 

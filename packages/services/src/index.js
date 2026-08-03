@@ -11,6 +11,7 @@ import { CollectionService } from './collection-service.js';
 import { AssetService } from './asset-service.js';
 import { ActorService } from './actor-service.js';
 import { StarredService } from './starred-service.js';
+import { AccessService } from './access-service.js';
 import { ThreadService, THREAD_PRESETS } from './thread-service.js';
 import { ChatService } from './chat-service.js';
 import { FavoritesService } from './favorites-service.js';
@@ -28,6 +29,7 @@ export {
   AssetService,
   ActorService,
   StarredService,
+  AccessService,
   ThreadService,
   THREAD_PRESETS,
   ChatService,
@@ -63,19 +65,21 @@ export { formatActorLabel, matchesActorQuery } from './actor-format.js';
  *   Omitting it (but providing `syncFetch`) still gets the miss-only
  *   backfill every Service already had; omitting both is the old,
  *   local-only behavior.
- * @returns {{documents: DocumentService, collections: CollectionService, assets: AssetService, actors: ActorService, starred: StarredService, threads: ThreadService, favorites: FavoritesService, contacts: ContactsService, directory: DirectoryService, cms: CmsService, profile: ProfileService}}
+ * @returns {{documents: DocumentService, collections: CollectionService, assets: AssetService, actors: ActorService, starred: StarredService, access: AccessService, threads: ThreadService, favorites: FavoritesService, contacts: ContactsService, directory: DirectoryService, cms: CmsService, profile: ProfileService}}
  */
 export function createServices(qu, { assetEngine, identityEngine, syncFetch, getSyncGeneration }) {
   const collections = new CollectionService(qu, syncFetch, getSyncGeneration);
   const starred = new StarredService(qu, identityEngine, syncFetch, getSyncGeneration);
   const documents = new DocumentService(qu, syncFetch, getSyncGeneration);
-  const threads = new ThreadService(qu, identityEngine, collections, syncFetch, getSyncGeneration);
+  const access = new AccessService(qu, identityEngine, syncFetch, getSyncGeneration);
+  const threads = new ThreadService(qu, identityEngine, collections, access, syncFetch, getSyncGeneration);
   return {
     documents,
     collections,
     assets: new AssetService(qu, assetEngine, identityEngine, syncFetch),
     actors: new ActorService(identityEngine),
     starred,
+    access,
     threads,
     chat: new ChatService(threads, identityEngine),
     favorites: new FavoritesService(starred),
