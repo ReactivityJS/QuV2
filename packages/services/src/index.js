@@ -12,6 +12,7 @@ import { AssetService } from './asset-service.js';
 import { ActorService } from './actor-service.js';
 import { StarredService } from './starred-service.js';
 import { FlagService } from './flag-service.js';
+import { AccessService } from './access-service.js';
 import { ThreadService, THREAD_PRESETS } from './thread-service.js';
 import { ChatService } from './chat-service.js';
 import { FavoritesService } from './favorites-service.js';
@@ -30,6 +31,7 @@ export {
   ActorService,
   StarredService,
   FlagService,
+  AccessService,
   ThreadService,
   THREAD_PRESETS,
   ChatService,
@@ -66,6 +68,7 @@ export { formatActorLabel, matchesActorQuery } from './actor-format.js';
  *   backfill every Service already had; omitting both is the old,
  *   local-only behavior.
  * @returns {{documents: DocumentService, collections: CollectionService, assets: AssetService, actors: ActorService, starred: StarredService, flags: FlagService, threads: ThreadService, favorites: FavoritesService, contacts: ContactsService, directory: DirectoryService, cms: CmsService, profile: ProfileService}}
+ * @returns {{documents: DocumentService, collections: CollectionService, assets: AssetService, actors: ActorService, starred: StarredService, access: AccessService, threads: ThreadService, favorites: FavoritesService, contacts: ContactsService, directory: DirectoryService, cms: CmsService, profile: ProfileService}}
  */
 export function createServices(qu, { assetEngine, identityEngine, syncFetch, getSyncGeneration }) {
   const collections = new CollectionService(qu, syncFetch, getSyncGeneration);
@@ -76,7 +79,8 @@ export function createServices(qu, { assetEngine, identityEngine, syncFetch, get
   // THIS instance, not separate storage.
   const flags = new FlagService(qu, identityEngine, starred, collections, syncFetch, getSyncGeneration);
   const documents = new DocumentService(qu, syncFetch, getSyncGeneration);
-  const threads = new ThreadService(qu, identityEngine, collections, syncFetch, getSyncGeneration);
+  const access = new AccessService(qu, identityEngine, syncFetch, getSyncGeneration);
+  const threads = new ThreadService(qu, identityEngine, collections, access, syncFetch, getSyncGeneration);
   return {
     documents,
     collections,
@@ -84,6 +88,7 @@ export function createServices(qu, { assetEngine, identityEngine, syncFetch, get
     actors: new ActorService(identityEngine),
     starred,
     flags,
+    access,
     threads,
     chat: new ChatService(threads, identityEngine),
     favorites: new FavoritesService(flags),

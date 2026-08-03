@@ -26,7 +26,7 @@
  * buttons below meaningful: hash changes are real browser history entries.
  */
 import { QuRuntime, IndexedDBAdapter, IndexedDBOutboxStore } from '@qu/runtime';
-import { DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine } from '@qu/engines';
+import { DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine, AccessEngine } from '@qu/engines';
 import { QuIdentityEngine, actorPath } from '@qu/identity';
 import { SyncEngine, WebSocketClientTransport } from '@qu/sync';
 import { createServices, paths } from '@qu/services';
@@ -61,6 +61,7 @@ async function boot() {
   const qu = runtime.core;
   qu.mount('blob', blobAdapter);
 
+  new AccessEngine(qu);
   new DocumentEngine(qu);
   new CollectionEngine(qu);
   const assetEngine = new AssetEngine(qu);

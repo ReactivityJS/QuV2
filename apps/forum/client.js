@@ -8,12 +8,24 @@
  * Threads only model the MESSAGES inside one topic, same as before this
  * redesign.
  *
- * Anyone can create a channel today, same permissive rule topics already
- * had (DocumentEngine has no ACL to enforce anything stricter). Restricting
- * channel creation to relay/forum admins is real future work, not
- * implemented here - it would need an actual admin-role concept this
- * codebase doesn't have yet (see @qu/relay's own admin allowlist for the
- * closest existing precedent, which is relay-wide, not per-app).
+ * Channel creation is gated by the relay's own admin allowlist (`/config.json`'s
+ * `adminPubs` - same one apps/relay-admin uses, see its own doc comment for
+ * why that check is UI-only, not a security boundary). An unconfigured
+ * relay (no admins set up yet) stays permissive - anyone may create a
+ * channel - so a fresh relay never locks itself out of its own forum.
+ *
+ * A channel may be marked RESTRICTED at creation: its Document is protected
+ * via `services.access.protect()` (@qu/services' AccessService, backed by
+ * @qu/engines' AccessEngine - a generic, entity-agnostic ACL, not something
+ * Forum-specific or Thread-specific) so only its members can rename/edit
+ * it, and every topic created under it uses `THREAD_PRESETS.chat(memberPubs)`
+ * (the channel's own `writers`) instead of the public `THREAD_PRESETS.forum()`
+ * - real end-to-end encryption for exactly those members, the relay
+ * included, sees ciphertext only. This only locks CONTENT: the channel's
+ * and its topics' TITLES stay visible metadata in the shared indexes (same
+ * "path is addressing, not proof of readability" limitation ThreadService
+ * already documents elsewhere) - fully hiding a restricted channel's
+ * existence is real future work, not implemented here.
  *
  * Reply count and "last activity" are deliberately NOT stored on the topic
  * document (that would mean either bypassing the shared @qu/thread-ui
@@ -34,10 +46,12 @@
  *     doesn't break: treated exactly like `t/<topicId>`.
  *
  * Known v1 gaps, left for later rather than blocking this redesign:
- * pinned/sticky topics, per-channel unread badges, admin-restricted channel
- * creation, and pagination (a board with a very large number of topics pays
- * one `watch()` + two reads per topic on every render - fine at
- * community-forum scale, not designed to scale past it).
+ * pinned/sticky topics, per-channel unread badges, inviting members to a
+ * restricted channel after it's created (today: creator-only at creation;
+ * `services.access.addWriter()`/`addReader()` already support growing it,
+ * just no UI wired up yet), and pagination (a board with a very large
+ * number of topics pays one `watch()` + two reads per topic on every
+ * render - fine at community-forum scale, not designed to scale past it).
  */
 import { paths, THREAD_PRESETS } from '@qu/services';
 import { mountThreadView } from '@qu/thread-ui';
@@ -69,6 +83,8 @@ const DICT = {
     backToChannel: '← {channel}',
     bookmark: 'Bookmark this topic',
     bookmarked: 'Bookmarked — click to remove',
+    restrictedChannel: 'Restricted (invite-only)',
+    restrictedTitle: 'Restricted - only members can read/post',
   },
   de: {
     title: 'Forum',
@@ -89,6 +105,8 @@ const DICT = {
     backToChannel: '← {channel}',
     bookmark: 'Thema merken',
     bookmarked: 'Gemerkt — Klick zum Entfernen',
+    restrictedChannel: 'Eingeschränkt (nur auf Einladung)',
+    restrictedTitle: 'Eingeschränkt - nur Mitglieder können lesen/schreiben',
   },
 };
 const { t } = createI18n(DICT);
@@ -112,6 +130,8 @@ const STYLE = `
   .qu-forum-new-channel { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.4rem; }
   .qu-forum-new-channel input[type="text"], .qu-forum-new-channel input:not([type]) { padding: 0.4rem; }
   .qu-forum-new-channel-row { display: flex; gap: 0.4rem; align-items: center; }
+  .qu-forum-new-channel-restricted { display: flex; gap: 0.4rem; align-items: center; font-size: 0.85em; }
+  .qu-forum-lock { font-size: 0.85em; opacity: 0.7; }
   .qu-forum-topics { list-style: none; margin: 0 0 0.8rem; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
   .qu-forum-topic-row { display: flex; align-items: center; gap: 0.6rem; padding: 0.55rem 0.7rem; border: 1px solid #8884; border-radius: 0.5rem; text-decoration: none; color: inherit; }
   .qu-forum-topic-row:hover { border-color: #8888; background: #8881; }
@@ -154,6 +174,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
   let stopped = false;
   let stopThreadView = null;
   let myActorPub = null;
+  let canCreateChannel = true;
   const boardWatchStops = [];
 
   // Live updates from OTHER browsers (new channels, new topics, messages in
@@ -166,6 +187,19 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
 
   (async () => {
     myActorPub = await services.actors.whoAmI();
+    // Same relay-wide adminPubs allowlist apps/relay-admin gates its own UI
+    // with (see /config.json, published by @qu/relay - UI-only, not a
+    // security boundary; the actual write is still just DocumentEngine's
+    // open-by-default behavior). An empty/unreachable adminPubs list means
+    // "this relay never configured any admins" - stay permissive rather
+    // than locking out an unconfigured relay's forum entirely.
+    try {
+      const config = await fetch('/config.json').then((r) => r.json());
+      const adminPubs = config.adminPubs ?? [];
+      canCreateChannel = adminPubs.length === 0 || adminPubs.includes(myActorPub);
+    } catch {
+      canCreateChannel = true; // no relay config endpoint reachable (e.g. a non-@qu/relay host) - default open
+    }
     if (stopped) return;
     if (route.view === 'topic') await renderTopicPage(route.topicId);
     else await renderBoard(route.channelId);
@@ -222,6 +256,17 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     while (boardWatchStops.length) boardWatchStops.pop()?.();
   }
 
+  // Cheap: only ever called with the (small) channel list, same cost class
+  // as enrichTopics() below. `getAcl()` returning non-null is exactly what
+  // "this channel is restricted" means - no separate `restricted` field on
+  // the channel Document itself to keep in sync/drift out of sync with.
+  async function enrichChannelsRestricted(channels) {
+    await Promise.all(channels.map(async (channel) => {
+      const acl = await services.access.getAcl(SPACE, 'docs', channel._id);
+      channel.restricted = !!acl;
+    }));
+  }
+
   async function enrichTopics(topics) {
     await Promise.all(topics.map(async (topic) => {
       const rawPaths = await services.collections.listRawPaths(SPACE, paths.threadMessagesCollectionId(topic._id));
@@ -243,6 +288,8 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       listResolved(CHANNELS_COLLECTION),
       listResolved(TOPICS_COLLECTION),
     ]);
+    if (stopped) return;
+    if (channels.length) await enrichChannelsRestricted(channels);
     if (stopped) return;
 
     const visibleTopics = activeChannelId
@@ -314,11 +361,18 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
         swatch.className = 'qu-forum-channel-swatch';
         swatch.style.background = channel.color || colorFor(channel._id);
         link.append(swatch, document.createTextNode(channel.title));
+        if (channel.restricted) {
+          const lock = document.createElement('span');
+          lock.className = 'qu-forum-lock';
+          lock.textContent = '🔒';
+          lock.title = t('restrictedTitle');
+          link.appendChild(lock);
+        }
         list.appendChild(link);
       }
     }
     wrap.appendChild(list);
-    wrap.appendChild(newChannelForm());
+    if (canCreateChannel) wrap.appendChild(newChannelForm());
     return wrap;
   }
 
@@ -340,15 +394,39 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     submit.textContent = t('create');
     row.append(colorInput, submit);
 
-    form.append(input, row);
+    const restrictedRow = document.createElement('label');
+    restrictedRow.className = 'qu-forum-new-channel-restricted';
+    const restrictedInput = document.createElement('input');
+    restrictedInput.type = 'checkbox';
+    restrictedRow.append(restrictedInput, document.createTextNode(t('restrictedChannel')));
+
+    form.append(input, restrictedRow, row);
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const title = input.value.trim();
       if (!title) return;
       const newId = crypto.randomUUID();
+      // Restricted: protect the channel Document itself (only the
+      // creator, for now - see this file's own doc comment on why growing
+      // membership after creation has no UI yet) BEFORE writing it, then
+      // ask AccessService for the write options instead of hand-rolling
+      // that orchestration here - see @qu/services' AccessService, the
+      // same generic mechanism ANY app (Thread-based or not) uses to
+      // protect a resource. `readers` is deliberately left at its default
+      // ('*') - restricting it would ENCRYPT this Document's value, and
+      // DocumentService (unlike ThreadService/AssetService) has no
+      // decrypt-aware get() to ever read it back - see AccessService's own
+      // writeOptionsFor() doc comment for this exact gotcha. Only
+      // `writers` is protected: nobody but a member can rename/edit the
+      // channel, but its title stays visible plaintext.
+      let writeOptions = {};
+      if (restrictedInput.checked) {
+        await services.access.protect(SPACE, 'docs', newId, { writers: [myActorPub] });
+        writeOptions = await services.access.writeOptionsFor(SPACE, 'docs', newId);
+      }
       await services.documents.create(SPACE, newId, {
         _id: newId, title, description: '', color: colorInput.value, createdBy: myActorPub, createdAt: Date.now(),
-      });
+      }, writeOptions);
       await services.collections.addItem(SPACE, CHANNELS_COLLECTION, paths.documentPath(SPACE, newId));
       location.hash = `#/forum/c/${newId}`;
     });
@@ -406,7 +484,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       const channel = channels.find((c) => c._id === topic.channelId);
       const tag = document.createElement('span');
       tag.className = 'qu-forum-channel-tag';
-      tag.textContent = channel ? channel.title : t('uncategorized');
+      tag.textContent = (channel ? channel.title : t('uncategorized')) + (channel?.restricted ? ' 🔒' : '');
       tag.style.borderColor = channel?.color || '#8884';
       top.appendChild(tag);
     }
@@ -494,6 +572,18 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     const backHref = channel ? `#/forum/c/${channel._id}` : '#/forum';
     const backLabel = channel ? t('backToChannel', { channel: channel.title }) : t('back');
 
+    // A restricted channel's topics inherit ITS member list (the channel
+    // Document's own `writers`, via the same generic AccessService every
+    // resource kind shares) as a real encrypted-for-members Thread instead
+    // of the public forum preset - membership is defined exactly once, at
+    // the channel, not duplicated into per-topic Forum config. Only
+    // matters on the very FIRST render of a topic (createThread() is
+    // idempotent - see ThreadService), so this doesn't re-decide anything
+    // for an already-created topic's thread.
+    const channelAcl = channel ? await services.access.getAcl(SPACE, 'docs', channel._id) : null;
+    const threadConfig = Array.isArray(channelAcl?.writers) ? THREAD_PRESETS.chat(channelAcl.writers) : THREAD_PRESETS.forum();
+    if (stopped) return;
+
     renderSubpage(container, {
       backHref,
       backLabel,
@@ -513,7 +603,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
         content.appendChild(threadEl);
         stopThreadView = mountThreadView(threadEl, {
           qu, services, spaceId: SPACE, threadId: topicId,
-          threadConfig: THREAD_PRESETS.forum(), hooks,
+          threadConfig, hooks,
         });
       },
     });

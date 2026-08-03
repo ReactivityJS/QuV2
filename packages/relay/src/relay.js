@@ -28,7 +28,7 @@ import { Registry } from '@qu/foundation';
 import { QuLoader, discoverLocalPackages } from '@qu/loader';
 import { QuIdentityEngine } from '@qu/identity';
 import { SyncEngine } from '@qu/sync';
-import { DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine } from '@qu/engines';
+import { DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine, AccessEngine } from '@qu/engines';
 import { createServices, NotificationPrefsService, THREAD_PRESETS } from '@qu/services';
 import { generateVapidKeys, sendWebPush } from '@qu/push';
 
@@ -156,10 +156,12 @@ export class QuRelay {
     this.core = this.runtime.core;
     this.core.mount('blob', new FsAdapter(this.options.blobDir));
 
+    this.accessEngine = new AccessEngine(this.core);
     this.documentEngine = new DocumentEngine(this.core);
     this.collectionEngine = new CollectionEngine(this.core);
     this.assetEngine = new AssetEngine(this.core);
     this.threadEngine = new ThreadEngine(this.core);
+    this.registry.registerEngine('access-engine', this.accessEngine);
     this.registry.registerEngine('document-engine', this.documentEngine);
     this.registry.registerEngine('collection-engine', this.collectionEngine);
     this.registry.registerEngine('asset-engine', this.assetEngine);

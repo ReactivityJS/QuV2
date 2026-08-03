@@ -28,6 +28,11 @@ export class ThreadService {
    * @param {import('@qu/core').QuCore} qu
    * @param {import('@qu/identity').QuIdentityEngine} identityEngine
    * @param {import('./collection-service.js').CollectionService} collectionService
+   * @param {import('./access-service.js').AccessService} accessService - Mirrors
+   *   `writers`/`readers` into the generic `acl/threads/<id>` convention
+   *   (see @qu/engines' AccessEngine) alongside this thread's own `meta`
+   *   document, so a Thread's write-ACL is enforced by the SAME central
+   *   mechanism any other entity kind uses, not a Thread-only special case.
    * @param {(path: string) => Promise<object|null>} [syncFetch] - Optional:
    *   `SyncEngine.fetch()` (see @qu/sync), for backfilling a profile this
    *   identity doesn't have LOCALLY yet. `subscribe()`-based sync only ever
@@ -50,10 +55,11 @@ export class ThreadService {
    *   it was away, even after reconnecting - the local-miss-only backfill
    *   below never re-runs once something is cached.
    */
-  constructor(qu, identityEngine, collectionService, syncFetch = null, getGeneration = null) {
+  constructor(qu, identityEngine, collectionService, accessService, syncFetch = null, getGeneration = null) {
     this.qu = qu;
     this.identity = identityEngine;
     this.collections = collectionService;
+    this.access = accessService;
     this.syncFetch = syncFetch;
     this.#backgroundRefresh = createFreshnessTracker(syncFetch, getGeneration);
   }
@@ -117,6 +123,13 @@ export class ThreadService {
 
     const normalized = { writers: '*', readers: '*', replyMode: 'flat', formatting: [], ...config };
     await this.qu.put(threadMetaPath(spaceId, threadId), normalized);
+    // Mirror into the generic ACL convention - see this method's own
+    // "accessService" param doc comment above. includeSelfAsWriter:false
+    // because `normalized.writers` already IS the intended writer set
+    // (verbatim from the caller's config, e.g. THREAD_PRESETS.chat's
+    // memberPubs) - silently appending the creator on top would change
+    // that set out from under a caller who deliberately specified it.
+    await this.access.protect(spaceId, 'threads', threadId, { writers: normalized.writers, readers: normalized.readers }, { includeSelfAsWriter: false });
     await this.collections.create(spaceId, threadMessagesCollectionId(threadId), []);
     return normalized;
   }
@@ -189,7 +202,16 @@ export class ThreadService {
     if (!config) throw new Error(`ThreadService.addReader: no thread "${threadId}" in space "${spaceId}" - call createThread() first`);
     if (!Array.isArray(config.readers) || config.readers.includes(actorPub)) return config;
     const updated = { ...config, readers: [...config.readers, actorPub] };
-    await this.qu.put(threadMetaPath(spaceId, threadId), updated);
+    // Signed, unlike this method's pre-AccessEngine shape - a restricted
+    // thread's `meta` is now gated the same as any other write (see
+    // AccessEngine's thread-path regex, which covers `meta` too), so this
+    // write needs a verifiable writerPub the same way postMessage() always
+    // has. A no-op for writers:'*' threads (e.g. Calendar's `activity`
+    // preset, this method's only current caller) - AccessEngine only
+    // checks the signer when writers isn't '*'.
+    const signKey = await this.identity.getMainKey();
+    await this.qu.put(threadMetaPath(spaceId, threadId), updated, { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey });
+    await this.access.protect(spaceId, 'threads', threadId, { writers: updated.writers, readers: updated.readers }, { includeSelfAsWriter: false });
     return updated;
   }
 
@@ -206,7 +228,9 @@ export class ThreadService {
     if (!config) throw new Error(`ThreadService.removeReader: no thread "${threadId}" in space "${spaceId}"`);
     if (!Array.isArray(config.readers)) return config;
     const updated = { ...config, readers: config.readers.filter((pub) => pub !== actorPub) };
-    await this.qu.put(threadMetaPath(spaceId, threadId), updated);
+    const signKey = await this.identity.getMainKey(); // see addReader()'s own comment for why this must now be signed
+    await this.qu.put(threadMetaPath(spaceId, threadId), updated, { signWith: signKey.privateKeyPkcs8, writerPub: signKey.publicKey });
+    await this.access.protect(spaceId, 'threads', threadId, { writers: updated.writers, readers: updated.readers }, { includeSelfAsWriter: false });
     return updated;
   }
 

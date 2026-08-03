@@ -301,7 +301,7 @@ try {
   {
     const quniverseRt = new QuRuntime();
     const { MemoryAdapter } = await import('@qu/runtime');
-    const { DocumentEngine, CollectionEngine, ThreadEngine } = await import('@qu/engines');
+    const { DocumentEngine, CollectionEngine, ThreadEngine, AccessEngine } = await import('@qu/engines');
     const { createServices, THREAD_PRESETS } = await import('@qu/services');
 
     // Shared "world" store for public/thread data; each identity keeps its own local seed - see identity.js's importMnemonic() doc.
@@ -315,6 +315,7 @@ try {
     }
     function makeIdentityAndServices() {
       const rt = new QuRuntime({ storeAdapter: withSharedWorld() });
+      new AccessEngine(rt.core);
       new DocumentEngine(rt.core);
       new CollectionEngine(rt.core);
       new ThreadEngine(rt.core);
@@ -370,6 +371,118 @@ try {
   }
 
   // ---------------------------------------------------------------------
+  section('Access control: a single, engine-agnostic ACL for Documents, Collections and Threads alike');
+  // ---------------------------------------------------------------------
+  {
+    const { MemoryAdapter } = await import('@qu/runtime');
+    const { DocumentEngine, CollectionEngine, ThreadEngine, AccessEngine } = await import('@qu/engines');
+    const { createServices, THREAD_PRESETS, paths: svcPaths } = await import('@qu/services');
+
+    // Shared "world" store, same idiom as the "QUniverse services" section
+    // above - one shared Map stands in for "the network" (no real relay/
+    // WebSocket needed - AccessEngine enforcement is a purely LOCAL put()
+    // pipeline concern), each identity keeps its own local seed.
+    const sharedStore = new Map();
+    function withSharedWorld() {
+      const local = new MemoryAdapter();
+      return {
+        put: (rel, v) => (rel.startsWith('/secure/') ? local.put(rel, v) : sharedStore.set(rel, v) && v),
+        get: (rel) => (rel.startsWith('/secure/') ? local.get(rel) : Promise.resolve(sharedStore.get(rel) ?? null)),
+      };
+    }
+    function makeIdentityAndServices() {
+      const rt = new QuRuntime({ storeAdapter: withSharedWorld() });
+      new AccessEngine(rt.core);
+      new DocumentEngine(rt.core);
+      new CollectionEngine(rt.core);
+      new ThreadEngine(rt.core);
+      const identity = new QuIdentityEngine(rt.core);
+      return { rt, identity, Qu: null };
+    }
+
+    const aliceCtx = makeIdentityAndServices();
+    const bobCtx = makeIdentityAndServices();
+    await aliceCtx.identity.importMnemonic(aliceCtx.identity.generateMnemonic());
+    await bobCtx.identity.importMnemonic(bobCtx.identity.generateMnemonic());
+    aliceCtx.Qu = createServices(aliceCtx.rt.core, { assetEngine: null, identityEngine: aliceCtx.identity });
+    bobCtx.Qu = createServices(bobCtx.rt.core, { assetEngine: null, identityEngine: bobCtx.identity });
+
+    await aliceCtx.Qu.actors.publishMainProfile({ name: 'Alice-Access' });
+    const alicePub = await aliceCtx.Qu.actors.whoAmI();
+    await bobCtx.Qu.actors.publishMainProfile({ name: 'Bob-Access' });
+    const bobPub = await bobCtx.Qu.actors.whoAmI();
+    void bobPub;
+
+    // 1+2: a protected Document - Bob rejected, Alice allowed.
+    await aliceCtx.Qu.access.protect('access-test', 'docs', 'doc-1', { writers: [alicePub] });
+    await aliceCtx.Qu.documents.create('access-test', 'doc-1', { title: 'Alice only' }, await aliceCtx.Qu.access.writeOptionsFor('access-test', 'docs', 'doc-1'));
+    await assert.rejects(
+      bobCtx.Qu.documents.update('access-test', 'doc-1', { title: 'hijacked' }, await bobCtx.Qu.access.writeOptionsFor('access-test', 'docs', 'doc-1')),
+      /AccessEngine/,
+      'Bob must not be able to write a Document protected for Alice only'
+    );
+    const docAfterAttempt = await bobCtx.Qu.documents.get('access-test', 'doc-1');
+    assert.equal(docAfterAttempt.title, 'Alice only', 'the rejected write must not have landed');
+
+    // 1: a protected Collection - Bob rejected. Same mechanism, different entity kind - not a Thread-only feature.
+    await aliceCtx.Qu.access.protect('access-test', 'collections', 'coll-1', { writers: [alicePub] });
+    await assert.rejects(
+      bobCtx.Qu.collections.create('access-test', 'coll-1', [], await bobCtx.Qu.access.writeOptionsFor('access-test', 'collections', 'coll-1')),
+      /AccessEngine/,
+      'Bob must not be able to write a Collection protected for Alice only'
+    );
+
+    // 1+2: a restricted Thread, created via the normal ThreadService API -
+    // proves createThread()'s new ACL-mirroring makes a BRAND NEW thread's
+    // writer check flow through AccessEngine (not just ThreadEngine's own).
+    await aliceCtx.Qu.threads.createThread('access-test', 'private-room', THREAD_PRESETS.chat([alicePub]));
+    await assert.rejects(
+      bobCtx.Qu.threads.postMessage('access-test', 'private-room', { body: 'sneaking in' }),
+      /AccessEngine|ThreadEngine/,
+      'Bob must not be able to post into a thread whose writers is just [alicePub]'
+    );
+    await aliceCtx.Qu.threads.postMessage('access-test', 'private-room', { body: 'only for me' });
+    const aliceOwnMessages = await aliceCtx.Qu.threads.listMessages('access-test', 'private-room');
+    assert.equal(aliceOwnMessages.length, 1, 'Alice should see her own message in her own restricted thread');
+    assert.equal(aliceOwnMessages[0].body, 'only for me');
+
+    // 3: an OLD-SHAPE thread - meta written directly, bypassing
+    // ThreadService.createThread() entirely, so there is deliberately NO
+    // mirrored acl/threads/<id> entry - simulates a thread created before
+    // AccessEngine existed. AccessEngine's meta-fallback must reproduce
+    // ThreadEngine's own decision exactly: Bob rejected, Alice allowed.
+    const oldThreadMeta = { writers: [alicePub], readers: '*', replyMode: 'flat', formatting: [] };
+    const aliceSignKey = await aliceCtx.identity.getMainKey();
+    await aliceCtx.rt.core.put(svcPaths.threadMetaPath('access-test', 'legacy-room'), oldThreadMeta, { signWith: aliceSignKey.privateKeyPkcs8, writerPub: aliceSignKey.publicKey });
+    await aliceCtx.Qu.collections.create('access-test', svcPaths.threadMessagesCollectionId('legacy-room'), []);
+    assert.equal(await aliceCtx.Qu.access.getAcl('access-test', 'threads', 'legacy-room'), null, 'a legacy thread must have no mirrored acl/ entry for this to be a meaningful test');
+    await assert.rejects(
+      bobCtx.Qu.threads.postMessage('access-test', 'legacy-room', { body: 'sneaking into a legacy thread' }),
+      /AccessEngine|ThreadEngine/,
+      'a pre-AccessEngine thread (meta only, no acl/ mirror) must still reject an unauthorized writer via the fallback'
+    );
+    await aliceCtx.Qu.threads.postMessage('access-test', 'legacy-room', { body: 'still works for the real writer' });
+    assert.equal((await aliceCtx.Qu.threads.listMessages('access-test', 'legacy-room')).length, 1);
+
+    // 4: a completely unprotected Document (the 100%-of-production-today
+    // case) stays exactly as open as before this change existed - no ACL
+    // doc means no gate at all, for anyone.
+    await bobCtx.Qu.documents.create('access-test', 'open-doc', { title: 'anyone can write this' });
+    const openDoc = await aliceCtx.Qu.documents.get('access-test', 'open-doc');
+    assert.equal(openDoc.title, 'anyone can write this', 'an unprotected Document must remain fully open, unaffected by AccessEngine existing');
+
+    // 5: the ACL descriptor itself can't be hijacked by a non-writer.
+    const bobSignKey = await bobCtx.identity.getMainKey();
+    await assert.rejects(
+      bobCtx.rt.core.put(svcPaths.aclPath('access-test', 'docs', 'doc-1'), { writers: '*', readers: '*' }, { writerPub: bobSignKey.publicKey }),
+      /AccessEngine/,
+      "Bob must not be able to overwrite doc-1's own ACL descriptor to open it up"
+    );
+
+    console.log('    OK - one AccessEngine gates Documents, Collections and Threads alike; a legacy (pre-AccessEngine) thread keeps working via the meta fallback; an unprotected resource stays fully open; the ACL descriptor itself resists takeover');
+  }
+
+  // ---------------------------------------------------------------------
   section('Push: VAPID JWT signature verifies; payload encryption round-trips');
   // ---------------------------------------------------------------------
   {
@@ -411,7 +524,7 @@ try {
   section('Notification pipeline: ThreadService.notify() reaches the recipient (Geo Chase / Calendar pattern)');
   // ---------------------------------------------------------------------
   {
-    const { DocumentEngine, CollectionEngine, ThreadEngine } = await import('@qu/engines');
+    const { DocumentEngine, CollectionEngine, ThreadEngine, AccessEngine } = await import('@qu/engines');
     const { createServices } = await import('@qu/services');
     const { MemoryAdapter } = await import('@qu/runtime');
 
@@ -421,6 +534,7 @@ try {
     // a not-yet-synced profile on demand.
     async function connectClient() {
       const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+      new AccessEngine(rt.core);
       new DocumentEngine(rt.core);
       new CollectionEngine(rt.core);
       new ThreadEngine(rt.core);
@@ -493,12 +607,13 @@ try {
   section('Sync freshness: a message missed while genuinely disconnected is picked up on reconnect, not just via subscribe()');
   // ---------------------------------------------------------------------
   {
-    const { DocumentEngine, CollectionEngine, ThreadEngine } = await import('@qu/engines');
+    const { DocumentEngine, CollectionEngine, ThreadEngine, AccessEngine } = await import('@qu/engines');
     const { createServices, THREAD_PRESETS } = await import('@qu/services');
     const { MemoryAdapter } = await import('@qu/runtime');
 
     async function connectClient() {
       const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+      new AccessEngine(rt.core);
       new DocumentEngine(rt.core);
       new CollectionEngine(rt.core);
       new ThreadEngine(rt.core);
@@ -941,12 +1056,13 @@ try {
   section('Cross-device data recovery: own profile + favorites backfill after importSeedCode()');
   // ---------------------------------------------------------------------
   {
-    const { DocumentEngine, CollectionEngine, ThreadEngine } = await import('@qu/engines');
+    const { DocumentEngine, CollectionEngine, ThreadEngine, AccessEngine } = await import('@qu/engines');
     const { createServices } = await import('@qu/services');
     const { MemoryAdapter } = await import('@qu/runtime');
 
     async function connectClient(identitySeedCode) {
       const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+      new AccessEngine(rt.core);
       new DocumentEngine(rt.core);
       new CollectionEngine(rt.core);
       new ThreadEngine(rt.core);
