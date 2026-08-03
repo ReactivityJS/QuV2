@@ -751,14 +751,25 @@ export class QuRelay {
       if (await serveApps(req, res, this.options.appsDir)) return;
 
       if (this.options.serveShell) {
+        // `cache-control: no-cache` (NOT `no-store`) on every file below
+        // that a PWA UPDATE actually depends on - a browser may still keep
+        // a cached copy, but must revalidate with the server before ever
+        // reusing it, instead of silently serving a stale `index.html`/
+        // bundle/`sw.js` byte-for-byte from HTTP cache (with no ETag/
+        // Last-Modified set here, "revalidate" in practice just means "ask
+        // again"). Without this, apps/shell/src/pwa.js's whole
+        // update-detection flow could ask a browser to reload onto "the
+        // latest version" and have the browser hand it right back the
+        // stale one it already had cached - defeating the point of a
+        // controlled update prompt.
         if (req.url === '/' || req.url === '/index.html') {
           const body = await readFile(SHELL_PUBLIC_DIR + 'index.html');
-          res.writeHead(200, { 'content-type': 'text/html' }).end(body);
+          res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-cache' }).end(body);
           return;
         }
         if (req.url === '/shell-bundle.js' || req.url === '/shell-bundle.js.map') {
           const body = await readFile(SHELL_DIST_DIR + req.url.replace('/shell-bundle', 'bundle'));
-          res.writeHead(200, { 'content-type': 'text/javascript' }).end(body);
+          res.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'no-cache' }).end(body);
           return;
         }
         // Same-origin-root PWA files (see apps/shell/src/pwa.js) - a service
@@ -766,12 +777,18 @@ export class QuRelay {
         // sw.js specifically must be served at "/", not under some subpath.
         if (req.url === '/manifest.webmanifest') {
           const body = await readFile(SHELL_PUBLIC_DIR + 'manifest.webmanifest');
-          res.writeHead(200, { 'content-type': 'application/manifest+json' }).end(body);
+          res.writeHead(200, { 'content-type': 'application/manifest+json', 'cache-control': 'no-cache' }).end(body);
           return;
         }
         if (req.url === '/sw.js') {
           const body = await readFile(SHELL_PUBLIC_DIR + 'sw.js');
-          res.writeHead(200, { 'content-type': 'text/javascript', 'service-worker-allowed': '/' }).end(body);
+          // Doubly important here specifically: browsers already treat a
+          // cached `sw.js` response as at-least-as-stale-as-24h regardless
+          // of headers (a spec-mandated cap meant to stop indefinitely
+          // stale workers), but `no-cache` still closes the gap for
+          // anything shorter than that - an explicit `applyUpdate()` click
+          // shouldn't ever be defeated by an HTTP cache in between.
+          res.writeHead(200, { 'content-type': 'text/javascript', 'service-worker-allowed': '/', 'cache-control': 'no-cache' }).end(body);
           return;
         }
         if (req.url === '/favicon.ico') {

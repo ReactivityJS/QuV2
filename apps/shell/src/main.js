@@ -36,7 +36,7 @@ import { parseHash, buildHash } from './router.js';
 import { resolveFavoriteApps } from './nav.js';
 import { loadClientModule } from './load-client-module.js';
 import { qLogoSvgMarkup } from './logo.js';
-import { registerServiceWorker } from './pwa.js';
+import { registerServiceWorker, onUpdateAvailable, applyUpdate } from './pwa.js';
 import { listenForNotificationClicks } from '@qu/push-client';
 import { createDisclosureMenu, menuItem } from './menu.js';
 import { buildAppContextMenu } from './context-menu.js';
@@ -209,6 +209,22 @@ class Shell {
 
     this.headerMenu = createDisclosureMenu({ label: t('nav.menu'), buttonContent: '☰' });
 
+    // Hidden until onUpdateAvailable() fires (see pwa.js) - a new service
+    // worker/bundle is installed and waiting, but per sw.js's own doc
+    // comment does NOT take over on its own, specifically so this can be a
+    // deliberate user action rather than a reload happening mid-interaction.
+    const updateBtn = document.createElement('button');
+    updateBtn.type = 'button';
+    updateBtn.className = 'qu-shell-update-btn';
+    updateBtn.hidden = true;
+    updateBtn.textContent = t('pwa.updateAvailable');
+    updateBtn.title = t('pwa.updateAvailable');
+    updateBtn.addEventListener('click', () => {
+      updateBtn.disabled = true; // applyUpdate() leads to a reload - nothing left to click again for
+      applyUpdate();
+    });
+    onUpdateAvailable(() => { updateBtn.hidden = false; });
+
     // Standalone bell - deliberately NOT inside headerMenu (the user wants
     // new-notification visibility at a glance, not one tap deep in a
     // hamburger menu). Links straight to the notification feed (Task #38);
@@ -250,7 +266,7 @@ class Shell {
       idAvatarEl = nextAvatar;
     });
 
-    header.append(brand, backBtn, forwardBtn, spacer, this.headerMenu.el, bellBtn, idLink);
+    header.append(brand, backBtn, forwardBtn, spacer, updateBtn, this.headerMenu.el, bellBtn, idLink);
 
     this.toolbarEl = document.createElement('div');
     this.toolbarEl.className = 'qu-shell-toolbar';
