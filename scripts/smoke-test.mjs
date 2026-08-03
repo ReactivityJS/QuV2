@@ -62,29 +62,48 @@
  *      self-correct via syncFetch-on-miss/backgroundRefresh-on-hit, closing
  *      a real multi-device bug report where these three specifically never
  *      synced to a second device/session without several manual reloads.
- *  15. SyncEngine.waitForAck(): resolves once a peer's `sync-ack` confirms a
+ *  15. Private read-marker (markRead) syncs across two "devices" SHARING ONE
+ *      IDENTITY (unlike #14, which is two different identities), without
+ *      subscribe() - the same private-per-actor path, but the read side
+ *      this time is a second session logged into the identical identity.
+ *  16. SyncEngine.waitForAck(): resolves once a peer's `sync-ack` confirms a
  *      specific write was durably persisted (including the race where the
  *      ack arrives before the call), and times out - rather than hanging or
  *      resolving incorrectly - for a write that was never acknowledged.
- *  16. Identity backup/transfer: QuIdentityEngine.exportSeedCode() ->
+ *  17. Identity backup/transfer: QuIdentityEngine.exportSeedCode() ->
  *      importSeedCode() reconstructs the SAME identity (same derived main
  *      keypair) in a fresh store, the cross-device mechanism
  *      apps/profile/client.js's backup section and apps/shell's onboarding
  *      screen both build their UI around - plus the overwrite guard
  *      (rejects a conflicting import without { overwrite: true }) and
  *      malformed-code rejection.
- *  17. @qu/qr: encodeToImageData() -> decodeFromImageData() round-trips a
+ *  18. @qu/qr: encodeToImageData() -> decodeFromImageData() round-trips a
  *      real payload-shaped string (the exact shape exportSeedCode()
  *      produces) through actual QR encoding/decoding - no browser/DOM
  *      needed, see that package's own doc comment for why.
- *  18. Cross-device data recovery: a SECOND client that imports device A's
+ *  19. Cross-device data recovery: a SECOND client that imports device A's
  *      backup code must not just derive the same keypair - its
  *      OWN alias/avatar/epub (ProfileService.getOwnProfile()) and starred
  *      items (StarredService, e.g. Favorites) must actually show up too,
  *      by backfilling from the relay rather than starting blank. Both had
  *      NO backfill at all before this section existed (found from a real
- *      user report after #16 shipped: "epub and alias/favorites don't
+ *      user report after #17 shipped: "epub and alias/favorites don't
  *      transfer") - this is the regression test for that fix.
+ *  20. Hooks: @qu/foundation's HookBus - run() sequentially transforms a
+ *      payload through every registered handler (the contract
+ *      @qu/thread-ui's mountThreadView() relies on for
+ *      'thread.beforePostMessage'), notify() fires side-effect listeners
+ *      in parallel without one throwing handler blocking the others (the
+ *      contract 'thread.afterPostMessage' relies on).
+ *  21. Flags: @qu/services' FlagService - private mode stays isolated per
+ *      entity kind for the SAME flagType/entityRef (proving
+ *      `paths.flagPath()`'s namespacing actually separates them), with the
+ *      pre-existing 'apps'/'contacts' StarredService namespaces preserved
+ *      via FlagService's legacy-namespace mapping (FavoritesService.add()
+ *      and FlagService.hasPrivate('favorite','app',...) must agree); public
+ *      mode's signed per-actor counter (Like) backfills its count and actor
+ *      list to a session that never subscribed, the same syncFetch-on-miss
+ *      pattern ThreadService's reactions already use.
  *
  * NOT covered here (verified manually with Playwright during development,
  * not wired into this script to avoid adding a browser-automation
@@ -96,7 +115,7 @@
  * (camera-based QR scanning in particular - `getUserMedia`/`<video>` have
  * no meaningful Node equivalent), and IndexedDBAdapter.destroy() (there is
  * no `indexedDB` global in Node) - the identity/QR *logic* those UIs are
- * built on is what sections 16-17 above actually verify.
+ * built on is what sections 17-18 above actually verify.
  */
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -986,6 +1005,128 @@ try {
     deviceA.sync.close(); deviceA.transport.close();
     deviceB.sync.close(); deviceB.transport.close();
     console.log('    OK - alias, avatar, epub, private fields, and favorites all backfill onto a freshly-imported identity');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Hooks: HookBus runs sequential transforms and notifies side-effect listeners');
+  // ---------------------------------------------------------------------
+  {
+    const { HookBus } = await import('@qu/foundation');
+    const hooks = new HookBus();
+
+    // run(): sequential, ordered by `order` (ties keep registration order -
+    // 'first' and 'observer-only' are both left at the default order 0, so
+    // 'first' - registered earlier - runs before 'observer-only', both
+    // ahead of 'second' at order 1), each handler sees the PREVIOUS
+    // handler's patch, and a handler returning nothing leaves the payload
+    // untouched - the exact contract @qu/thread-ui's mountThreadView()
+    // relies on for 'thread.beforePostMessage' (see that file's own doc
+    // comment).
+    const order = [];
+    hooks.on('thread.beforePostMessage', (payload) => { order.push('first'); return { body: `${payload.body} [first]` }; });
+    hooks.on('thread.beforePostMessage', (payload) => { order.push('second'); return { body: `${payload.body} [second]` }; }, { order: 1 });
+    hooks.on('thread.beforePostMessage', () => { order.push('observer-only'); }); // no return value - must not clobber body
+    const result = await hooks.run('thread.beforePostMessage', { spaceId: 'x', threadId: 'y', body: 'hello' });
+    assert.deepEqual(order, ['first', 'observer-only', 'second'], 'run() must call handlers in `order` sequence (ties keep registration order), not in parallel');
+    assert.equal(result.body, 'hello [first] [second]', 'each handler must see the PREVIOUS one\'s patch, and a handler returning nothing must not overwrite it');
+    assert.equal(result.spaceId, 'x', 'fields no handler touched must survive untouched');
+
+    // notify(): parallel, side-effect only, one throwing handler must not
+    // stop the others (see HookBus.notify()'s own doc comment) - the
+    // contract 'thread.afterPostMessage' relies on for e.g. notifications.
+    const seen = [];
+    hooks.on('thread.afterPostMessage', () => { throw new Error('a broken listener'); });
+    hooks.on('thread.afterPostMessage', (payload) => { seen.push(payload.message.id); });
+    await hooks.notify('thread.afterPostMessage', { message: { id: 'msg-1' } });
+    assert.deepEqual(seen, ['msg-1'], 'notify() must still run every OTHER handler even if one throws');
+
+    console.log('    OK - HookBus.run() sequentially transforms a payload and HookBus.notify() fires side-effect listeners independently of failures');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Flags: FlagService private mode (per-entity-kind isolation) and public mode (signed counter + syncFetch backfill)');
+  // ---------------------------------------------------------------------
+  {
+    const { DocumentEngine, CollectionEngine, ThreadEngine } = await import('@qu/engines');
+    const { createServices } = await import('@qu/services');
+    const { MemoryAdapter } = await import('@qu/runtime');
+
+    async function connectClient() {
+      const rt = new QuRuntime({ storeAdapter: new MemoryAdapter() });
+      new DocumentEngine(rt.core);
+      new CollectionEngine(rt.core);
+      new ThreadEngine(rt.core);
+      const identity = new QuIdentityEngine(rt.core);
+      await identity.importMnemonic(identity.generateMnemonic());
+      const transport = new WebSocketClientTransport(`ws://127.0.0.1:${relayA.port}`, { WebSocketImpl: ws });
+      await transport.connect();
+      const sync = new SyncEngine(rt.core, transport, { publishAllTo: 'relay' });
+      const Qu = createServices(rt.core, {
+        identityEngine: identity,
+        syncFetch: (p) => sync.fetch(p),
+        getSyncGeneration: () => sync.getGeneration(),
+      });
+      return { identity, sync, transport, Qu };
+    }
+
+    const alice = await connectClient();
+    const bob = await connectClient();
+    const carol = await connectClient();
+    const alicePub = await alice.Qu.actors.whoAmI();
+    const bobPub = await bob.Qu.actors.whoAmI();
+
+    // --- private mode: same flagType + entityRef, DIFFERENT entityKinds -
+    // must not collide, proving the namespace really is per-entity-kind
+    // (see flag-service.js's privateNamespace()).
+    const sharedRef = 'shared-id-123';
+    await alice.Qu.flags.setPrivate('bookmark', 'forum-thread', sharedRef, true);
+    assert.equal(await alice.Qu.flags.hasPrivate('bookmark', 'forum-thread', sharedRef), true, 'bookmarking a forum-thread must be readable back');
+    assert.equal(await alice.Qu.flags.hasPrivate('bookmark', 'user', sharedRef), false, 'the SAME entityRef under a DIFFERENT entityKind must not be flagged too - proves entity-kind isolation');
+    await alice.Qu.flags.setPrivate('bookmark', 'user', sharedRef, true);
+    assert.equal(await alice.Qu.flags.hasPrivate('bookmark', 'user', sharedRef), true, 'the user-kind bookmark must now be set independently');
+    await alice.Qu.flags.setPrivate('bookmark', 'forum-thread', sharedRef, false);
+    assert.equal(await alice.Qu.flags.hasPrivate('bookmark', 'forum-thread', sharedRef), false, 'unflagging one entity kind must not affect the other');
+    assert.equal(await alice.Qu.flags.hasPrivate('bookmark', 'user', sharedRef), true, '...which the previous assertion confirms stayed untouched');
+
+    // --- legacy-namespace compatibility: flagType 'favorite'/entityKind
+    // 'app' must be the SAME storage FavoritesService already used before
+    // this Service existed (proven by cross-reading through both APIs).
+    await alice.Qu.favorites.add('chat');
+    assert.equal(await alice.Qu.flags.hasPrivate('favorite', 'app', 'chat'), true, "FavoritesService.add() and FlagService.hasPrivate('favorite','app',...) must agree - same underlying namespace");
+
+    // --- public mode: alice and bob each flag the same entity; carol -
+    // who never subscribed to anything - must see the correct aggregate
+    // purely via syncFetch-on-miss backfill, same as ThreadService reactions.
+    // The two writes are deliberately NOT back-to-back: alice's own
+    // collection-index write needs to actually reach relayA before bob's
+    // OWN addItem() read-modify-write cycle reads the current list, or bob
+    // (whose local store has never seen this collection either) would
+    // read-modify-write from an empty list and silently clobber alice's
+    // entry with his own - the exact same "two truly concurrent writers on
+    // a shared collection" race CollectionService's own doc comment
+    // documents as an accepted limitation for a SINGLE writer's retry, not
+    // a guarantee that an EARLIER, already-completed writer's entry can
+    // never be overwritten by a later writer who simply hasn't heard about
+    // it yet.
+    const spaceId = 'forum';
+    await alice.Qu.flags.setPublic(spaceId, 'like', 'thread-message', 'topic-42', true);
+    await new Promise((r) => setTimeout(r, 200)); // let alice's write actually reach relayA before bob reads current state
+    await bob.Qu.flags.setPublic(spaceId, 'like', 'thread-message', 'topic-42', true);
+    await new Promise((r) => setTimeout(r, 200)); // let bob's write reach relayA
+
+    const { count, actorPubs } = await carol.Qu.flags.getPublicFlags(spaceId, 'like', 'thread-message', 'topic-42');
+    assert.equal(count, 2, 'carol must see both likes via syncFetch backfill, with no subscribe() and no prior local knowledge of this collection');
+    assert.deepEqual([...actorPubs].sort(), [alicePub, bobPub].sort(), 'the aggregate must list exactly the two actors who actually signed a like, trusting only each QuBit\'s own verified pub');
+
+    const aliceHasLiked = await carol.Qu.flags.hasPublicFlag(spaceId, 'like', 'thread-message', 'topic-42', alicePub);
+    assert.equal(aliceHasLiked, true, "hasPublicFlag() must resolve true for an actor who did flag, backfilled the same way");
+    const carolHasLiked = await carol.Qu.flags.hasPublicFlag(spaceId, 'like', 'thread-message', 'topic-42', await carol.Qu.actors.whoAmI());
+    assert.equal(carolHasLiked, false, 'hasPublicFlag() must resolve false for an actor who never flagged, not just error/undefined');
+
+    alice.sync.close(); alice.transport.close();
+    bob.sync.close(); bob.transport.close();
+    carol.sync.close(); carol.transport.close();
+    console.log('    OK - private flags stay isolated per entity kind (with legacy favorite/app compatibility preserved), and a public flag\'s signed count/actor list backfill correctly to a session that never subscribed');
   }
 
   // ---------------------------------------------------------------------
