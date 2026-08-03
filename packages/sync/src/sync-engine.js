@@ -102,6 +102,7 @@ export class SyncEngine {
   #generation = 0;
   #reconnectCallbacks = []; // app-level onReconnect() listeners (see below) - separate from the transport's OWN reconnect hook, which this class already consumes internally to replay subscriptions
   #outbox; // see outbox.js - only ever set for a publishAllTo (client) SyncEngine
+  #onPeerIdentified; // see constructor's own doc comment
 
   /**
    * @param {import('@qu/core').QuCore} qu
@@ -129,12 +130,25 @@ export class SyncEngine {
    *   on every (re)connect - closes the one gap the transport's own
    *   in-memory send queue can't (a reload while offline). Only meaningful
    *   together with `publishAllTo`; ignored otherwise.
+   *   `onPeerIdentified(peerId, actorPub)`: called whenever an incoming
+   *   synced write's signature verifies (see `#handleSync`'s `isAuthentic()`
+   *   check) - `actorPub` is therefore never spoofable, it's exactly as
+   *   trustworthy as any other signed QuBit in this codebase. This is a
+   *   PASSIVE, free side effect of traffic that's already happening (no new
+   *   wire message, no handshake) - a relay uses it to learn "which peerId
+   *   belongs to which actor" from the writes it already receives (e.g. a
+   *   thread-presence heartbeat, same as any other signed write), for
+   *   things like deciding whether a push notification is redundant because
+   *   the recipient is visibly still connected (see @qu/relay's
+   *   `#deliverThreadPush()`). Left unset (the default) for a peer with no
+   *   reason to care who's connected, e.g. a plain client SyncEngine.
    */
-  constructor(qu, transport, { publishAllTo = null, outbox = null } = {}) {
+  constructor(qu, transport, { publishAllTo = null, outbox = null, onPeerIdentified = null } = {}) {
     this.#qu = qu;
     this.#transport = transport;
     this.#publishAllTo = publishAllTo;
     this.#outbox = outbox;
+    this.#onPeerIdentified = onPeerIdentified;
 
     this.#unsubscribeLocalWrites = this.#qu.onStorageChange(async ({ path, quBit, origin }) => {
       // `origin === 'sync'` means this notify came from QuStore.putSealed()
@@ -524,6 +538,15 @@ export class SyncEngine {
     if (!(await isAuthentic(quBit))) {
       console.warn(`[SyncEngine] rejecting synced QuBit for "${path}": signature does not verify`);
       return;
+    }
+    // See the constructor's own doc comment - only reached for a write
+    // whose signature just verified above, so this pub is trustworthy here
+    // even though it's never re-checked against any Engine-level ACL.
+    // Converted to base64url to match the canonical `actorPub` string
+    // shape every other Service in this codebase already uses (QuBit.pub
+    // itself is plain base64 - see isAuthentic() above).
+    if (this.#onPeerIdentified && quBit.pub) {
+      this.#onPeerIdentified(originPeerId, QuCrypto.toBase64Url(QuCrypto.fromBase64(quBit.pub)));
     }
     await this.#persistDirectly(path, quBit);
     // Hub re-broadcast: a relay with N subscribed clients must forward what

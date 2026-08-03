@@ -69,6 +69,22 @@ const DEFAULT_RELAY_SETTINGS = Object.freeze({
   ]),
 });
 
+// Presence-aware push suppression (see the constructor's own doc comment
+// for `presenceByActor` and #deliverThreadPush()'s use of it below): an
+// actor last seen within this window is treated as "still online enough
+// that a web push would be redundant" - they'll see the in-app
+// notification (never suppressed) the moment they're back. Deliberately a
+// plain time window, not a live "is this exact peerId's socket still
+// open" check - the transport already tears the connection down promptly
+// on a real disconnect, so a stale entry ages out on its own within this
+// window either way, and tracking peerId liveness on top would be
+// meaningfully more bookkeeping for a case this window already covers.
+const PRESENCE_FRESH_MS = 60_000;
+// Bounded the same way @qu/identity's own key/attestation caches are (see
+// identity.js) - a long-running relay must not grow this map forever as
+// distinct actors pass through over its lifetime.
+const MAX_PRESENCE_ENTRIES = 2000;
+
 /**
  * @typedef {Object} RemoteAppConfig
  * @property {string} manifestUrl
@@ -193,6 +209,12 @@ export class QuRelay {
     this.loader = new QuLoader(this.core, this.registry);
     this.vapidKeys = null;
 
+    // actorPub -> lastSeenAt(ms) - see PRESENCE_FRESH_MS/MAX_PRESENCE_ENTRIES
+    // above and #deliverThreadPush()'s use of this below. Populated
+    // passively by `this.sync`'s `onPeerIdentified` callback (see boot()),
+    // not written to directly anywhere else.
+    this.presenceByActor = new Map();
+
     this._httpServer = null;
     this._wss = null;
     this.sync = null;
@@ -243,7 +265,9 @@ export class QuRelay {
 
     const settings = await this.#getSettings();
     this.transport = new WebSocketServerTransport(this._wss, { maxMessagesPerMinute: settings.rateLimits.maxMessagesPerMinute });
-    this.sync = new SyncEngine(this.core, this.transport);
+    this.sync = new SyncEngine(this.core, this.transport, {
+      onPeerIdentified: (_peerId, actorPub) => this.#recordPresence(actorPub),
+    });
 
     // Push delivery: fires for EVERY thread message write this relay ever
     // sees, whether authored locally (rare - the relay itself is never a
@@ -345,6 +369,27 @@ export class QuRelay {
    * @param {string} threadId
    * @param {object} quBit - The message QuBit as just persisted.
    */
+  /**
+   * Records that `actorPub` was just seen (see `this.sync`'s
+   * `onPeerIdentified` callback, wired in boot()) - called passively off
+   * whatever traffic that identity already generates (a posted message, a
+   * thread-presence heartbeat, ...), never a dedicated "I'm online" signal.
+   * @param {string} actorPub
+   */
+  #recordPresence(actorPub) {
+    this.presenceByActor.delete(actorPub); // re-insert to move it to the end - see the eviction loop below, which relies on Map's insertion order
+    this.presenceByActor.set(actorPub, Date.now());
+    while (this.presenceByActor.size > MAX_PRESENCE_ENTRIES) {
+      this.presenceByActor.delete(this.presenceByActor.keys().next().value);
+    }
+  }
+
+  /** @param {string} actorPub @returns {boolean} */
+  #isRecentlyOnline(actorPub) {
+    const lastSeenAt = this.presenceByActor.get(actorPub);
+    return typeof lastSeenAt === 'number' && Date.now() - lastSeenAt < PRESENCE_FRESH_MS;
+  }
+
   async #deliverThreadPush(spaceId, threadId, quBit) {
     // A relay-authored notice about a message IN a notifications thread
     // would loop forever (deliver -> write notice -> deliver -> ...) -
@@ -461,6 +506,11 @@ export class QuRelay {
       }
 
       if (!this.vapidKeys) continue;
+      // Still visibly connected (see #recordPresence()/PRESENCE_FRESH_MS
+      // above) - the in-app notification just written above already covers
+      // them (their own client sees it live via subscribe(), same as the
+      // header badge), a redundant push would just be noise.
+      if (this.#isRecentlyOnline(actorPub)) continue;
       const subscriptions = await this.services.pushSubscriptions.listSubscriptionsFor(actorPub);
       for (const subscription of subscriptions) {
         try {

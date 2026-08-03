@@ -6,5 +6,5 @@
 export { Registry } from './registry.js';
 export { HookBus } from './hooks.js';
 export { DependencyResolver } from './dependency-resolver.js';
-export { validateManifest, REQUIRED_FIELDS, MANIFEST_KINDS } from './manifest.js';
+export { validateManifest, REQUIRED_FIELDS, MANIFEST_KINDS, PUSH_ACTION_TYPES } from './manifest.js';
 export { actionsForMount, resolveActionHref } from './actions.js';

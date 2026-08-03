@@ -46,6 +46,9 @@ export const REQUIRED_FIELDS = Object.freeze(['name', 'version', 'main']);
 /** The three kinds of package the Loader understands. Apps are UI-only by convention (see brainstorming). */
 export const MANIFEST_KINDS = Object.freeze(['engine', 'service', 'app']);
 
+/** The small shared vocabulary a `pushActions` entry's optional `type` may use - see that field's own doc comment below for why. */
+export const PUSH_ACTION_TYPES = Object.freeze(['create', 'update', 'delete', 'mention', 'custom']);
+
 /**
  * @typedef {Object} Manifest
  * @property {string} name - Unique registry name, e.g. "thread-engine".
@@ -87,9 +90,10 @@ export const MANIFEST_KINDS = Object.freeze(['engine', 'service', 'app']);
  *   see apps/shell/src/load-client-module.js.
  * @property {string} [clientSignature] - base64url Ed25519 signature over
  *   `clientMain`'s bytes, the `clientMain` counterpart to `signature`.
- * @property {Array<{id: string, label: string}>} [pushActions] - Push-
+ * @property {Array<{id: string, label: string, type?: 'create'|'update'|'delete'|'mention'|'custom'}>} [pushActions] - Push-
  *   notification categories THIS app can trigger (e.g. `{id: "mention",
- *   label: "Mentions"}`, `{id: "newMessage", label: "New messages"}`) -
+ *   label: "Mentions", type: "mention"}`, `{id: "newMessage", label: "New
+ *   messages", type: "create"}`) -
  *   `id` is what @qu/relay's push delivery passes as `functionName` to
  *   NotificationPrefsService.shouldNotify() (see @qu/relay's
  *   `#deliverThreadPush()`), `label` is what the Notifications app's
@@ -98,6 +102,14 @@ export const MANIFEST_KINDS = Object.freeze(['engine', 'service', 'app']);
  *   settings list from every loaded app's declared `pushActions` instead
  *   of a hard-coded list. An app with no push-worthy events of its own
  *   (most apps) simply omits this field.
+ *   `type` is an OPTIONAL, purely descriptive taxonomy hint (treated as
+ *   `'custom'` when omitted) - today it's metadata only, not read by
+ *   `shouldNotify()`/`#deliverThreadPush()` or any settings UI; it exists
+ *   so every app declaring a notification category uses the SAME small
+ *   vocabulary from day one instead of inventing its own free-form `id`
+ *   naming with no shared meaning, ready for a future notifications
+ *   UI/relay-dedup pass to group or icon-badge actions by type without
+ *   every existing manifest needing to change.
  * @property {Array<{mount: string, id: string, label: string, icon?: string, hrefTemplate: string, order?: number}>} [actions] -
  *   UI actions THIS app contributes to a named "mount" (an extension point
  *   some OTHER app renders, e.g. `"contact-row"`) - the concrete,
@@ -162,8 +174,9 @@ export function validateManifest(manifest) {
   if (manifest.pushActions !== undefined) {
     const valid = Array.isArray(manifest.pushActions) && manifest.pushActions.every(
       (a) => a && typeof a === 'object' && typeof a.id === 'string' && typeof a.label === 'string'
+        && (a.type === undefined || PUSH_ACTION_TYPES.includes(a.type))
     );
-    if (!valid) throw new Error('Invalid manifest: "pushActions" must be an array of {id, label} strings');
+    if (!valid) throw new Error(`Invalid manifest: "pushActions" must be an array of {id, label, type?} where type is one of ${PUSH_ACTION_TYPES.join(', ')}`);
   }
   if (manifest.actions !== undefined) {
     const valid = Array.isArray(manifest.actions) && manifest.actions.every(

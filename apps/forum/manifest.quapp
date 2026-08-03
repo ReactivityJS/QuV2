@@ -9,6 +9,6 @@
   "navOrder": 10,
   "requires": ["document-service", "collection-service", "thread-service"],
   "pushActions": [
-    { "id": "mention", "label": "Mentions" }
+    { "id": "mention", "label": "Mentions", "type": "mention" }
   ]
 }

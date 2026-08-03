@@ -45,7 +45,7 @@
  * Routes: `#/chat` (room list), `#/chat/<peerActorPub>` (1:1 room),
  * `#/chat/g/<groupId>` (group room).
  */
-import { THREAD_PRESETS, ChatService, paths } from '@qu/services';
+import { THREAD_PRESETS, ChatService, paths, detectLinks } from '@qu/services';
 import { watch } from '@qu/reactive';
 import { createI18n } from '@qu/i18n';
 import { renderAvatar as renderQuAvatar, injectStyle } from '@qu/ui';
@@ -513,29 +513,15 @@ function setChatSettings(patch) {
 // don't need CORS to display) - deliberately NOT doing a cross-origin
 // fetch() of arbitrary third-party HTML for metadata, which would need
 // either relay-side proxying or fighting CSP for no real benefit here.
+// Detection itself lives in @qu/services' link-detect.js, shared with
+// @qu/services' thread-formatting.js (which auto-links bare URLs the same
+// way for threads that opted into 'markdown' formatting) - one URL-matching
+// implementation, not two that could quietly drift apart.
 // ============================================================================
-const URL_RE = /(https?:\/\/[^\s<>"]+)/gi;
-
-/** @param {string} text @returns {Array<{type:'text'|'link', value:string, hostname?:string}>} */
-function linkifySegments(text) {
-  const segments = [];
-  let lastIndex = 0;
-  for (const match of text.matchAll(URL_RE)) {
-    const url = match[0];
-    const index = match.index;
-    if (index > lastIndex) segments.push({ type: 'text', value: text.slice(lastIndex, index) });
-    let hostname = url;
-    try { hostname = new URL(url).hostname; } catch { /* not a real URL - fall back to showing it verbatim */ }
-    segments.push({ type: 'link', value: url, hostname });
-    lastIndex = index + url.length;
-  }
-  if (lastIndex < text.length) segments.push({ type: 'text', value: text.slice(lastIndex) });
-  return segments;
-}
 
 /** Renders `text` as a text node with any http(s) URLs turned into real, clickable, new-tab anchors - used instead of a plain textContent assignment wherever message bodies are shown. */
 function renderLinkedText(container, text) {
-  for (const seg of linkifySegments(text)) {
+  for (const seg of detectLinks(text)) {
     if (seg.type === 'text') { container.appendChild(document.createTextNode(seg.value)); continue; }
     const a = document.createElement('a');
     a.href = seg.value;
@@ -549,7 +535,7 @@ function renderLinkedText(container, text) {
 
 /** @returns {HTMLElement|null} A compact hostname+URL preview card for the FIRST link in `text` (skipped if it's a location URL, which already gets its own richer map-tile preview - see locationBlock()). */
 function buildLinkPreview(text) {
-  const link = linkifySegments(text).find((seg) => seg.type === 'link');
+  const link = detectLinks(text).find((seg) => seg.type === 'link');
   if (!link || parseLocationFromUrl(link.value)) return null;
   const a = document.createElement('a');
   a.className = 'qu-chat-link-preview';
@@ -991,7 +977,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
         wrap.append(file, downloadBtn(message.attachment.assetId));
       }
     } else if (message.body) {
-      const link = linkifySegments(message.body).find((s) => s.type === 'link');
+      const link = detectLinks(message.body).find((s) => s.type === 'link');
       if (link && !parseLocationFromUrl(link.value)) {
         const card = document.createElement('div');
         card.className = 'qu-chat-link-preview qu-chat-search-link-preview';
@@ -1099,7 +1085,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
           const isImage = mime.startsWith('image/');
           const isVideo = mime.startsWith('video/');
           const isOtherFile = !!message.attachment && !isImage && !isVideo;
-          const hasLink = !!message.body && linkifySegments(message.body).some((s) => s.type === 'link');
+          const hasLink = !!message.body && detectLinks(message.body).some((s) => s.type === 'link');
           if (activeFilter === 'links' && !hasLink) continue;
           if (activeFilter === 'images' && !isImage) continue;
           if (activeFilter === 'videos' && !isVideo) continue;

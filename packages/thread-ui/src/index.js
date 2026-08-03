@@ -37,6 +37,14 @@ const STYLE = `
   .qu-thread-body[contenteditable="true"] { outline: 1px dashed #8888; border-radius: 0.3rem; padding: 0.2rem 0.3rem; }
   .qu-thread-edit-actions { display: flex; gap: 0.4rem; margin-top: 0.3rem; }
   .qu-thread-edited-mark { opacity: 0.5; font-size: 0.75em; margin-left: 0.4rem; }
+  .qu-code-block { background: #8882; border-radius: 0.4rem; padding: 0.5rem 0.7rem; overflow-x: auto; margin: 0.3rem 0; }
+  .qu-code-block code, .qu-inline-code { font-family: ui-monospace, monospace; font-size: 0.9em; }
+  .qu-inline-code { background: #8882; border-radius: 0.25rem; padding: 0.05rem 0.3rem; }
+  .qu-hashtag { color: #5b5bd6; }
+  .qu-mention { font-weight: 600; text-decoration: none; color: inherit; }
+  .qu-mention:hover { text-decoration: underline; }
+  .qu-spoiler { background: #8886; color: transparent; border-radius: 0.2rem; cursor: pointer; user-select: none; }
+  .qu-spoiler.qu-spoiler-revealed { background: #8882; color: inherit; cursor: text; user-select: text; }
 `;
 
 function ensureStyle() {
@@ -180,6 +188,15 @@ export function mountThreadView(container, {
       // body FIRST and only then substitutes a small whitelisted set of
       // tags (see that file's own doc comment) - never raw user input.
       body.innerHTML = message.formattedHtml;
+      // Spoiler reveal is the one piece of that markup that needs live
+      // interactivity - formatMarkdown() itself stays a pure function (no
+      // DOM access), so the click-to-reveal toggle lives here instead, one
+      // delegated listener per rendered body rather than one per spoiler
+      // span (a message can contain several).
+      body.addEventListener('click', (e) => {
+        const spoiler = e.target.closest('.qu-spoiler');
+        if (spoiler) spoiler.classList.toggle('qu-spoiler-revealed');
+      });
     } else {
       body.textContent = message.body;
     }
