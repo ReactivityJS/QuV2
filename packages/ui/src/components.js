@@ -9,15 +9,19 @@
  * - importing this in Node throws immediately). Import it directly wherever
  * it's used; it registers the tags as a side effect.
  *
- * Two elements plus two small helpers - not more:
+ * Elements:
  *   <qu-view>  read-only, live-updating.
  *   <qu-bind>  IS a <qu-view> plus write-back, implemented as a one-method
  *              subclass, not a second mechanism.
  *   <qu-list>  the declarative form of "one <template> stamped per item in
- *              a collection".
+ *              a collection", keyed by each item's own path (see its own
+ *              doc comment below).
  *   <qu-key>   shows the CURRENT list item's own id (its path's last
  *              segment) - the one thing a <qu-list> <template> has no other
  *              declarative way to show.
+ *   <qu-if>    shows/hides its children based on a watched value's
+ *              truthiness (or equality to a fixed attribute) - see its own
+ *              doc comment below.
  *
  * ---------------------------------------------------------------------
  * Attributes (<qu-view>/<qu-bind>):
@@ -206,10 +210,15 @@ class ItemContext {
  *     </template>
  *   </qu-list>
  *
- * Re-renders the ENTIRE list on every change (simplest correct behaviour,
- * matching a collection's own "one document, replaced wholesale" write
- * model - see CollectionService). Fine for the collection sizes this
- * primitive targets; not a diffing/keyed-reconciliation list renderer.
+ * Keyed by each item's own `path`: re-renders reuse the SAME cloned
+ * elements across changes (tracked in `this._renderedByPath`), only
+ * removing entries that dropped out and only reordering when position
+ * actually changed - unlike a full teardown/rebuild, this preserves focus,
+ * scroll position and any per-item local DOM state (e.g. an open
+ * <details>) on items that didn't change, at the cost of "an item that
+ * keeps the same path but everything else changes" doing an in-place
+ * child update rather than a fresh clone (already the case - the clone's
+ * descendants are plain <qu-view>/<qu-bind>, which update themselves).
  */
 export class QuListElement extends HTMLElement {
   static get observedAttributes() { return ['path']; }
@@ -235,22 +244,48 @@ export class QuListElement extends HTMLElement {
     const template = this.querySelector('template');
     if (!template) { console.error('[qu-list] missing a <template> child to stamp per item', this); return; }
 
+    this._renderedByPath = new Map();
     this._off = watch(context, path, (items) => this._render(items ?? [], context, template));
   }
 
   _render(items, qu, template) {
-    this._clearItems();
-    for (const item of items) {
-      // A collection can reference a path that no longer resolves (e.g. a
-      // deleted item) - CollectionEngine's resolution then delivers `null`
-      // for that slot. Skip it rather than stamping a clone with no real
-      // item behind it (every descendant <qu-view>/<qu-bind> would have no
-      // `ownPath` to fall back to and just log a "no path" error).
-      if (!item?.path) continue;
-      const clone = template.content.cloneNode(true);
-      for (const el of [...clone.children]) el.qu = new ItemContext(qu, item.path);
-      this.appendChild(clone);
+    // A collection can reference a path that no longer resolves (e.g. a
+    // deleted item) - CollectionEngine's resolution then delivers `null`
+    // for that slot. Skip it rather than stamping a clone with no real
+    // item behind it (every descendant <qu-view>/<qu-bind> would have no
+    // `ownPath` to fall back to and just log a "no path" error).
+    const validItems = items.filter((item) => item?.path);
+
+    const nextByPath = new Map();
+    for (const item of validItems) {
+      let els = this._renderedByPath.get(item.path);
+      if (!els) {
+        const clone = template.content.cloneNode(true);
+        els = [...clone.children];
+        for (const el of els) el.qu = new ItemContext(qu, item.path);
+      }
+      nextByPath.set(item.path, els);
     }
+
+    // Anything that dropped out of the new item list gets removed - not
+    // reused even if the same path reappears later, since a removed
+    // <qu-view>'s subscription is gone with it.
+    for (const [path, els] of this._renderedByPath) {
+      if (!nextByPath.has(path)) for (const el of els) el.remove();
+    }
+
+    // Walk the target order, moving/inserting only what isn't already in
+    // place - insertBefore() on a node that's already exactly there is a
+    // no-op in the DOM, so unchanged items never move.
+    let cursor = [...this.children].find((child) => child.tagName !== 'TEMPLATE') ?? null;
+    for (const item of validItems) {
+      for (const el of nextByPath.get(item.path)) {
+        if (el !== cursor) this.insertBefore(el, cursor);
+        else cursor = el.nextSibling;
+      }
+    }
+
+    this._renderedByPath = nextByPath;
   }
 
   _clearItems() {
@@ -263,6 +298,7 @@ export class QuListElement extends HTMLElement {
     this._off?.();
     this._off = null;
     this._clearItems();
+    this._renderedByPath = null;
   }
 }
 
@@ -283,7 +319,66 @@ export class QuKeyElement extends HTMLElement {
   }
 }
 
+/**
+ * `<qu-if path="..." field="..." [equals="..."] [negate]>` - toggles
+ * `this.hidden` on a watched value, live:
+ *   - no `equals`: hidden when the (optional `field` of the) value is
+ *     falsy, shown when truthy.
+ *   - `equals="x"`: shown only when `String(value) === "x"` (e.g. an enum
+ *     status field), hidden otherwise.
+ *   - `negate`: inverts either of the above (a plain "shown unless" form,
+ *     rather than requiring a second watch/attribute just to flip it).
+ * Same `path`/`field`/implicit-`ownPath` resolution as <qu-view> - inside
+ * a <qu-list> <template>, an omitted `path` defaults to that item's own
+ * path, same as everywhere else in this file.
+ *
+ *   <qu-if field="archived" negate><qu-view field="title"></qu-view></qu-if>
+ *   <qu-if field="status" equals="published">...</qu-if>
+ */
+export class QuIfElement extends HTMLElement {
+  static get observedAttributes() { return ['path', 'field', 'equals']; }
+
+  connectedCallback() { this._mount(); }
+  disconnectedCallback() { this._unmount(); }
+
+  attributeChangedCallback(name, oldValue, newValue) {
+    if (oldValue === newValue || !this.isConnected) return;
+    this._mount();
+  }
+
+  _mount(isRetry = false) {
+    this._unmount();
+    const context = findQu(this);
+    if (!context) {
+      if (!isRetry) queueMicrotask(() => { if (this.isConnected && !this._off) this._mount(true); });
+      else console.error('[qu-if] no Qu instance found - set .qu on this element or an ancestor', this);
+      return;
+    }
+    const pathAttr = this.getAttribute('path');
+    const path = pathAttr !== null ? pathAttr : context.ownPath;
+    if (!path) {
+      console.error('[qu-if] missing "path" attribute (and the current .qu context has no implicit path to fall back to)', this);
+      return;
+    }
+    const field = this.getAttribute('field');
+    const hasEquals = this.hasAttribute('equals');
+    const equals = this.getAttribute('equals');
+    const negate = this.hasAttribute('negate');
+    this._off = watch(context, path, (value) => {
+      const actual = field ? value?.[field] : value;
+      const truthy = hasEquals ? String(actual) === equals : !!actual;
+      this.hidden = negate ? truthy : !truthy;
+    });
+  }
+
+  _unmount() {
+    this._off?.();
+    this._off = null;
+  }
+}
+
 if (!customElements.get('qu-view')) customElements.define('qu-view', QuViewElement);
 if (!customElements.get('qu-bind')) customElements.define('qu-bind', QuBindElement);
 if (!customElements.get('qu-list')) customElements.define('qu-list', QuListElement);
 if (!customElements.get('qu-key')) customElements.define('qu-key', QuKeyElement);
+if (!customElements.get('qu-if')) customElements.define('qu-if', QuIfElement);

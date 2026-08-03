@@ -59,6 +59,7 @@
 import { watch } from '@qu/reactive';
 import { paths, THREAD_PRESETS } from '@qu/services';
 import { createI18n } from '@qu/i18n';
+import { injectStyle } from '@qu/ui';
 
 const NAMESPACE = 'calendars';
 const PALETTE = ['#e0483e', '#3e7fe0', '#3ea05e', '#d0a02a', '#9a4fe0', '#e0648a', '#2ab3a6', '#c47a2a'];
@@ -187,13 +188,6 @@ const STYLE = `
   .qu-cal-noaccess { max-width: 28rem; }
 `;
 
-function ensureStyle() {
-  if (document.getElementById(STYLE_ID)) return;
-  const style = document.createElement('style');
-  style.id = STYLE_ID;
-  style.textContent = STYLE;
-  document.head.appendChild(style);
-}
 
 function colorFor(calendarId) {
   let hash = 0;
@@ -252,7 +246,7 @@ function layoutTimedEvents(events) {
 }
 
 export function mount(container, { qu, services, segments, subscribe, fetch: syncFetch }) {
-  ensureStyle();
+  injectStyle(STYLE_ID, STYLE);
   let stopped = false;
   let unwatches = [];
   let nowTimer = null;
@@ -350,7 +344,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     clearWatches();
     const infos = [];
     for (const cal of mine) {
-      subscribe(`/store/${spaceOf(cal.id)}`); // live updates - see original doc comment on why `subscribe()` alone isn't enough for backfill
+      subscribe(paths.spacePath(spaceOf(cal.id))); // live updates - see original doc comment on why `subscribe()` alone isn't enough for backfill
       const path = paths.documentPath(spaceOf(cal.id), 'events');
       unwatches.push(watch(qu, path, () => renderMain(), { initial: false }));
       unwatches.push(watch(qu, paths.documentPath(spaceOf(cal.id), 'meta'), () => renderMain(), { initial: false }));
@@ -931,7 +925,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
   async function renderEventDetailPage(id, eventId) {
     if (stopped) return;
     clearWatches();
-    subscribe(`/store/${spaceOf(id)}`);
+    subscribe(paths.spacePath(spaceOf(id)));
     unwatches.push(watch(qu, paths.documentPath(spaceOf(id), 'events'), () => renderEventDetailPage(id, eventId), { initial: false }));
     unwatches.push(watch(qu, paths.documentPath(spaceOf(id), 'meta'), () => renderEventDetailPage(id, eventId), { initial: false }));
 
@@ -1177,7 +1171,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
   async function renderSharePage(id) {
     if (stopped) return;
     clearWatches();
-    subscribe(`/store/${spaceOf(id)}`);
+    subscribe(paths.spacePath(spaceOf(id)));
     unwatches.push(watch(qu, paths.documentPath(spaceOf(id), 'meta'), () => renderSharePage(id), { initial: false }));
 
     const meta = await fetchDoc(id, 'meta', null);

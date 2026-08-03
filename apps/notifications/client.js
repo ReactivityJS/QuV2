@@ -33,6 +33,7 @@ import { subscribeToPush, unsubscribeFromPush, isPushSubscribed } from '@qu/push
 import { createI18n } from '@qu/i18n';
 import { watch } from '@qu/reactive';
 import { paths } from '@qu/services';
+import { injectStyle } from '@qu/ui';
 
 const DICT = {
   en: {
@@ -89,16 +90,9 @@ const STYLE = `
   .qu-notif-empty { opacity: 0.7; }
 `;
 
-function ensureStyle() {
-  if (document.getElementById(STYLE_ID)) return;
-  const style = document.createElement('style');
-  style.id = STYLE_ID;
-  style.textContent = STYLE;
-  document.head.appendChild(style);
-}
 
 export function mount(container, { qu, services, segments, subscribe, fetch: syncFetch }) {
-  ensureStyle();
+  injectStyle(STYLE_ID, STYLE);
   let stopped = false;
   let stopWatch = null;
 
@@ -113,7 +107,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     const myActorPub = await services.actors.whoAmI();
     if (stopped) return;
     const spaceId = `notifications-${myActorPub}`;
-    subscribe(`/store/${spaceId}`); // live updates for a relay-authored notice arriving while this feed is open
+    subscribe(paths.spacePath(spaceId)); // live updates for a relay-authored notice arriving while this feed is open
 
     const listPath = paths.collectionPath(spaceId, paths.threadMessagesCollectionId('notifications'));
     // `syncFetch` here (see @qu/reactive's watch() own doc comment) closes

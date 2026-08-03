@@ -48,7 +48,7 @@
 import { THREAD_PRESETS, ChatService, paths } from '@qu/services';
 import { watch } from '@qu/reactive';
 import { createI18n } from '@qu/i18n';
-import { renderAvatar as renderQuAvatar } from '@qu/ui';
+import { renderAvatar as renderQuAvatar, injectStyle } from '@qu/ui';
 
 const SPACE = 'chat';
 const REACTION_CHOICES = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '✅'];
@@ -364,13 +364,6 @@ const STYLE = `
   .qu-chat-app [hidden] { display: none !important; }
 `;
 
-function ensureStyle() {
-  if (document.getElementById(STYLE_ID)) return;
-  const style = document.createElement('style');
-  style.id = STYLE_ID;
-  style.textContent = STYLE;
-  document.head.appendChild(style);
-}
 
 function fmtSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -574,8 +567,8 @@ function buildLinkPreview(text) {
   return a;
 }
 
-export function mount(container, { qu, services, segments, subscribe, fetch: syncFetch, waitForAck, onReconnect }) {
-  ensureStyle();
+export function mount(container, { qu, services, segments, subscribe, fetch: syncFetch, waitForAck, onReconnect, hooks }) {
+  injectStyle(STYLE_ID, STYLE);
   let stopped = false;
   let unwatch = null;
   let unwatchPins = null;
@@ -615,7 +608,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
   // under the `blob` mount (`/blob/<space>/...`, see @qu/engines'
   // AssetEngine and its `toBlobPath()`), a completely different top-level
   // prefix from the message/metadata documents under `/store/<space>/...`.
-  subscribe(`/store/${SPACE}`);
+  subscribe(paths.spacePath(SPACE));
   subscribe(`/blob/${SPACE}`);
 
   // Routes: #/chat, #/chat/settings, #/chat/search, #/chat/search/<pub>,
@@ -639,7 +632,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     // (e.g. this identity's OWN createGroup() call, from another tab).
     const inviteSpace = await services.chat.myInviteSpace();
     if (stopped) return;
-    subscribe(`/store/${inviteSpace}`);
+    subscribe(paths.spacePath(inviteSpace));
 
     if (segments[1] === 'settings') await renderSettings();
     else if (searchGroupId) await renderChatSearchPage(myActorPub, { type: 'group', groupId: searchGroupId });
@@ -2597,7 +2590,17 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       replyTo = null;
       renderComposerBanner();
 
-      const posted = await services.threads.postMessage(spaceId, threadId, { body, replyTo: replyToId, extra });
+      // See @qu/thread-ui's mountThreadView() doc comment for what this
+      // hook pair is for - Chat has its own richer compose UI (this
+      // function) rather than using that shared component, so it wires the
+      // same two hooks directly at its own equivalent point.
+      let outgoingBody = body;
+      if (hooks) {
+        const patched = await hooks.run('thread.beforePostMessage', { spaceId, threadId, body: outgoingBody });
+        outgoingBody = patched.body ?? outgoingBody;
+      }
+      const posted = await services.threads.postMessage(spaceId, threadId, { body: outgoingBody, replyTo: replyToId, extra });
+      if (hooks) hooks.notify('thread.afterPostMessage', { spaceId, threadId, message: posted });
       pendingSyncIds.add(posted.id);
       await reload({ forceScrollBottom: true });
       confirmSync(posted.id, paths.threadMessagePath(spaceId, threadId, posted.id), posted.ts);

@@ -31,8 +31,8 @@
  */
 import { createI18n } from '@qu/i18n';
 import { watch } from '@qu/reactive';
-import { paths } from '@qu/services';
-import { renderAvatar } from '@qu/ui';
+import { paths, formatActorLabel, matchesActorQuery } from '@qu/services';
+import { renderAvatar, injectStyle } from '@qu/ui';
 
 const DICT = {
   en: {
@@ -72,16 +72,9 @@ const STYLE = `
   .qu-user-list button { background: none; border: none; cursor: pointer; font-size: 1.1em; flex-shrink: 0; }
 `;
 
-function ensureStyle() {
-  if (document.getElementById(STYLE_ID)) return;
-  const style = document.createElement('style');
-  style.id = STYLE_ID;
-  style.textContent = STYLE;
-  document.head.appendChild(style);
-}
 
 export function mount(container, { qu, services, subscribe }) {
-  ensureStyle();
+  injectStyle(STYLE_ID, STYLE);
   let stopped = false;
   let filterText = '';
   let debounceTimer = null;
@@ -122,9 +115,7 @@ export function mount(container, { qu, services, subscribe }) {
   container.append(heading, search, resultsEl);
 
   function matches(actorPub, profile) {
-    const q = filterText.trim().toLowerCase();
-    if (!q) return true;
-    return (profile?.alias || '').toLowerCase().includes(q) || actorPub.toLowerCase().includes(q);
+    return matchesActorQuery(actorPub, profile, filterText);
   }
 
   async function resolveUnlisted() {
@@ -203,7 +194,7 @@ function row(actorPub, profile, isContact, services, isUnlisted) {
   const li = document.createElement('li');
   if (isUnlisted) li.classList.add('qu-user-unlisted');
 
-  const alias = profile?.alias || `~${actorPub.slice(0, 16)}…`;
+  const alias = formatActorLabel(actorPub, profile);
   const avatar = renderAvatar(actorPub, alias, profile?.avatar, { size: '2.2rem' });
 
   const info = document.createElement('a');

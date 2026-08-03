@@ -1,3 +1,5 @@
+import { HookBus } from './hooks.js';
+
 /**
  * REGISTRY — the single place Engines, Services and Capabilities announce
  * themselves. This is what turns "a pile of loaded modules" into something
@@ -19,6 +21,12 @@
  * `registerEngine`/`registerService`. The Registry is purely a lookup table
  * plus a few invariants (no silent name collisions, clear errors on missing
  * lookups).
+ *
+ * Also carries one `hooks` field (see hooks.js's `HookBus`) - the
+ * imperative sibling of `registerCapability` below, for server-side
+ * `register(qu, manifest, registry)` calls that want to run/transform at a
+ * specific moment (e.g. `registry.hooks.on('cms.beforeSavePage', ...)`)
+ * rather than declare a static per-entity-kind action list.
  */
 export class Registry {
   /** @type {Map<string, {instance: object, manifest: object|null}>} */
@@ -27,6 +35,8 @@ export class Registry {
   #services = new Map();
   /** @type {Map<string, Array<{action: string, handler: Function}>>} */
   #capabilities = new Map();
+  /** @type {HookBus} */
+  hooks = new HookBus();
 
   /**
    * @param {string} name - Unique engine name, e.g. "document-engine".

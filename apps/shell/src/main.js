@@ -30,18 +30,19 @@ import { DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine } from '@qu
 import { QuIdentityEngine, actorPath } from '@qu/identity';
 import { SyncEngine, WebSocketClientTransport } from '@qu/sync';
 import { createServices, paths } from '@qu/services';
+import { HookBus } from '@qu/foundation';
 import { watch } from '@qu/reactive';
 import { renderAvatar } from '@qu/ui';
 import { parseHash, buildHash } from './router.js';
 import { resolveFavoriteApps } from './nav.js';
 import { loadClientModule } from './load-client-module.js';
 import { qLogoSvgMarkup } from './logo.js';
-import { registerServiceWorker } from './pwa.js';
+import { registerServiceWorker, onUpdateAvailable, applyUpdate } from './pwa.js';
 import { listenForNotificationClicks } from '@qu/push-client';
 import { createDisclosureMenu, menuItem } from './menu.js';
 import { buildAppContextMenu } from './context-menu.js';
-import { t } from './i18n.js';
-import { getStoredLocale, setLocale } from '@qu/i18n';
+import { t, locale } from './i18n.js';
+import { getStoredLocale, setLocale, AVAILABLE_LOCALES } from '@qu/i18n';
 import { renderOnboarding } from './onboarding.js';
 
 const STORE_DB_NAME = 'quniverse-store';
@@ -167,6 +168,12 @@ class Shell {
     this.adminPubs = [];
     this.stopMountedApp = null;
     this.appMenu = null;
+    // One instance for the whole session, handed to every mounted app via
+    // its mount() context (`ctx.hooks`, see mod.mount() below) - see
+    // @qu/foundation's HookBus doc comment for why this is a fresh,
+    // client-only instance rather than anything shared with the relay's
+    // own server-side Registry.hooks.
+    this.hooks = new HookBus();
   }
 
   get isAdmin() {
@@ -209,6 +216,46 @@ class Shell {
 
     this.headerMenu = createDisclosureMenu({ label: t('nav.menu'), buttonContent: '☰' });
 
+    // Hidden until onUpdateAvailable() fires (see pwa.js) - a new service
+    // worker/bundle is installed and waiting, but per sw.js's own doc
+    // comment does NOT take over on its own, specifically so this can be a
+    // deliberate user action rather than a reload happening mid-interaction.
+    const updateBtn = document.createElement('button');
+    updateBtn.type = 'button';
+    updateBtn.className = 'qu-shell-update-btn';
+    updateBtn.hidden = true;
+    updateBtn.textContent = t('pwa.updateAvailable');
+    updateBtn.title = t('pwa.updateAvailable');
+    updateBtn.addEventListener('click', () => {
+      updateBtn.disabled = true; // applyUpdate() leads to a reload - nothing left to click again for
+      applyUpdate();
+    });
+    onUpdateAvailable(() => { updateBtn.hidden = false; });
+
+    // Available everywhere, not just buried in Profile's settings section
+    // (see apps/profile/client.js's identical picker) - a first-run
+    // visitor's language choice shouldn't require finding their own
+    // profile page first. Same reload-on-change tradeoff as Profile's:
+    // @qu/i18n resolves each `createI18n()` call once per page load (see
+    // that package's own doc comment), so there's no live-retranslation
+    // mechanism to hook into instead.
+    const langSelect = document.createElement('select');
+    langSelect.className = 'qu-shell-lang';
+    langSelect.title = t('nav.language');
+    langSelect.setAttribute('aria-label', t('nav.language'));
+    const currentLocale = getStoredLocale() ?? locale;
+    for (const { code, label } of AVAILABLE_LOCALES) {
+      const option = document.createElement('option');
+      option.value = code;
+      option.textContent = label;
+      if (code === currentLocale) option.selected = true;
+      langSelect.appendChild(option);
+    }
+    langSelect.addEventListener('change', () => {
+      setLocale(langSelect.value);
+      location.reload();
+    });
+
     // Standalone bell - deliberately NOT inside headerMenu (the user wants
     // new-notification visibility at a glance, not one tap deep in a
     // hamburger menu). Links straight to the notification feed (Task #38);
@@ -250,7 +297,7 @@ class Shell {
       idAvatarEl = nextAvatar;
     });
 
-    header.append(brand, backBtn, forwardBtn, spacer, this.headerMenu.el, bellBtn, idLink);
+    header.append(brand, backBtn, forwardBtn, spacer, updateBtn, langSelect, this.headerMenu.el, bellBtn, idLink);
 
     this.toolbarEl = document.createElement('div');
     this.toolbarEl.className = 'qu-shell-toolbar';
@@ -539,6 +586,11 @@ class Shell {
       apps: this.apps,
       subscribe: (pathPrefix) => this.sync.subscribe(pathPrefix),
       fetch: (path) => this.sync.fetch(path),
+      // The one client-side HookBus for this whole session (see its own
+      // field doc comment above) - an app can `hooks.on(...)` a named hook
+      // another app/package runs at a specific moment (e.g.
+      // `thread.beforePostMessage`, see @qu/thread-ui's mountThreadView()).
+      hooks: this.hooks,
       // Permanently deletes this identity and every byte of its local data,
       // then reloads - see boot()'s own definition of this function for
       // exactly what that means. Used by apps/profile/client.js's backup

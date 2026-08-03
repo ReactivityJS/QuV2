@@ -306,9 +306,17 @@ mounted app for free - none of it is something an app has to opt into.
   `qu:favorites-changed` window event (see main.js's doc comment on it) so a
   favorite change made in one place shows up everywhere without a page reload.
 - **PWA**: `apps/shell/public/manifest.webmanifest` + `public/sw.js` (served
-  at `/manifest.webmanifest` and `/sw.js` by `@qu/relay`) make the shell
-  installable; the service worker is currently a bare passthrough (see its
-  own doc comment for why, and what it's reserved for next).
+  at `/manifest.webmanifest` and `/sw.js` by `@qu/relay`, both with
+  `cache-control: no-cache` so a browser always revalidates rather than
+  serving a stale copy) make the shell installable. The worker itself still
+  does no asset/data caching on purpose (QUniverse's data is Qu itself,
+  IndexedDB-backed and synced - not static assets worth intercepting), but
+  DOES run a real update lifecycle: a new worker installs and WAITS
+  (`apps/shell/src/pwa.js`'s `onUpdateAvailable()`) instead of activating
+  immediately, so the shell header can offer a deliberate "Update
+  available" reload (`applyUpdate()`) rather than a version change either
+  silently taking over mid-interaction or only ever applying itself on
+  some unrelated future navigation.
 - **i18n**: `apps/shell/src/i18n.js` - German + English today, more locales
   are a dictionary addition, not a code change (see `@qu/i18n` above).
 

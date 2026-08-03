@@ -16,14 +16,31 @@
  * the `url` the payload named.
  */
 
-const SW_VERSION = 'v1';
+const SW_VERSION = 'v2';
 
+// v1 called skipWaiting() unconditionally on install, so a new worker
+// always took over immediately - no "update available" moment ever existed
+// for the page to detect and offer a controlled reload for (see pwa.js's
+// onUpdateAvailable()/applyUpdate()). v2 installs and then WAITS, same as
+// any standard update-prompt PWA, until the page explicitly asks it to
+// take over via the 'message' handler below - see that handler's own
+// comment for why this is safe to do without breaking the very first
+// install (which has no earlier controller to disrupt in the first place).
 self.addEventListener('install', () => {
-  self.skipWaiting();
+  // Intentionally no self.skipWaiting() here - see SW_VERSION's own comment.
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(self.clients.claim());
+});
+
+// Lets the page hand back control: apps/shell/src/pwa.js's applyUpdate()
+// posts this once the user has agreed to reload for an update (or, for a
+// silent/automatic upgrade path, whenever the page decides to). Scoped to
+// exactly this one message type so nothing else can accidentally trigger
+// an activation mid-session.
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
 self.addEventListener('fetch', (event) => {

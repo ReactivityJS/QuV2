@@ -11,8 +11,15 @@
  */
 import '@qu/ui';
 import { paths } from '@qu/services';
+import { createI18n } from '@qu/i18n';
 
 const COLLECTION_ID = 'all';
+
+const DICT = {
+  en: { newNote: 'New note…', add: 'Add' },
+  de: { newNote: 'Neue Notiz…', add: 'Hinzufügen' },
+};
+const { t } = createI18n(DICT);
 
 /**
  * @param {HTMLElement} container
@@ -30,11 +37,11 @@ export function mount(container, { qu, services }) {
 
     const form = document.createElement('form');
     const input = document.createElement('input');
-    input.placeholder = 'New note…';
+    input.placeholder = t('newNote');
     input.required = true;
     const button = document.createElement('button');
     button.type = 'submit';
-    button.textContent = 'Add';
+    button.textContent = t('add');
     form.append(input, button);
     form.addEventListener('submit', async (e) => {
       e.preventDefault();

@@ -6,6 +6,18 @@
  * stored" property the architecture brainstorming was after).
  */
 
+/**
+ * @param {string|number} spaceId @returns {string} The space's own storage
+ *   root - what `subscribe()` needs to cover everything under a space, not
+ *   any specific entity within it. Every OTHER helper below is really just
+ *   this plus a fixed sub-path; kept as its own export because apps
+ *   themselves need exactly this (and only this) shape for `subscribe()`
+ *   calls, see e.g. apps/todo|forum|chat/client.js.
+ */
+export function spacePath(spaceId) {
+  return `/store/${spaceId}`;
+}
+
 /** @param {string|number} spaceId @param {string} docId @returns {string} */
 export function documentPath(spaceId, docId) {
   return `/store/${spaceId}/docs/${docId}`;

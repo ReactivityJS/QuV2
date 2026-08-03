@@ -12,9 +12,10 @@
  *     unless you explicitly cc/bcc yourself, which this simple version
  *     doesn't do). The UI says so up front rather than looking broken.
  */
-import { THREAD_PRESETS } from '@qu/services';
+import { THREAD_PRESETS, paths, formatActorLabel } from '@qu/services';
 import { mountThreadView } from '@qu/thread-ui';
 import { createI18n } from '@qu/i18n';
+import { injectStyle } from '@qu/ui';
 
 const DICT = {
   en: {
@@ -42,16 +43,9 @@ const STYLE = `
   .qu-inbox-note { opacity: 0.7; font-size: 0.85em; }
 `;
 
-function ensureStyle() {
-  if (document.getElementById(STYLE_ID)) return;
-  const style = document.createElement('style');
-  style.id = STYLE_ID;
-  style.textContent = STYLE;
-  document.head.appendChild(style);
-}
 
-export function mount(container, { qu, services, segments, subscribe }) {
-  ensureStyle();
+export function mount(container, { qu, services, segments, subscribe, hooks }) {
+  injectStyle(STYLE_ID, STYLE);
   let stopped = false;
   let stopThreadView = null;
 
@@ -69,7 +63,7 @@ export function mount(container, { qu, services, segments, subscribe }) {
 
     // Live updates for new mail arriving from ANOTHER browser - see
     // apps/forum/client.js's identical call for why this is needed.
-    subscribe(`/store/inbox-${myActorPub}`);
+    subscribe(paths.spacePath(`inbox-${myActorPub}`));
 
     const heading = document.createElement('h1');
     heading.textContent = t('title');
@@ -79,7 +73,7 @@ export function mount(container, { qu, services, segments, subscribe }) {
     container.appendChild(threadEl);
     stopThreadView = mountThreadView(threadEl, {
       qu, services, spaceId: `inbox-${myActorPub}`, threadId: 'inbox',
-      threadConfig: THREAD_PRESETS.mail(myActorPub),
+      threadConfig: THREAD_PRESETS.mail(myActorPub), hooks,
     });
 
     const composeHeading = document.createElement('h2');
@@ -103,7 +97,7 @@ export function mount(container, { qu, services, segments, subscribe }) {
       const li = document.createElement('li');
       const a = document.createElement('a');
       a.href = `#/inbox/${actorPub}`;
-      a.textContent = profile?.alias ?? `~${actorPub.slice(0, 16)}…`;
+      a.textContent = formatActorLabel(actorPub, profile);
       li.appendChild(a);
       list.appendChild(li);
     }
@@ -122,14 +116,14 @@ export function mount(container, { qu, services, segments, subscribe }) {
 
     const note = document.createElement('p');
     note.className = 'qu-inbox-note';
-    note.textContent = t('composingTo', { name: profile?.alias ?? `~${recipientPub.slice(0, 16)}…` });
+    note.textContent = t('composingTo', { name: formatActorLabel(recipientPub, profile) });
     container.appendChild(note);
 
     const threadEl = document.createElement('div');
     container.appendChild(threadEl);
     stopThreadView = mountThreadView(threadEl, {
       qu, services, spaceId: `inbox-${recipientPub}`, threadId: 'inbox',
-      threadConfig: THREAD_PRESETS.mail(recipientPub),
+      threadConfig: THREAD_PRESETS.mail(recipientPub), hooks,
     });
   }
 
