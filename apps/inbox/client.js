@@ -44,7 +44,7 @@ const STYLE = `
 `;
 
 
-export function mount(container, { qu, services, segments, subscribe }) {
+export function mount(container, { qu, services, segments, subscribe, hooks }) {
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
   let stopThreadView = null;
@@ -73,7 +73,7 @@ export function mount(container, { qu, services, segments, subscribe }) {
     container.appendChild(threadEl);
     stopThreadView = mountThreadView(threadEl, {
       qu, services, spaceId: `inbox-${myActorPub}`, threadId: 'inbox',
-      threadConfig: THREAD_PRESETS.mail(myActorPub),
+      threadConfig: THREAD_PRESETS.mail(myActorPub), hooks,
     });
 
     const composeHeading = document.createElement('h2');
@@ -123,7 +123,7 @@ export function mount(container, { qu, services, segments, subscribe }) {
     container.appendChild(threadEl);
     stopThreadView = mountThreadView(threadEl, {
       qu, services, spaceId: `inbox-${recipientPub}`, threadId: 'inbox',
-      threadConfig: THREAD_PRESETS.mail(recipientPub),
+      threadConfig: THREAD_PRESETS.mail(recipientPub), hooks,
     });
   }
 

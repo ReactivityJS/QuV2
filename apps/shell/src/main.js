@@ -30,6 +30,7 @@ import { DocumentEngine, CollectionEngine, AssetEngine, ThreadEngine } from '@qu
 import { QuIdentityEngine, actorPath } from '@qu/identity';
 import { SyncEngine, WebSocketClientTransport } from '@qu/sync';
 import { createServices, paths } from '@qu/services';
+import { HookBus } from '@qu/foundation';
 import { watch } from '@qu/reactive';
 import { renderAvatar } from '@qu/ui';
 import { parseHash, buildHash } from './router.js';
@@ -167,6 +168,12 @@ class Shell {
     this.adminPubs = [];
     this.stopMountedApp = null;
     this.appMenu = null;
+    // One instance for the whole session, handed to every mounted app via
+    // its mount() context (`ctx.hooks`, see mod.mount() below) - see
+    // @qu/foundation's HookBus doc comment for why this is a fresh,
+    // client-only instance rather than anything shared with the relay's
+    // own server-side Registry.hooks.
+    this.hooks = new HookBus();
   }
 
   get isAdmin() {
@@ -579,6 +586,11 @@ class Shell {
       apps: this.apps,
       subscribe: (pathPrefix) => this.sync.subscribe(pathPrefix),
       fetch: (path) => this.sync.fetch(path),
+      // The one client-side HookBus for this whole session (see its own
+      // field doc comment above) - an app can `hooks.on(...)` a named hook
+      // another app/package runs at a specific moment (e.g.
+      // `thread.beforePostMessage`, see @qu/thread-ui's mountThreadView()).
+      hooks: this.hooks,
       // Permanently deletes this identity and every byte of its local data,
       // then reloads - see boot()'s own definition of this function for
       // exactly what that means. Used by apps/profile/client.js's backup

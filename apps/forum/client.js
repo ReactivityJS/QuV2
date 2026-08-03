@@ -142,7 +142,7 @@ function fmtTime(ts) {
   return `${day} ${time}`;
 }
 
-export function mount(container, { qu, services, segments, subscribe, fetch: syncFetch }) {
+export function mount(container, { qu, services, segments, subscribe, fetch: syncFetch, hooks }) {
   injectStyle(STYLE_ID, STYLE);
   container.classList.add('qu-forum-app');
   let stopped = false;
@@ -500,7 +500,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
         content.appendChild(threadEl);
         stopThreadView = mountThreadView(threadEl, {
           qu, services, spaceId: SPACE, threadId: topicId,
-          threadConfig: THREAD_PRESETS.forum(),
+          threadConfig: THREAD_PRESETS.forum(), hooks,
         });
       },
     });

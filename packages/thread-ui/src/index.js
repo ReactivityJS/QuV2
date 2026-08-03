@@ -60,11 +60,21 @@ function ensureStyle() {
  * @param {string|number} [options.asSpaceId] - Post under a pseudonymous space identity instead of the main one.
  * @param {string} [options.composerPlaceholder]
  * @param {string} [options.emptyLabel]
+ * @param {import('@qu/foundation').HookBus} [options.hooks] - The shell's
+ *   client-side hook bus (`ctx.hooks`, see apps/shell/src/main.js), if the
+ *   caller has one. Optional and defaults to no-op: this is the ONE place
+ *   every Thread-backed app's compose form funnels through, so it's also
+ *   the one natural seam for a future feature (e.g. @mentions parsing) to
+ *   transform an outgoing message's `body` before it's signed and written,
+ *   without ThreadService or any individual app needing to know that
+ *   feature exists. See `thread.beforePostMessage` (can return `{body}` to
+ *   replace the text) and `thread.afterPostMessage` (side-effects only,
+ *   e.g. notifications) below.
  * @returns {() => void} stop function
  */
 export function mountThreadView(container, {
   qu, services, spaceId, threadId, threadConfig,
-  asSpaceId = null, composerPlaceholder = 'Message…', emptyLabel = 'No messages yet.',
+  asSpaceId = null, composerPlaceholder = 'Message…', emptyLabel = 'No messages yet.', hooks = null,
 }) {
   ensureStyle();
   let stopped = false;
@@ -220,10 +230,15 @@ export function mountThreadView(container, {
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const body = input.value.trim();
+    let body = input.value.trim();
     if (!body) return;
     input.value = '';
-    await services.threads.postMessage(spaceId, threadId, { body, asSpaceId });
+    if (hooks) {
+      const patched = await hooks.run('thread.beforePostMessage', { spaceId, threadId, body });
+      body = patched.body ?? body;
+    }
+    const message = await services.threads.postMessage(spaceId, threadId, { body, asSpaceId });
+    if (hooks) hooks.notify('thread.afterPostMessage', { spaceId, threadId, message });
     // No manual reload() call here - see the module doc comment above for
     // why the watch() below already covers this.
   });
