@@ -83,6 +83,7 @@ const DICT = {
     invite: 'Invite',
     noContacts: 'No contacts yet — add some from the User List first.',
     remove: 'Remove', leave: 'Leave', leaveConfirm: 'Leave "{title}"? You will lose access unless invited again.',
+    deleteCalendar: 'Delete calendar', deleteCalendarConfirm: 'Delete "{title}"? This removes it for everyone and cannot be undone.',
     renameLabel: 'Name', colorLabel: 'Color', viewOnly: 'View only',
     noAccessTitle: 'No access', noAccessBody: 'You don’t have access to "{title}" — ask the owner to invite you.',
     noEditableCalendars: 'No calendar you can add events to — create one first.',
@@ -107,6 +108,7 @@ const DICT = {
     invite: 'Einladen',
     noContacts: 'Noch keine Kontakte — zuerst in der Nutzerliste hinzufügen.',
     remove: 'Entfernen', leave: 'Verlassen', leaveConfirm: '"{title}" verlassen? Der Zugriff geht verloren, bis erneut eingeladen wird.',
+    deleteCalendar: 'Kalender löschen', deleteCalendarConfirm: '"{title}" löschen? Das entfernt ihn für alle und kann nicht rückgängig gemacht werden.',
     renameLabel: 'Name', colorLabel: 'Farbe', viewOnly: 'Nur Ansicht',
     noAccessTitle: 'Kein Zugriff', noAccessBody: 'Kein Zugriff auf "{title}" — bitte vom Besitzer einladen lassen.',
     noEditableCalendars: 'Kein Kalender, dem du Termine hinzufügen kannst — zuerst einen anlegen.',
@@ -146,23 +148,31 @@ const STYLE = `
   .qu-cal-primary { border: none; border-radius: 0.4rem; padding: 0.4rem 0.9rem; background: #3e7fe0; color: #fff; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block; }
   .qu-cal-filter { padding: 0.3rem; min-width: 12rem; }
   .qu-cal-month-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.3rem; }
-  .qu-cal-month-cell { border: 1px solid #8884; border-radius: 0.3rem; padding: 0.3rem; min-height: 5rem; font-size: 0.85em; cursor: pointer; transition: background-color 0.1s; }
+  .qu-cal-month-cell { min-width: 0; border: 1px solid #8884; border-radius: 0.3rem; padding: 0.3rem; min-height: 5rem; font-size: 0.85em; cursor: pointer; transition: background-color 0.1s; }
   .qu-cal-month-cell:hover { background: #8881; }
   .qu-cal-month-cell[data-dim="true"] { opacity: 0.4; }
   .qu-cal-month-cell[data-today="true"] { border-color: #3e7fe0; border-width: 2px; }
   .qu-cal-day-num { font-weight: 600; }
-  .qu-cal-chip { display: block; border-radius: 0.2rem; padding: 0.05rem 0.3rem; margin-top: 0.15rem; color: #fff; font-size: 0.85em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; text-decoration: none; }
+  .qu-cal-chip { display: block; max-width: 100%; box-sizing: border-box; border-radius: 0.2rem; padding: 0.05rem 0.3rem; margin-top: 0.15rem; color: #fff; font-size: 0.85em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; text-decoration: none; }
+  .qu-cal-chip[data-continues-from="true"] { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+  .qu-cal-chip[data-continues-to="true"] { border-top-right-radius: 0; border-bottom-right-radius: 0; }
   .qu-cal-day-list, .qu-cal-flat-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
   .qu-cal-event-row { border-left: 4px solid #888; border-radius: 0.2rem; padding: 0.3rem 0.5rem; background: #8881; cursor: pointer; text-decoration: none; color: inherit; }
   .qu-cal-event-row, .qu-cal-event-row * { display: block; }
   .qu-cal-event-time { font-size: 0.8em; opacity: 0.7; }
-  .qu-cal-allday-row { display: flex; flex-direction: column; gap: 0.2rem; margin: 0.4rem 0 0.6rem; padding-left: 3.5rem; }
+  .qu-cal-allday-wrap { display: flex; margin: 0.4rem 0 0.6rem; }
+  .qu-cal-allday-gutter { width: 3.5rem; flex-shrink: 0; }
+  .qu-cal-allday-grid { flex: 1; min-width: 0; display: grid; grid-auto-rows: 1.5rem; gap: 0.2rem; }
+  .qu-cal-allday-bar { grid-row: 1; min-width: 0; display: flex; align-items: center; border-radius: 0.25rem; padding: 0 0.4rem; color: #fff; font-size: 0.78em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; text-decoration: none; box-sizing: border-box; }
+  .qu-cal-allday-bar[data-continues-from="true"] { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+  .qu-cal-allday-bar[data-continues-to="true"] { border-top-right-radius: 0; border-bottom-right-radius: 0; }
   .qu-cal-timegrid-wrap { display: flex; border-top: 1px solid #8884; overflow-x: auto; }
   .qu-cal-hours { width: 3.5rem; flex-shrink: 0; }
   .qu-cal-hour-label { height: ${HOUR_PX}px; box-sizing: border-box; font-size: 0.75em; opacity: 0.6; transform: translateY(-0.6em); text-align: right; padding-right: 0.4rem; }
-  .qu-cal-daycols { flex: 1; display: flex; min-width: 30rem; }
-  .qu-cal-daycol { flex: 1; position: relative; border-left: 1px solid #8884; background-image: repeating-linear-gradient(to bottom, transparent, transparent ${HOUR_PX - 1}px, #8882 ${HOUR_PX - 1}px, #8882 ${HOUR_PX}px); height: ${GRID_PX}px; cursor: pointer; }
-  .qu-cal-daycol-head { text-align: center; font-size: 0.85em; padding-bottom: 0.3rem; font-weight: 600; }
+  .qu-cal-daycols { flex: 1; display: flex; }
+  .qu-cal-daycolwrap { flex: 1; min-width: 0; }
+  .qu-cal-daycol { position: relative; border-left: 1px solid #8884; background-image: repeating-linear-gradient(to bottom, transparent, transparent ${HOUR_PX - 1}px, #8882 ${HOUR_PX - 1}px, #8882 ${HOUR_PX}px); height: ${GRID_PX}px; cursor: pointer; }
+  .qu-cal-daycol-head { text-align: center; font-size: 0.85em; padding-bottom: 0.3rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qu-cal-daycol-head[data-today="true"] { color: #3e7fe0; }
   .qu-cal-time-event { position: absolute; border-radius: 0.3rem; padding: 0.15rem 0.35rem; color: #fff; font-size: 0.78em; overflow: hidden; cursor: pointer; box-sizing: border-box; text-decoration: none; }
   .qu-cal-now-line { position: absolute; left: 0; right: 0; height: 2px; background: #e0483e; z-index: 2; pointer-events: none; }
@@ -185,6 +195,23 @@ const STYLE = `
   .qu-cal-detail-desc { white-space: pre-wrap; margin: 0.4rem 0; }
   .qu-cal-badge { font-size: 0.75em; opacity: 0.65; border: 1px solid #8884; border-radius: 999px; padding: 0.05rem 0.5rem; }
   .qu-cal-noaccess { max-width: 28rem; }
+
+  @media (max-width: 640px) {
+    .qu-cal-layout { gap: 0.8rem; }
+    .qu-cal-sidebar { width: 100%; }
+    .qu-cal-main { min-width: 0; }
+    .qu-cal-toolbar { gap: 0.4rem; }
+    .qu-cal-heading { font-size: 0.9em; }
+    .qu-cal-filter { min-width: 0; flex: 1 1 100%; order: 1; }
+    .qu-cal-viewswitch button { padding: 0.3rem 0.55rem; font-size: 0.85em; }
+    .qu-cal-primary { padding: 0.4rem 0.7rem; }
+    .qu-cal-month-cell { min-height: 3.4rem; padding: 0.2rem; font-size: 0.78em; }
+    .qu-cal-chip { font-size: 0.8em; }
+    .qu-cal-hours { width: 2.6rem; }
+    .qu-cal-hour-label { font-size: 0.68em; padding-right: 0.25rem; }
+    .qu-cal-allday-gutter { width: 2.6rem; }
+    .qu-cal-time-event { font-size: 0.72em; padding: 0.1rem 0.25rem; }
+  }
 `;
 
 function ensureStyle() {
@@ -363,7 +390,11 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
 
     const events = [];
     for (const info of infos) {
-      if (!checked.has(info.id)) continue;
+      // A calendar the viewer no longer has a role on (removed, or deleted
+      // by its owner - see deleteCalendar()) still lingers in `mine` until
+      // this identity's own star list gets cleaned up, but shouldn't keep
+      // contributing events to the combined view or a sidebar section.
+      if (!checked.has(info.id) || !info.role) continue;
       for (const ev of info.events) {
         events.push({ ...ev, calendarId: info.id, calendarTitle: info.meta.title || t('untitled'), color: info.color });
       }
@@ -442,6 +473,17 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
         shareLink.title = t('share');
         shareLink.textContent = '👥';
         row.appendChild(shareLink);
+
+        const deleteBtn = document.createElement('button');
+        deleteBtn.type = 'button';
+        deleteBtn.title = t('deleteCalendar');
+        deleteBtn.textContent = '🗑';
+        deleteBtn.addEventListener('click', async () => {
+          if (!confirm(t('deleteCalendarConfirm', { title: info.meta.title || t('untitled') }))) return;
+          await deleteCalendar(info.id);
+          await renderMain();
+        });
+        row.appendChild(deleteBtn);
       } else {
         const leaveBtn = document.createElement('button');
         leaveBtn.type = 'button';
@@ -588,6 +630,62 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     return events.filter((ev) => sameDay(new Date(ev.start), day)).sort((a, b) => a.start - b.start);
   }
 
+  // All-day events, and any timed event whose start/end fall on different
+  // calendar days, are laid out as a spanning bar across every day they
+  // touch (see layoutSpanningEvents()) rather than in the hourly grid,
+  // where a multi-day span can't be represented sensibly.
+  function isMultiDay(ev) {
+    return ev.allDay || !sameDay(new Date(ev.start), new Date(ev.end || ev.start));
+  }
+
+  /** Like eventsOn(), but includes an event on every day it SPANS, not just its start day - used by Month view so a multi-day event is visible on each day it covers. */
+  function eventsTouching(events, day) {
+    return events
+      .filter((ev) => {
+        const s = startOfDay(new Date(ev.start));
+        const e = startOfDay(new Date(ev.end || ev.start));
+        return day >= s && day <= e;
+      })
+      .sort((a, b) => a.start - b.start);
+  }
+
+  /**
+   * Greedy row-stacking for events spanning one or more of `days` (the
+   * Day/Week view's all-day + genuinely multi-day banner) - the same idea
+   * as layoutTimedEvents() above, but keyed by DAY-INDEX overlap within
+   * `days` instead of minute overlap within one day. `continuesFrom`/
+   * `continuesTo` flag an event whose real start/end falls outside this
+   * page's visible window (e.g. a week-spanning event on the Week view),
+   * so the caller can draw it flush to that edge instead of rounded, the
+   * one visual cue a paginated grid can give for "this keeps going".
+   */
+  function layoutSpanningEvents(events, days) {
+    const dayMs = 24 * 60 * 60 * 1000;
+    const windowStart = days[0].getTime();
+    const lastIdx = days.length - 1;
+    const windowEnd = days[lastIdx].getTime();
+    const items = [];
+    for (const ev of events) {
+      const evStartDay = startOfDay(new Date(ev.start)).getTime();
+      const evEndDay = startOfDay(new Date(ev.end || ev.start)).getTime();
+      if (evEndDay < windowStart || evStartDay > windowEnd) continue;
+      const startIdx = Math.max(0, Math.round((evStartDay - windowStart) / dayMs));
+      const endIdx = Math.min(lastIdx, Math.round((evEndDay - windowStart) / dayMs));
+      items.push({ ev, startIdx, endIdx, continuesFrom: evStartDay < windowStart, continuesTo: evEndDay > windowEnd });
+    }
+    items.sort((a, b) => a.startIdx - b.startIdx || a.endIdx - b.endIdx);
+
+    const rowEnds = []; // rowEnds[row] = last day-index already occupied in that row
+    const result = [];
+    for (const item of items) {
+      let row = 0;
+      while (rowEnds[row] !== undefined && rowEnds[row] >= item.startIdx) row++;
+      rowEnds[row] = item.endIdx;
+      result.push({ ...item, row });
+    }
+    return result;
+  }
+
   function eventChip(ev, { compact = false } = {}) {
     const el = document.createElement('a');
     el.href = eventHash(ev.calendarId, ev.id);
@@ -624,9 +722,17 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
       num.textContent = String(day.getDate());
       cell.appendChild(num);
 
-      const dayEvents = eventsOn(events, day);
+      const dayEvents = eventsTouching(events, day);
       const shown = dayEvents.slice(0, 3);
-      for (const ev of shown) cell.appendChild(eventChip(ev, { compact: true }));
+      for (const ev of shown) {
+        const chip = eventChip(ev, { compact: true });
+        // A multi-day event shown on a day OTHER than its real start/end
+        // renders flush (no rounding) on that side - the same "keeps
+        // going" cue layoutSpanningEvents() gives the Day/Week banner.
+        if (startOfDay(new Date(ev.start)).getTime() < day.getTime()) chip.dataset.continuesFrom = 'true';
+        if (startOfDay(new Date(ev.end || ev.start)).getTime() > day.getTime()) chip.dataset.continuesTo = 'true';
+        cell.appendChild(chip);
+      }
       if (dayEvents.length > shown.length) {
         const more = document.createElement('div');
         more.textContent = t('more', { count: dayEvents.length - shown.length });
@@ -646,16 +752,38 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
   function timeGridView(days, events, editableCals) {
     const wrap = document.createElement('div');
 
-    const allDayRow = document.createElement('div');
-    allDayRow.className = 'qu-cal-allday-row';
-    let anyAllDay = false;
-    for (const day of days) {
-      for (const ev of eventsOn(events, day).filter((e) => e.allDay)) {
-        anyAllDay = true;
-        allDayRow.appendChild(eventChip(ev));
+    // All-day events AND genuinely multi-day timed events share one
+    // banner, laid out as real day-spanning bars (CSS grid-column span)
+    // instead of the flat per-event list this used to be - see
+    // layoutSpanningEvents()'s own doc comment for why (multi-day timed
+    // events can't be represented sensibly inside the hourly grid below,
+    // which is why they're excluded from `timed` further down).
+    const spanning = layoutSpanningEvents(events.filter(isMultiDay), days);
+    if (spanning.length) {
+      const allDayWrap = document.createElement('div');
+      allDayWrap.className = 'qu-cal-allday-wrap';
+      const gutter = document.createElement('div');
+      gutter.className = 'qu-cal-allday-gutter';
+      const grid = document.createElement('div');
+      grid.className = 'qu-cal-allday-grid';
+      grid.style.gridTemplateColumns = `repeat(${days.length}, 1fr)`;
+      const rowCount = Math.max(...spanning.map((s) => s.row)) + 1;
+      grid.style.gridTemplateRows = `repeat(${rowCount}, 1.5rem)`;
+      for (const { ev, startIdx, endIdx, row, continuesFrom, continuesTo } of spanning) {
+        const bar = document.createElement('a');
+        bar.href = eventHash(ev.calendarId, ev.id);
+        bar.className = 'qu-cal-allday-bar';
+        bar.style.gridColumn = `${startIdx + 1} / ${endIdx + 2}`;
+        bar.style.gridRow = String(row + 1);
+        bar.style.background = ev.color;
+        bar.textContent = ev.title;
+        if (continuesFrom) bar.dataset.continuesFrom = 'true';
+        if (continuesTo) bar.dataset.continuesTo = 'true';
+        grid.appendChild(bar);
       }
+      allDayWrap.append(gutter, grid);
+      wrap.appendChild(allDayWrap);
     }
-    if (anyAllDay) wrap.appendChild(allDayRow);
 
     const gridWrap = document.createElement('div');
     gridWrap.className = 'qu-cal-timegrid-wrap';
@@ -676,10 +804,17 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
 
     const daycols = document.createElement('div');
     daycols.className = 'qu-cal-daycols';
+    // Only Week view (multiple columns) needs a floor width to stay
+    // readable - horizontal-scrolling inside .qu-cal-timegrid-wrap from
+    // there. Day view (one column) has nothing to lay side-by-side, so it
+    // should just fill the available width instead of forcing a pointless
+    // horizontal scrollbar on a narrow phone screen.
+    daycols.style.minWidth = days.length > 1 ? '30rem' : '0';
     const today = startOfDay(new Date());
     const nowLines = [];
     for (const day of days) {
       const colWrap = document.createElement('div');
+      colWrap.className = 'qu-cal-daycolwrap';
       const head = document.createElement('div');
       head.className = 'qu-cal-daycol-head';
       head.dataset.today = String(sameDay(day, today));
@@ -690,7 +825,7 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
 
       const col = document.createElement('div');
       col.className = 'qu-cal-daycol';
-      const timed = eventsOn(events, day).filter((e) => !e.allDay);
+      const timed = eventsOn(events, day).filter((e) => !isMultiDay(e));
       for (const { ev, col: c, cols } of layoutTimedEvents(timed)) {
         const startMin = minutesIntoDay(ev.start, day);
         const endMin = Math.max(startMin + MIN_EVENT_MINUTES, minutesIntoDay(ev.end || ev.start, day));
@@ -1425,6 +1560,27 @@ export function mount(container, { qu, services, segments, subscribe, fetch: syn
     const members = meta.members.filter((m) => m.actorPub !== actorPub);
     await services.documents.update(spaceId, 'meta', { members });
     try { await services.threads.removeReader(spaceId, 'activity', actorPub); } catch { /* no activity thread yet - nothing to revoke */ }
+  }
+
+  /**
+   * Owner-only calendar deletion. The document layer has no real delete
+   * primitive (see @qu/services/document-service.js - create/get/update
+   * only, same constraint apps/todo's own history ran into), so this
+   * clears `members` to `[]` instead: every `roleOf()` check anywhere in
+   * this file (Share page, Event Detail, the sidebar's own filters, the
+   * events-collection loop in `renderMain()` below) then resolves to
+   * `null` for EVERYONE including the owner, which is what actually makes
+   * a deleted calendar disappear/become inert everywhere it's rendered -
+   * not just for the identity that clicked delete. `deletedAt` is kept
+   * purely as a forensic marker (unused by any read path today). Only
+   * unstars it from THIS identity's own "My Calendars" - other members'
+   * stars are locally theirs to manage and self-heal the moment they next
+   * open the app (see `renderMain()`'s own `role`-less skip below).
+   */
+  async function deleteCalendar(id) {
+    await services.documents.update(spaceOf(id), 'meta', { members: [], deletedAt: Date.now() });
+    await services.starred.unstar(NAMESPACE, id);
+    checked?.delete(id);
   }
 
   return () => {
