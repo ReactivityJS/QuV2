@@ -33,7 +33,7 @@ import { subscribeToPush, unsubscribeFromPush, isPushSubscribed } from '@qu/push
 import { createI18n } from '@qu/i18n';
 import { watch } from '@qu/reactive';
 import { paths } from '@qu/services';
-import { injectStyle } from '@qu/ui';
+import { injectStyle, renderNotificationPrefsSection } from '@qu/ui';
 
 const DICT = {
   en: {
@@ -75,9 +75,7 @@ const STYLE_ID = 'qu-notifications-style';
 const STYLE = `
   .qu-notif-section { margin: 1rem 0; display: flex; flex-direction: column; gap: 0.5rem; }
   .qu-notif-row { display: flex; align-items: center; gap: 0.6rem; }
-  .qu-notif-apps { display: flex; flex-direction: column; gap: 0.4rem; }
   .qu-notif-error { color: #c00; font-size: 0.9em; }
-  .qu-notif-status { opacity: 0.7; font-size: 0.85em; }
   .qu-notif-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
   .qu-notif-header a { color: inherit; font-size: 0.85em; }
   .qu-notif-feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
@@ -190,7 +188,10 @@ function feedRow(message) {
 }
 
 async function renderSettings(container, services, isStopped) {
-  const [prefs, subscribed] = await Promise.all([services.notificationPrefs.getOwnPrefs(), isPushSubscribed()]);
+  // `getOwnPrefs()` itself is fetched by `renderNotificationPrefsSection()`
+  // below, not here - only the device-push subscription state is this
+  // function's own concern.
+  const subscribed = await isPushSubscribed();
   if (isStopped()) return;
   container.textContent = '';
 
@@ -236,77 +237,19 @@ async function renderSettings(container, services, isStopped) {
   container.appendChild(deviceSection);
 
   // --- Granular preferences ---
-  const prefsSection = document.createElement('div');
-  prefsSection.className = 'qu-notif-section';
-
-  const enabledRow = toggleRow(t('globalEnabled'), prefs.enabled);
-  const mentionsRow = toggleRow(t('mentions'), prefs.mentions);
-
   // Every option below comes from whatever's currently loaded, not a
   // hard-coded list - each app declares its own push-worthy events via its
   // manifest's `pushActions` (see @qu/foundation's manifest schema), and
   // /apps.json (see @qu/relay/apps-catalog.js) is what surfaces that here.
-  // An app with nothing push-worthy (most apps) simply doesn't appear.
-  const apps = await fetch('/apps.json').then((r) => (r.ok ? r.json() : [])).catch(() => []);
-  const notifyingApps = apps.filter((a) => a.pushActions?.length);
-
-  const perAppHeading = document.createElement('h2');
-  perAppHeading.textContent = t('perApp');
-  const appsEl = document.createElement('div');
-  appsEl.className = 'qu-notif-apps';
-  // Map<appId, Map<actionId, checkbox>> - one row per (app, action) pair,
-  // e.g. "💭 Chat — Mentions", not one row per app - see this file's own
-  // doc comment for why: an app can trigger more than one KIND of
-  // notification, each independently toggleable.
-  const actionToggles = new Map();
-  for (const app of notifyingApps) {
-    const appHeading = document.createElement('strong');
-    appHeading.textContent = `${app.icon ?? ''} ${app.label ?? app.name}`.trim();
-    appsEl.appendChild(appHeading);
-    const byAction = new Map();
-    for (const action of app.pushActions) {
-      const enabled = prefs.apps?.[app.name]?.functions?.[action.id] !== false; // default on
-      const row = toggleRow(action.label, enabled);
-      byAction.set(action.id, row.checkbox);
-      appsEl.appendChild(row.row);
-    }
-    actionToggles.set(app.name, byAction);
-  }
-
-  const saveBtn = document.createElement('button');
-  saveBtn.type = 'button';
-  saveBtn.textContent = t('save');
-  const status = document.createElement('span');
-  status.className = 'qu-notif-status';
-
-  saveBtn.addEventListener('click', async () => {
-    const appsPatch = {};
-    for (const [appId, byAction] of actionToggles) {
-      const functions = {};
-      for (const [actionId, checkbox] of byAction) functions[actionId] = checkbox.checked;
-      appsPatch[appId] = { functions };
-    }
-    await services.notificationPrefs.savePrefs({
-      enabled: enabledRow.checkbox.checked,
-      mentions: mentionsRow.checkbox.checked,
-      apps: appsPatch,
-    });
-    status.textContent = t('saved');
-    setTimeout(() => { status.textContent = ''; }, 1500);
+  // An app with nothing push-worthy (most apps) simply doesn't appear. See
+  // @qu/ui's `renderNotificationPrefsSection()` for the shared
+  // implementation - extracted so a future per-app settings screen can
+  // embed just its OWN rows (`filterAppId`) without duplicating this.
+  const appsCatalog = await fetch('/apps.json').then((r) => (r.ok ? r.json() : [])).catch(() => []);
+  const prefsSection = await renderNotificationPrefsSection({
+    services,
+    appsCatalog,
+    labels: { globalEnabled: t('globalEnabled'), mentions: t('mentions'), perApp: t('perApp'), save: t('save'), saved: t('saved') },
   });
-
-  prefsSection.append(enabledRow.row, mentionsRow.row, perAppHeading, appsEl, saveBtn, status);
   container.appendChild(prefsSection);
-}
-
-function toggleRow(label, checked) {
-  const row = document.createElement('label');
-  row.className = 'qu-notif-row';
-  const checkbox = document.createElement('input');
-  checkbox.type = 'checkbox';
-  checkbox.checked = checked;
-  const span = document.createElement('span');
-  span.textContent = label;
-  row.append(checkbox, span);
-  return { row, checkbox };
 }

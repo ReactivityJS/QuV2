@@ -90,7 +90,22 @@ export const PUSH_ACTION_TYPES = Object.freeze(['create', 'update', 'delete', 'm
  *   see apps/shell/src/load-client-module.js.
  * @property {string} [clientSignature] - base64url Ed25519 signature over
  *   `clientMain`'s bytes, the `clientMain` counterpart to `signature`.
- * @property {Array<{id: string, label: string, type?: 'create'|'update'|'delete'|'mention'|'custom'}>} [pushActions] - Push-
+ * @property {string} [spacePattern] - How this app names the `spaceId`s its
+ *   Threads live under, as a `{param}`-templated string (same syntax as
+ *   `hrefTemplate` below, resolved by @qu/foundation/templates.js's
+ *   `matchTemplate()`/`fillTemplate()`) - e.g. `"calendar-{calendarId}"`,
+ *   `"inbox-{actorPub}"`, or a literal with no `{}` tokens at all for a
+ *   single fixed space like `"chat"`/`"forum"`. This is what
+ *   @qu/foundation/push-routing.js's `matchPushAction()` uses to recognize
+ *   "which app does this write belong to" and extract e.g. `calendarId`
+ *   generically, instead of @qu/relay hard-coding a regex per app (see
+ *   that file's own doc comment for the full mechanism). ONE per app
+ *   (unlike `pushActions`, which can have several) since every Thread an
+ *   app creates shares the same space-naming convention. An app with no
+ *   push-worthy Threads of its own simply omits this field - its writes
+ *   fall back to the generic, un-templated notification wording
+ *   `resolvePushPayload()` already produces for an unrecognized `spaceId`.
+ * @property {Array<{id: string, label: string, type?: 'create'|'update'|'delete'|'mention'|'custom', threadIdPattern?: string, requiresMention?: boolean, titleTemplate?: string, bodyTemplate?: string, urlTemplate?: string, alwaysPush?: boolean}>} [pushActions] - Push-
  *   notification categories THIS app can trigger (e.g. `{id: "mention",
  *   label: "Mentions", type: "mention"}`, `{id: "newMessage", label: "New
  *   messages", type: "create"}`) -
@@ -103,30 +118,57 @@ export const PUSH_ACTION_TYPES = Object.freeze(['create', 'update', 'delete', 'm
  *   of a hard-coded list. An app with no push-worthy events of its own
  *   (most apps) simply omits this field.
  *   `type` is an OPTIONAL, purely descriptive taxonomy hint (treated as
- *   `'custom'` when omitted) - today it's metadata only, not read by
- *   `shouldNotify()`/`#deliverThreadPush()` or any settings UI; it exists
- *   so every app declaring a notification category uses the SAME small
- *   vocabulary from day one instead of inventing its own free-form `id`
- *   naming with no shared meaning, ready for a future notifications
- *   UI/relay-dedup pass to group or icon-badge actions by type without
- *   every existing manifest needing to change.
- * @property {Array<{mount: string, id: string, label: string, icon?: string, hrefTemplate: string, order?: number}>} [actions] -
- *   UI actions THIS app contributes to a named "mount" (an extension point
+ *   `'custom'` when omitted) - it exists so every app declaring a
+ *   notification category uses the SAME small vocabulary from day one
+ *   instead of inventing its own free-form `id` naming with no shared
+ *   meaning.
+ *   The remaining fields (all optional) are what
+ *   @qu/foundation/push-routing.js's `matchPushAction()`/
+ *   `resolvePushPayload()` read to pick WHICH action applies to a given
+ *   write and how to word it - see that file's own doc comment for the
+ *   full matching algorithm:
+ *   - `threadIdPattern` - a `{param}`-templated match against the write's
+ *     `threadId` (e.g. `"guest~{eventId}~{actorPub}"`, or an exact literal
+ *     like `"activity"`) - narrows this action to a specific Thread shape.
+ *     Omitted means "generic" (matches by `requiresMention` instead, see
+ *     below) - checked BEFORE any generic action, so a specific pattern
+ *     always wins over a fallback.
+ *   - `requiresMention` - for a generic (no `threadIdPattern`) action
+ *     only: `true` matches only a write that actually @mentioned this
+ *     recipient, omitted/`false` matches only one that didn't - together
+ *     these two shapes are how e.g. Chat/Forum/Inbox tell "mention" and
+ *     "newMessage" apart, since both share the same `threadId`.
+ *   - `titleTemplate`/`bodyTemplate`/`urlTemplate` - `{param}`-templated
+ *     notification wording/deep-link, filled with this action's own
+ *     matched params PLUS a standard set @qu/relay always provides
+ *     (`authorPub`, `authorShort`, `threadId`, `roomId` - see
+ *     `#deliverThreadPush()`'s own doc comment). Omitting all three keeps
+ *     today's generic fallback wording for JUST this one action.
+ *   - `alwaysPush` (default `false`) - skips Phase 7.4's presence-based
+ *     suppression (no push while the recipient is visibly online) for
+ *     THIS action specifically - e.g. for a future genuinely urgent alert
+ *     type. None of today's actions need this; purely additive.
+ * @property {Array<{slot: string, id: string, label: string, icon?: string, hrefTemplate: string, order?: number}>} [actions] -
+ *   UI actions THIS app contributes to a named "slot" (an extension point
  *   some OTHER app renders, e.g. `"contact-row"`) - the concrete,
- *   declarative half of the "mounts and actions" idea from the
- *   architecture brainstorming (see @qu/foundation/registry.js's
- *   `registerCapability` for the older, still-unused runtime-handler half
- *   of the same idea). A mount-rendering app never imports the
- *   contributing app; it reads every loaded app's `actions` off the SAME
- *   manifest catalog it already fetched (`/apps.json`, see
- *   apps/shell/src/main.js), filters to its own mount id via
- *   `actionsForMount()`, and builds one link per action with
+ *   declarative half of the "action slots" idea from the architecture
+ *   brainstorming (see @qu/foundation/registry.js's `registerCapability`
+ *   for the older, still-unused runtime-handler half of the same idea).
+ *   Called a "slot", not a "mount", specifically to avoid colliding with
+ *   this codebase's OTHER two uses of similar words: the DOM-mounting
+ *   sense (`mod.mount(container, ctx)`) and @qu/foundation's own
+ *   `HookBus` (see hooks.js) - a slot here is pure data, never a live
+ *   callback, which is what "hook" means in THIS codebase. A
+ *   slot-rendering app never imports the contributing app; it reads every
+ *   loaded app's `actions` off the SAME manifest catalog it already
+ *   fetched (`/apps.json`, see apps/shell/src/main.js), filters to its own
+ *   slot id via `actionsForSlot()`, and builds one link per action with
  *   `hrefTemplate`'s `{param}` tokens filled in via `resolveActionHref()`
- *   (see @qu/foundation/actions.js) - e.g. Chat declares `{mount:
+ *   (see @qu/foundation/actions.js) - e.g. Chat declares `{slot:
  *   "contact-row", id: "chat", hrefTemplate: "#/chat/{pub}", ...}`, and
  *   Contact List (which has never heard of Chat) renders it by resolving
  *   `{pub}` to each contact's actorPub. `order` is a sort hint, lower
- *   first (defaults to 0). An app with nothing to contribute to any mount
+ *   first (defaults to 0). An app with nothing to contribute to any slot
  *   simply omits this field.
  */
 
@@ -171,21 +213,35 @@ export function validateManifest(manifest) {
   if (manifest.clientIntegrity !== undefined && !/^sha256-[A-Za-z0-9+/]+=*$/.test(manifest.clientIntegrity)) {
     throw new Error('Invalid manifest: "clientIntegrity" must look like "sha256-<base64>"');
   }
+  if (manifest.spacePattern !== undefined && typeof manifest.spacePattern !== 'string') {
+    throw new Error('Invalid manifest: "spacePattern" must be a string');
+  }
   if (manifest.pushActions !== undefined) {
     const valid = Array.isArray(manifest.pushActions) && manifest.pushActions.every(
       (a) => a && typeof a === 'object' && typeof a.id === 'string' && typeof a.label === 'string'
         && (a.type === undefined || PUSH_ACTION_TYPES.includes(a.type))
+        && (a.threadIdPattern === undefined || typeof a.threadIdPattern === 'string')
+        && (a.requiresMention === undefined || typeof a.requiresMention === 'boolean')
+        && (a.titleTemplate === undefined || typeof a.titleTemplate === 'string')
+        && (a.bodyTemplate === undefined || typeof a.bodyTemplate === 'string')
+        && (a.urlTemplate === undefined || typeof a.urlTemplate === 'string')
+        && (a.alwaysPush === undefined || typeof a.alwaysPush === 'boolean')
     );
-    if (!valid) throw new Error(`Invalid manifest: "pushActions" must be an array of {id, label, type?} where type is one of ${PUSH_ACTION_TYPES.join(', ')}`);
+    if (!valid) {
+      throw new Error(
+        'Invalid manifest: "pushActions" must be an array of {id, label, type?, threadIdPattern?, requiresMention?, '
+        + `titleTemplate?, bodyTemplate?, urlTemplate?, alwaysPush?} where type is one of ${PUSH_ACTION_TYPES.join(', ')}`
+      );
+    }
   }
   if (manifest.actions !== undefined) {
     const valid = Array.isArray(manifest.actions) && manifest.actions.every(
       (a) => a && typeof a === 'object'
-        && typeof a.mount === 'string' && typeof a.id === 'string' && typeof a.label === 'string' && typeof a.hrefTemplate === 'string'
+        && typeof a.slot === 'string' && typeof a.id === 'string' && typeof a.label === 'string' && typeof a.hrefTemplate === 'string'
         && (a.icon === undefined || typeof a.icon === 'string')
         && (a.order === undefined || typeof a.order === 'number')
     );
-    if (!valid) throw new Error('Invalid manifest: "actions" must be an array of {mount, id, label, hrefTemplate, icon?, order?}');
+    if (!valid) throw new Error('Invalid manifest: "actions" must be an array of {slot, id, label, hrefTemplate, icon?, order?}');
   }
   return manifest;
 }

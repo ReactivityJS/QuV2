@@ -8,11 +8,12 @@
   "icon": "💭",
   "navOrder": 11,
   "requires": ["document-service", "collection-service", "thread-service"],
+  "spacePattern": "chat",
   "pushActions": [
-    { "id": "newMessage", "label": "New messages", "type": "create" },
-    { "id": "mention", "label": "Mentions", "type": "mention" }
+    { "id": "newMessage", "label": "New messages", "type": "create", "titleTemplate": "New message in Chat", "bodyTemplate": "~{authorShort}… sent a message", "urlTemplate": "#/chat/{roomId}" },
+    { "id": "mention", "label": "Mentions", "type": "mention", "requiresMention": true, "titleTemplate": "Mentioned in Chat", "bodyTemplate": "~{authorShort}… sent a message", "urlTemplate": "#/chat/{roomId}" }
   ],
   "actions": [
-    { "mount": "contact-row", "id": "chat", "label": "Chat", "icon": "💬", "hrefTemplate": "#/chat/{pub}" }
+    { "slot": "contact-row", "id": "chat", "label": "Chat", "icon": "💬", "hrefTemplate": "#/chat/{pub}" }
   ]
 }

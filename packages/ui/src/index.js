@@ -4,3 +4,4 @@ export { renderSubpage } from './subpage.js';
 export { renderAvatar } from './avatar.js';
 export { injectStyle } from './style.js';
 export { renderFlagToggle } from './flag-toggle.js';
+export { renderNotificationPrefsSection } from './notification-prefs.js';

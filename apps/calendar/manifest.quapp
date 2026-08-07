@@ -8,9 +8,10 @@
   "icon": "📅",
   "navOrder": 14,
   "requires": ["document-service", "collection-service", "thread-service"],
+  "spacePattern": "calendar-{calendarId}",
   "pushActions": [
-    { "id": "invite", "label": "Calendar invitations", "type": "create" },
-    { "id": "eventChange", "label": "Shared calendar changes", "type": "update" },
-    { "id": "guestInvite", "label": "Event invitations", "type": "create" }
+    { "id": "invite", "label": "Calendar invitations", "type": "create", "titleTemplate": "Calendar invitation", "bodyTemplate": "You were invited to a shared calendar.", "urlTemplate": "#/calendar/{calendarId}" },
+    { "id": "eventChange", "label": "Shared calendar changes", "type": "update", "threadIdPattern": "activity", "titleTemplate": "Calendar updated", "bodyTemplate": "A shared calendar you belong to has new activity.", "urlTemplate": "#/calendar/{calendarId}" },
+    { "id": "guestInvite", "label": "Event invitations", "type": "create", "threadIdPattern": "guest~{eventId}~{actorPub}", "titleTemplate": "Event invitation", "bodyTemplate": "You were invited to an event.", "urlTemplate": "#/calendar/{calendarId}/{eventId}" }
   ]
 }

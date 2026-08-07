@@ -39,8 +39,8 @@
  *      invite flow uses, proving a non-Thread-native app gets a properly
  *      labeled, deep-linked notification "for free" the same way Calendar's
  *      invite flow already did.
- *  10. Mounts and actions: actionsForMount()/resolveActionHref() (the
- *      Contact List / Chat "contact-row" pattern).
+ *  10. Action slots: actionsForSlot()/resolveActionHref() (the Contact
+ *      List / Chat "contact-row" pattern).
  *  11. Sync freshness/reconnect catch-up: a message posted while a peer
  *      genuinely wasn't connected (transport closed, then reconnected) is
  *      NOT delivered by subscribe() alone, but IS picked up by @qu/services'
@@ -123,6 +123,14 @@
  *      no redundant web push for a subsequent @mention (in-app notification
  *      still arrives), while a never-connected actor still gets the regular
  *      web-push path - proving "online" doesn't accidentally suppress ALL pushes.
+ *  25. Push routing: @qu/foundation's matchPushAction()/resolvePushPayload()
+ *      - the generic, manifest-data-driven replacement for what used to be
+ *      a hard-coded per-app if/else chain in @qu/relay's
+ *      #deliverThreadPush() - loaded against the 5 REAL app manifests
+ *      (chat/forum/inbox/calendar/geochase) and proven to reproduce every
+ *      one of their pre-refactor notification title/body/url strings
+ *      byte-exact, including Calendar's 3 threadId shapes, Chat's
+ *      group-vs-1:1 `roomId`, and the generic/unknown-app fallback.
  *
  * NOT covered here (verified manually with Playwright during development,
  * not wired into this script to avoid adding a browser-automation
@@ -137,7 +145,7 @@
  * built on is what sections 18-19 above actually verify.
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
@@ -598,28 +606,28 @@ try {
   }
 
   // ---------------------------------------------------------------------
-  section('Mounts and actions: actionsForMount()/resolveActionHref() (Contact List / Chat pattern)');
+  section('Action slots: actionsForSlot()/resolveActionHref() (Contact List / Chat pattern)');
   // ---------------------------------------------------------------------
   {
-    const { actionsForMount, resolveActionHref } = await import('@qu/foundation');
+    const { actionsForSlot, resolveActionHref } = await import('@qu/foundation');
 
     // The real catalog shape @qu/relay's apps-catalog.js builds from
     // manifest.quapp files - see apps/chat/manifest.quapp's `actions` and
     // apps/contact-list/client.js, which consumes exactly this.
     const apps = [
-      { name: 'chat', actions: [{ mount: 'contact-row', id: 'chat', label: 'Chat', icon: '💬', hrefTemplate: '#/chat/{pub}' }] },
+      { name: 'chat', actions: [{ slot: 'contact-row', id: 'chat', label: 'Chat', icon: '💬', hrefTemplate: '#/chat/{pub}' }] },
       { name: 'contact-list', actions: [] },
       { name: 'notes' }, // no `actions` field at all - must be tolerated, not just an empty array
     ];
 
-    const contactRowActions = actionsForMount(apps, 'contact-row');
+    const contactRowActions = actionsForSlot(apps, 'contact-row');
     assert.equal(contactRowActions.length, 1, 'only chat declared a contact-row action');
     assert.equal(contactRowActions[0].appId, 'chat');
     assert.equal(resolveActionHref(contactRowActions[0], { pub: 'AbC123-_' }), '#/chat/AbC123-_', 'base64url pubkeys must survive the template substitution unmangled');
-    assert.equal(actionsForMount(apps, 'no-such-mount').length, 0, 'an unknown mount id must yield an empty list, not throw');
+    assert.equal(actionsForSlot(apps, 'no-such-slot').length, 0, 'an unknown slot id must yield an empty list, not throw');
     assert.throws(() => resolveActionHref(contactRowActions[0], {}), /needs param "pub"/, 'a missing template param must fail loudly, not silently produce a broken href');
 
-    console.log('    OK - actionsForMount()/resolveActionHref() filter, sort and resolve declared actions correctly');
+    console.log('    OK - actionsForSlot()/resolveActionHref() filter, sort and resolve declared actions correctly');
   }
 
   // ---------------------------------------------------------------------
@@ -1451,6 +1459,94 @@ try {
     onlineClient.sync.close(); onlineClient.transport.close();
     posterClient.sync.close(); posterClient.transport.close();
     console.log('    OK - a visibly online actor is skipped for redundant web push (in-app notification still arrives), while a never-connected actor still gets the regular push path');
+  }
+
+  // ---------------------------------------------------------------------
+  section('Push routing: matchPushAction()/resolvePushPayload() against the 5 REAL app manifests, byte-exact vs. the pre-refactor hard-coded strings');
+  // ---------------------------------------------------------------------
+  {
+    const { matchPushAction, resolvePushPayload } = await import('@qu/foundation');
+
+    // Loaded from the ACTUAL manifest.quapp files (not hand-typed synthetic
+    // data) - this is the exact same shape @qu/relay's buildAppsCatalog()
+    // exposes (name/spacePattern/pushActions), proving the real, shipped
+    // manifest data - not just the matching algorithm in isolation -
+    // reproduces today's pre-refactor #deliverThreadPush() wording exactly.
+    const manifestNames = ['chat', 'forum', 'inbox', 'calendar', 'geochase'];
+    const apps = await Promise.all(manifestNames.map(async (name) => {
+      const raw = JSON.parse(await readFile(join(REPO_ROOT, 'apps', name, 'manifest.quapp'), 'utf8'));
+      return { name: raw.name, spacePattern: raw.spacePattern, pushActions: raw.pushActions };
+    }));
+
+    function std({ authorPub = 'AuthorPubXYZ1234567', threadId, roomId, mention }) {
+      return { authorPub, authorShort: authorPub.slice(0, 10), threadId, roomId, mention };
+    }
+    function resolve(spaceId, threadId, { mention = false, roomId = threadId, authorPub } = {}) {
+      const matched = matchPushAction(apps, spaceId, threadId, { mention });
+      return { matched, payload: resolvePushPayload(matched, std({ threadId, roomId, mention, authorPub })) };
+    }
+
+    // Calendar's 3 threadId shapes - byte-exact vs. today's calendarFunctionName ternary.
+    assert.deepEqual(resolve('calendar-cal1', 'invite-somepub').payload, {
+      appId: 'calendar', title: 'Calendar invitation', body: 'You were invited to a shared calendar.', url: '#/calendar/cal1',
+    }, 'calendar invite wording must match pre-refactor exactly');
+    assert.deepEqual(resolve('calendar-cal1', 'activity').payload, {
+      appId: 'calendar', title: 'Calendar updated', body: 'A shared calendar you belong to has new activity.', url: '#/calendar/cal1',
+    }, 'calendar eventChange wording must match pre-refactor exactly');
+    assert.deepEqual(resolve('calendar-cal1', 'guest~ev42~somepub').payload, {
+      appId: 'calendar', title: 'Event invitation', body: 'You were invited to an event.', url: '#/calendar/cal1/ev42',
+    }, 'calendar guestInvite wording (deep-linking to the specific event) must match pre-refactor exactly');
+
+    // Geo Chase.
+    assert.deepEqual(resolve('geochase-game7', 'invite-somepub').payload, {
+      appId: 'geochase', title: 'Geo Chase invitation', body: 'You were invited to a Geo Chase game.', url: '#/geochase/game7',
+    }, 'geochase invite wording must match pre-refactor exactly');
+
+    // Chat: newMessage/mention, group vs 1:1 `roomId` (the generalized
+    // replacement for the old `appId === 'chat'` special case).
+    assert.deepEqual(
+      resolve('chat', 'group123', { mention: false, roomId: 'g/group123', authorPub: 'AuthorPubXYZ1234567' }).payload,
+      { appId: 'chat', title: 'New message in Chat', body: '~AuthorPubX… sent a message', url: '#/chat/g/group123' },
+      'chat newMessage in a GROUP room must deep-link via g/<groupId>, matching pre-refactor exactly'
+    );
+    assert.deepEqual(
+      resolve('chat', 'somehash1to1', { mention: true, roomId: 'AuthorPubXYZ1234567', authorPub: 'AuthorPubXYZ1234567' }).payload,
+      { appId: 'chat', title: 'Mentioned in Chat', body: '~AuthorPubX… sent a message', url: '#/chat/AuthorPubXYZ1234567' },
+      'chat mention in a 1:1 room must deep-link via the other member\'s pub, matching pre-refactor exactly'
+    );
+
+    // Forum: mention-only (no newMessage action - a public thread only ever pushes on @mention).
+    assert.deepEqual(resolve('forum', 'topic1', { mention: true, authorPub: 'AuthorPubXYZ1234567' }).payload, {
+      appId: 'forum', title: 'Mentioned in forum', body: '~AuthorPubX… sent a message', url: '#/forum',
+    }, 'forum mention wording must match pre-refactor exactly');
+
+    // Inbox: newMessage-only.
+    assert.deepEqual(resolve('inbox-recipientPub', 'inbox', { mention: false, authorPub: 'AuthorPubXYZ1234567' }).payload, {
+      appId: 'inbox', title: 'New message in inbox', body: '~AuthorPubX… sent a message', url: '#/inbox',
+    }, 'inbox newMessage wording must match pre-refactor exactly');
+
+    // Edge case: inbox declares only 'newMessage' (no 'mention' action) - a
+    // hypothetical mention:true write must NOT incorrectly match
+    // 'newMessage' (requiresMention mismatch), it must fall through to the
+    // generic fallback - exactly reproducing pre-refactor's literal
+    // `mention ? 'mention' : 'newMessage'` ternary for an app that never
+    // declared a dedicated 'mention' pushAction.
+    const inboxMentionMatch = matchPushAction(apps, 'inbox-recipientPub', 'inbox', { mention: true });
+    assert.equal(inboxMentionMatch.action, null, 'inbox has no requiresMention:true action - a mention write must fall through to no specific action, not silently reuse newMessage');
+    assert.equal(
+      resolvePushPayload(inboxMentionMatch, std({ threadId: 'inbox', roomId: 'inbox', mention: true, authorPub: 'AuthorPubXYZ1234567' })).title,
+      'Mentioned in inbox'
+    );
+
+    // An app with no spacePattern at all (or an unrecognized spaceId) must
+    // fall back to the raw spaceId, exactly like pre-refactor's unconditional fallback.
+    const unknown = resolve('some-future-app-space', 'thread1', { mention: false, authorPub: 'AuthorPubXYZ1234567' });
+    assert.equal(unknown.matched.appId, 'some-future-app-space');
+    assert.deepEqual(unknown.payload, {
+      appId: 'some-future-app-space', title: 'New message in some-future-app-space', body: '~AuthorPubX… sent a message', url: '#/some-future-app-space',
+    }, 'an unrecognized spaceId must fall back to generic, raw-spaceId wording');
+
+    console.log('    OK - matchPushAction()/resolvePushPayload() reproduce every one of the 5 real manifests\' pre-refactor notification wording byte-exact, including the calendar/chat edge cases and the generic/unknown-app fallback');
   }
 
   // ---------------------------------------------------------------------

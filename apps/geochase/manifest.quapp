@@ -8,7 +8,8 @@
   "icon": "🧭",
   "navOrder": 14,
   "requires": ["document-service", "collection-service", "thread-service"],
+  "spacePattern": "geochase-{gameId}",
   "pushActions": [
-    { "id": "invite", "label": "Game invites", "type": "create" }
+    { "id": "invite", "label": "Game invites", "type": "create", "titleTemplate": "Geo Chase invitation", "bodyTemplate": "You were invited to a Geo Chase game.", "urlTemplate": "#/geochase/{gameId}" }
   ]
 }

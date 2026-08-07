@@ -39,8 +39,12 @@ export function buildAppsCatalog(loader, disabledAppNames = []) {
       clientIntegrity: manifest.clientIntegrity,
       clientSignature: manifest.clientSignature,
       enabled: !disabledAppNames.includes(manifest.name),
+      // See @qu/foundation/push-routing.js's `matchPushAction()` - this and
+      // `pushActions` below are what it reads to generically recognize
+      // which app a Thread write belongs to and how to word its notice.
+      spacePattern: manifest.spacePattern,
       pushActions: manifest.pushActions ?? [],
-      // See @qu/foundation/actions.js's `actionsForMount()` - this is the
+      // See @qu/foundation/actions.js's `actionsForSlot()` - this is the
       // catalog entries it reads `.actions` off of.
       actions: manifest.actions ?? [],
     });

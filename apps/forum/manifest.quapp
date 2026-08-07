@@ -8,7 +8,8 @@
   "icon": "💬",
   "navOrder": 10,
   "requires": ["document-service", "collection-service", "thread-service"],
+  "spacePattern": "forum",
   "pushActions": [
-    { "id": "mention", "label": "Mentions", "type": "mention" }
+    { "id": "mention", "label": "Mentions", "type": "mention", "requiresMention": true, "titleTemplate": "Mentioned in forum", "bodyTemplate": "~{authorShort}… sent a message", "urlTemplate": "#/forum" }
   ]
 }

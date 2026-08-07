@@ -6,13 +6,13 @@
  * snapshot taken at contact-time).
  *
  * Each row's action links (Chat today, potentially Call/others later) are
- * NOT hardcoded here - this app exposes a "contact-row" MOUNT, and renders
+ * NOT hardcoded here - this app exposes a "contact-row" SLOT, and renders
  * whatever OTHER apps declared for it in their own manifest's `actions`
- * field (see @qu/foundation/actions.js's `actionsForMount()`). Contact
- * List has never heard of Chat; Chat's manifest just declares `{mount:
+ * field (see @qu/foundation/actions.js's `actionsForSlot()`). Contact
+ * List has never heard of Chat; Chat's manifest just declares `{slot:
  * "contact-row", id: "chat", hrefTemplate: "#/chat/{pub}"}`, and this file
  * resolves `{pub}` per contact. A future Call app (or anything else) shows
- * up here automatically the moment its manifest declares the same mount -
+ * up here automatically the moment its manifest declares the same slot -
  * no change needed on this side.
  *
  * Also has a search box filtering by alias or pub/FP substring. Unlike User
@@ -23,7 +23,7 @@
  * they just show up here like anyone else.
  */
 import { createI18n } from '@qu/i18n';
-import { actionsForMount, resolveActionHref } from '@qu/foundation';
+import { actionsForSlot, resolveActionHref } from '@qu/foundation';
 import { renderAvatar, injectStyle } from '@qu/ui';
 import { formatActorLabel, matchesActorQuery } from '@qu/services';
 
@@ -57,14 +57,14 @@ const STYLE = `
 `;
 
 
-const CONTACT_ROW_MOUNT = 'contact-row';
+const CONTACT_ROW_SLOT = 'contact-row';
 
 export function mount(container, { services, apps }) {
   injectStyle(STYLE_ID, STYLE);
   let stopped = false;
   let filterText = '';
   let contacts = [];
-  const rowActions = actionsForMount(apps, CONTACT_ROW_MOUNT);
+  const rowActions = actionsForSlot(apps, CONTACT_ROW_SLOT);
 
   const heading = document.createElement('h1');
   heading.textContent = t('title');
@@ -138,7 +138,7 @@ function row({ actorPub, profile }, services, refresh, rowActions) {
   name.textContent = alias;
   li.appendChild(name);
 
-  // Every action any OTHER app declared for the "contact-row" mount (see
+  // Every action any OTHER app declared for the "contact-row" slot (see
   // this file's own doc comment) - Chat today, whatever else registers
   // itself here tomorrow, with zero changes needed in THIS file.
   for (const action of rowActions) {

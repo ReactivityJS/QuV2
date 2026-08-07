@@ -24,7 +24,7 @@ import { WebSocketServer } from 'ws';
 
 import { QuCrypto } from '@qu/core';
 import { QuRuntime } from '@qu/runtime';
-import { Registry } from '@qu/foundation';
+import { Registry, matchPushAction, resolvePushPayload } from '@qu/foundation';
 import { QuLoader, discoverLocalPackages } from '@qu/loader';
 import { QuIdentityEngine } from '@qu/identity';
 import { SyncEngine } from '@qu/sync';
@@ -402,21 +402,6 @@ export class QuRelay {
 
     const authorPub = quBit.pub ? QuCrypto.toBase64Url(QuCrypto.fromBase64(quBit.pub)) : null;
     const mentions = Array.isArray(quBit.val?.mentions) ? quBit.val.mentions : [];
-    // `calendar-<id>` is Calendar's per-calendar space (see
-    // apps/calendar/client.js's `activity`/`invite-<actorPub>` threads) -
-    // recognized generically like `inbox-<pub>` below so every shared
-    // calendar collapses into ONE 'calendar' row in notification settings
-    // instead of one per calendar id.
-    const calendarMatch = String(spaceId).match(/^calendar-(.+)$/);
-    // `geochase-<id>` is Geo Chase's per-game space (see
-    // @qu/services/geochase-service.js's `spaceFor()` and
-    // apps/geochase/client.js's `notifyInvitees()`) - recognized the same
-    // way `calendar-<id>` is above, so every game collapses into ONE
-    // 'geochase' row in notification settings instead of one per game id.
-    const geochaseMatch = String(spaceId).match(/^geochase-(.+)$/);
-    const appId = spaceId === 'forum' ? 'forum' : spaceId === 'chat' ? 'chat'
-      : String(spaceId).startsWith('inbox-') ? 'inbox' : calendarMatch ? 'calendar'
-      : geochaseMatch ? 'geochase' : String(spaceId);
 
     /** @type {Array<{actorPub: string, mention: boolean}>} */
     let candidates;
@@ -429,75 +414,47 @@ export class QuRelay {
       candidates = mentions.filter((pub) => pub !== authorPub).map((actorPub) => ({ actorPub, mention: true }));
     }
 
-    // Calendar has three distinct push-worthy actions (see its manifest's
-    // `pushActions`) distinguished by threadId, not by `mention`:
-    //   - `activity` - candidates are every OTHER current member of the
-    //     calendar (a growing reader list, see ThreadService.addReader()).
-    //   - `invite-<actorPub>` - only ever has that one invitee as a
-    //     candidate (see ThreadService's `mail` preset): a calendar-level share.
-    //   - `guest~<eventId>~<actorPub>` - same single-candidate shape, but
-    //     for inviting one person to one specific EVENT rather than the
-    //     whole calendar (see apps/calendar/client.js's `inviteGuest()`).
-    //     `~` is used as the separator (not `-`) because both a UUID event
-    //     id and a base64url actor pubkey can themselves contain `-`,
-    //     which would make splitting the threadId back apart ambiguous.
-    const calendarFunctionName = appId !== 'calendar' ? null
-      : threadId === 'activity' ? 'eventChange'
-      : threadId.startsWith('guest~') ? 'guestInvite'
-      : 'invite';
-    // Geo Chase only ever posts one kind of notice (an `invite-<pub>`
-    // thread on game creation - see apps/geochase/client.js's
-    // `notifyInvitees()`), so unlike Calendar there's no second threadId to
-    // branch on.
-    const geochaseFunctionName = appId === 'geochase' ? 'invite' : null;
+    // Which app/action a Thread write belongs to, and how to word its
+    // notice, is entirely DATA-driven (see @qu/foundation/push-routing.js's
+    // own doc comment for the full matching algorithm) - no per-app code
+    // lives here anymore. Built once per write (the catalog itself is
+    // static per-boot data; only `mention` below varies per candidate).
+    const catalog = buildAppsCatalog(this.loader);
 
     for (const { actorPub, mention } of candidates) {
+      const matched = matchPushAction(catalog, spaceId, threadId, { mention });
+      const { appId } = matched;
+      const functionName = matched.action?.id ?? (mention ? 'mention' : 'newMessage');
+
       const prefs = await this.services.notificationPrefs.getPrefsFor(actorPub);
-      const functionName = calendarFunctionName ?? geochaseFunctionName ?? (mention ? 'mention' : 'newMessage');
       if (!NotificationPrefsService.shouldNotify(prefs, { appId, mention, functionName })) continue;
 
-      // Content-blind by design (see this method's own doc comment) - even
-      // for Calendar/Geo Chase, the relay never decrypts the activity/
-      // invite body, so wording stays generic. The one thing it CAN safely
-      // add is the calendar/game id itself: that's the storage path
-      // (`spaceId`), not encrypted content, so the notification can
-      // deep-link straight to the specific calendar/game instead of just
-      // the app root.
-      // Chat deep-links to the SPECIFIC room, not just `#/chat` (the room
-      // list) - see apps/chat/client.js's own doc comment for its route
-      // scheme (`#/chat/<peerActorPub>` for 1:1, `#/chat/g/<groupId>` for a
-      // group). A group room's `threadId` IS its groupId (see
-      // THREAD_PRESETS.group), so that's directly usable; a 1:1 room's
-      // `threadId` is a one-way hash of both members' pubkeys (see
-      // apps/chat/client.js's `roomId()`) and can't be reversed back into a
-      // pubkey - but it doesn't need to be: a 1:1 room has EXACTLY two
-      // readers, so from THIS candidate's point of view the "other side" of
-      // the conversation is simply whoever authored this message (`authorPub`
-      // is already excluded from `candidates` above, so it's never the
-      // recipient themselves).
-      const chatUrl = appId === 'chat'
-        ? (config.kind === 'group' ? `#/chat/g/${threadId}` : `#/chat/${authorPub}`)
-        : null;
-
-      const payload = calendarFunctionName === 'invite'
-        ? { title: 'Calendar invitation', body: 'You were invited to a shared calendar.', appId, url: `#/calendar/${calendarMatch[1]}` }
-        : calendarFunctionName === 'eventChange'
-        ? { title: 'Calendar updated', body: 'A shared calendar you belong to has new activity.', appId, url: `#/calendar/${calendarMatch[1]}` }
-        : calendarFunctionName === 'guestInvite'
-        // threadId is `guest~<eventId>~<actorPub>` - the middle segment is
-        // the event id, safe to surface (routing metadata, not decrypted
-        // content) so the notification deep-links straight to the event.
-        ? { title: 'Event invitation', body: 'You were invited to an event.', appId, url: `#/calendar/${calendarMatch[1]}/${threadId.split('~')[1]}` }
-        : geochaseFunctionName === 'invite'
-        ? { title: 'Geo Chase invitation', body: 'You were invited to a Geo Chase game.', appId, url: `#/geochase/${geochaseMatch[1]}` }
-        : chatUrl
-        ? { title: mention ? 'Mentioned in Chat' : 'New message in Chat', body: `~${(authorPub ?? 'someone').slice(0, 10)}… sent a message`, appId, url: chatUrl }
-        : {
-            title: mention ? `Mentioned in ${appId}` : `New message in ${appId}`,
-            body: `~${(authorPub ?? 'someone').slice(0, 10)}… sent a message`,
-            appId,
-            url: `#/${appId}`,
-          };
+      // Content-blind by design (see this method's own doc comment) - the
+      // relay never decrypts a Thread's message body, so wording comes
+      // entirely from the matched action's templates (or the generic
+      // fallback), never from actual content. `roomId` is the one
+      // "standard param" genuinely relay-specific enough that
+      // push-routing.js (a pure, manifest-only module with no access to a
+      // live Thread's `config`) can't compute itself: for a private
+      // 1:1-vs-group Thread (e.g. Chat's `kind`), the URL SEGMENT(S) after
+      // `#/chat/` differ by shape - a group room deep-links via `g/<groupId>`
+      // (see apps/chat/client.js's own doc comment on its route scheme; a
+      // group room's `threadId` IS its groupId, see THREAD_PRESETS.group),
+      // a 1:1 room deep-links via the OTHER member's pubkey directly. A
+      // 1:1 room's `threadId` is a one-way hash of both members' pubkeys
+      // (see apps/chat/client.js's `roomId()`) that can't be reversed back
+      // into a pubkey - it doesn't need to be: a 1:1 room has EXACTLY two
+      // readers, so from THIS candidate's point of view the "other side"
+      // is simply whoever authored this message (`authorPub` is already
+      // excluded from `candidates` above, so it's never the recipient
+      // themselves). A STANDARD param, not hardcoded to "chat" - any
+      // future private 1:1-vs-group app's `urlTemplate` can reference
+      // `{roomId}` the same way, with its own route's `g/`-equivalent
+      // prefix baked in here if it needs one.
+      const roomId = config.kind === 'group' ? `g/${threadId}` : authorPub;
+      const payload = resolvePushPayload(matched, {
+        authorPub, authorShort: (authorPub ?? 'someone').slice(0, 10), threadId, roomId, mention,
+      });
 
       try {
         await this.#writeInAppNotification(actorPub, payload);
@@ -509,8 +466,10 @@ export class QuRelay {
       // Still visibly connected (see #recordPresence()/PRESENCE_FRESH_MS
       // above) - the in-app notification just written above already covers
       // them (their own client sees it live via subscribe(), same as the
-      // header badge), a redundant push would just be noise.
-      if (this.#isRecentlyOnline(actorPub)) continue;
+      // header badge), a redundant push would just be noise. `alwaysPush`
+      // (see manifest.js's own doc comment) lets one specific action opt
+      // OUT of this suppression - none of today's actions set it.
+      if (this.#isRecentlyOnline(actorPub) && !matched.action?.alwaysPush) continue;
       const subscriptions = await this.services.pushSubscriptions.listSubscriptionsFor(actorPub);
       for (const subscription of subscriptions) {
         try {

@@ -8,7 +8,8 @@
   "icon": "📥",
   "navOrder": 12,
   "requires": ["document-service", "collection-service", "thread-service"],
+  "spacePattern": "inbox-{actorPub}",
   "pushActions": [
-    { "id": "newMessage", "label": "New mail", "type": "create" }
+    { "id": "newMessage", "label": "New mail", "type": "create", "titleTemplate": "New message in inbox", "bodyTemplate": "~{authorShort}… sent a message", "urlTemplate": "#/inbox" }
   ]
 }

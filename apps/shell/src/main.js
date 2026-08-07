@@ -584,8 +584,8 @@ class Shell {
       qu: this.qu, services: this.Qu, appId, segments,
       // The full manifest catalog (same data `_refreshApps()` fetched from
       // `/apps.json`) - lets a mounted app discover what OTHER apps have
-      // declared for one of ITS OWN mount points (see
-      // @qu/foundation/actions.js's `actionsForMount()`) without ever
+      // declared for one of ITS OWN slots (see
+      // @qu/foundation/actions.js's `actionsForSlot()`) without ever
       // importing them: only one app's `clientMain` is ever loaded at a
       // time (see this method's own doc comment above), so this static
       // catalog is the only cross-app discovery a mounted app has.
